@@ -8,7 +8,6 @@ async function executeAgentPipeline(userInput: string, targetFiles: string[], co
   console.log(`User Input: "${userInput}"`);
   console.log(`=========================================`);
 
-  // 1. Initialize State
   let state: KaizenStateType = {
     userInput,
     targetFiles,
@@ -20,7 +19,6 @@ async function executeAgentPipeline(userInput: string, targetFiles: string[], co
     status: "INITIALIZED"
   };
 
-  // 2. Run Intent Agent
   console.log("-> Running Intent Agent...");
   const intentOutput = await intentAgentNode(state);
   console.log(`Result Status: ${intentOutput.status}`);
@@ -32,7 +30,6 @@ async function executeAgentPipeline(userInput: string, targetFiles: string[], co
     targetFiles: intentOutput.targetFiles
   };
 
-  // 3. Conditional Routing
   if (state.status === "ROUTED_EXPLAIN_CODE") {
     console.log("\n[Route: Explain Code] Skipping planning and generation.");
     console.log("Explanation logic triggered for context:");
@@ -86,14 +83,12 @@ async function runDemo() {
   } else {
     console.log("=== KAIZEN MULTI-AGENT ROUTER DEMO ===");
 
-    // Demo 1: Code Generation request
     await executeAgentPipeline(
       "Create a simple math utility function that adds two numbers together.",
       ["src/mathUtils.ts"],
       "export function multiply(a: number, b: number) { return a * b; }"
     );
 
-    // Demo 2: Code Explanation request
     await executeAgentPipeline(
       "samjha do how this multiply function works",
       ["src/mathUtils.ts"],

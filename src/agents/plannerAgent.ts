@@ -1,4 +1,4 @@
-import { z } from 'zod'; //type validation schema
+import { z } from 'zod';
 import { ChatGroq } from '@langchain/groq';
 import * as dotenv from 'dotenv';
 import { KaizenState, PlanStep } from '../state';
