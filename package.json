@@ -1,0 +1,21 @@
+{
+  "name": "kaizen-minimal-agents",
+  "version": "1.0.0",
+  "description": "Minimal standalone Kaizen AI Planner and Coder agents",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsc && node dist/index.js"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.9",
+    "@langchain/groq": "^1.3.1",
+    "dotenv": "^17.4.2",
+    "web-tree-sitter": "^0.26.13",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}
