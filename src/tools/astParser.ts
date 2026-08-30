@@ -67,7 +67,6 @@ export class ASTParserTool {
         symbols.push({ type: 'function_declaration', name: m[1], text: m[0], language: 'cpp' });
       }
     } else {
-      // TypeScript / JavaScript
       const tsMatches = sourceCode.matchAll(/(?:export\s+)?(?:async\s+)?(?:function|class|const|let|var)\s+([a-zA-Z0-9_$]+)/g);
       for (const m of tsMatches) {
         symbols.push({ type: 'declaration', name: m[1], text: m[0], language: 'typescript' });
