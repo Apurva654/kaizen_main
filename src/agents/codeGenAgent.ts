@@ -10,7 +10,17 @@ export const CodeGenSchema = z.object({
   explanations: z.string().describe("Explanation of code implementation choices")
 });
 
-const PROTECTED_PATTERNS = [/\.env($|\.)/, /package-lock\.json$/, /\.git\//, /\.vscode\//, /node_modules\//];
+const PROTECTED_PATTERNS = [
+  /\.env($|\.)/, 
+  /package-lock\.json$/, 
+  /\.git\//, 
+  /\.vscode\//, 
+  /node_modules\//,
+  /src\/index\.ts$/,
+  /src\/state\.ts$/,
+  /src\/agents\//,
+  /src\/tools\//
+];
 
 export function isProtectedFile(filePath: string): boolean {
   return PROTECTED_PATTERNS.some((pattern) => pattern.test(filePath));

@@ -42,7 +42,7 @@ Extract any target file paths explicitly mentioned or implied in the request.`;
       const intent = result.intent || 'GENERATE_CODE';
       const targetFiles = result.targetFiles && result.targetFiles.length > 0
         ? result.targetFiles
-        : (state.targetFiles.length > 0 ? state.targetFiles : ['src/index.ts']);
+        : (state.targetFiles.length > 0 ? state.targetFiles : ['src/sandbox.ts']);
 
       return {
         status: `ROUTED_${intent}`,
@@ -66,6 +66,6 @@ Extract any target file paths explicitly mentioned or implied in the request.`;
 
   return {
     status: `ROUTED_${intent}`,
-    targetFiles: state.targetFiles.length > 0 ? state.targetFiles : ['src/index.ts']
+    targetFiles: state.targetFiles.length > 0 ? state.targetFiles : ['src/sandbox.ts']
   };
 }

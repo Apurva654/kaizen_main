@@ -19,7 +19,7 @@ export const PlannerSchema = z.object({
 });
 
 export async function plannerAgentNode(state: typeof KaizenState.State) {
-  const targetFiles = state.targetFiles.length > 0 ? state.targetFiles : ['src/index.ts'];
+  const targetFiles = state.targetFiles.length > 0 ? state.targetFiles : ['src/sandbox.ts'];
 
   const astParser = new ASTParserTool();
   const extractedSymbols = state.extractedContext
