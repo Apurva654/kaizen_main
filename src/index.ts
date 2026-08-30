@@ -73,21 +73,33 @@ async function executeAgentPipeline(userInput: string, targetFiles: string[], co
 }
 
 async function runDemo() {
-  console.log("=== KAIZEN MULTI-AGENT ROUTER DEMO ===");
+  const args = process.argv.slice(2);
+  const cliQuery = args.join(' ').trim();
 
-  // Demo 1: Code Generation request
-  await executeAgentPipeline(
-    "Create a simple math utility function that adds two numbers together.",
-    ["src/mathUtils.ts"],
-    "export function multiply(a: number, b: number) { return a * b; }"
-  );
+  if (cliQuery) {
+    console.log("=== KAIZEN RUNNING CUSTOM QUERY ===");
+    await executeAgentPipeline(
+      cliQuery,
+      ["src/mathUtils.ts"],
+      "export function multiply(a: number, b: number) { return a * b; }"
+    );
+  } else {
+    console.log("=== KAIZEN MULTI-AGENT ROUTER DEMO ===");
 
-  // Demo 2: Code Explanation request
-  await executeAgentPipeline(
-    "samjha do how this multiply function works",
-    ["src/mathUtils.ts"],
-    "export function multiply(a: number, b: number) { return a * b; }"
-  );
+    // Demo 1: Code Generation request
+    await executeAgentPipeline(
+      "Create a simple math utility function that adds two numbers together.",
+      ["src/mathUtils.ts"],
+      "export function multiply(a: number, b: number) { return a * b; }"
+    );
+
+    // Demo 2: Code Explanation request
+    await executeAgentPipeline(
+      "samjha do how this multiply function works",
+      ["src/mathUtils.ts"],
+      "export function multiply(a: number, b: number) { return a * b; }"
+    );
+  }
 }
 
 runDemo().catch(err => {
