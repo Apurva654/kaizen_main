@@ -1,17 +1,20 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import { KaizenStateType } from './state';
 import { intentAgentNode } from './agents/intentAgent';
 import { plannerAgentNode } from './agents/plannerAgent';
 import { codeGenAgentNode } from './agents/codeGenAgent';
 
-async function executeAgentPipeline(userInput: string, targetFiles: string[], context: string) {
+async function executeAgentPipeline(userInput: string) {
   console.log(`\n=========================================`);
   console.log(`User Input: "${userInput}"`);
   console.log(`=========================================`);
 
+  // 1. Initialize State with empty context and files first (will be filled dynamically)
   let state: KaizenStateType = {
     userInput,
-    targetFiles,
-    extractedContext: context,
+    targetFiles: [],
+    extractedContext: "",
     plan: [],
     generatedPatch: "",
     choices: [],
@@ -19,6 +22,7 @@ async function executeAgentPipeline(userInput: string, targetFiles: string[], co
     status: "INITIALIZED"
   };
 
+  // 2. Run Intent Agent to identify targets
   console.log("-> Running Intent Agent...");
   const intentOutput = await intentAgentNode(state);
   console.log(`Result Status: ${intentOutput.status}`);
@@ -30,6 +34,23 @@ async function executeAgentPipeline(userInput: string, targetFiles: string[], co
     targetFiles: intentOutput.targetFiles
   };
 
+  // 3. Read context dynamically from disk if the file exists
+  const targetFile = state.targetFiles[0];
+  let initialContext = "";
+  if (targetFile && fs.existsSync(targetFile)) {
+    try {
+      initialContext = fs.readFileSync(targetFile, 'utf-8');
+      console.log(`Loaded context from existing file: ${targetFile}`);
+    } catch (err) {
+      console.warn(`Could not read file ${targetFile}:`, err);
+    }
+  } else {
+    console.log(`No existing file found at: ${targetFile} (creating fresh file context)`);
+  }
+
+  state.extractedContext = initialContext;
+
+  // 4. Conditional Routing
   if (state.status === "ROUTED_EXPLAIN_CODE") {
     console.log("\n[Route: Explain Code] Skipping planning and generation.");
     console.log("Explanation logic triggered for context:");
@@ -57,6 +78,20 @@ async function executeAgentPipeline(userInput: string, targetFiles: string[], co
     console.log(`Coder Status: ${coderOutput.status}`);
     console.log("\nExtracted Context (including generated code):");
     console.log(coderOutput.extractedContext);
+
+    // 5. Write the clean generated code back to disk
+    if (coderOutput.generatedPatch && targetFile) {
+      try {
+        const dir = path.dirname(targetFile);
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
+        }
+        fs.writeFileSync(targetFile, coderOutput.generatedPatch, 'utf-8');
+        console.log(`\n🎉 Success! Saved code changes to: ${targetFile}`);
+      } catch (err) {
+        console.error(`Failed to write file ${targetFile}:`, err);
+      }
+    }
     return;
   }
 
@@ -73,28 +108,14 @@ async function runDemo() {
   const args = process.argv.slice(2);
   const cliQuery = args.join(' ').trim();
 
-  if (cliQuery) {
-    console.log("=== KAIZEN RUNNING CUSTOM QUERY ===");
-    await executeAgentPipeline(
-      cliQuery,
-      ["src/mathUtils.ts"],
-      "export function multiply(a: number, b: number) { return a * b; }"
-    );
-  } else {
-    console.log("=== KAIZEN MULTI-AGENT ROUTER DEMO ===");
-
-    await executeAgentPipeline(
-      "Create a simple math utility function that adds two numbers together.",
-      ["src/mathUtils.ts"],
-      "export function multiply(a: number, b: number) { return a * b; }"
-    );
-
-    await executeAgentPipeline(
-      "samjha do how this multiply function works",
-      ["src/mathUtils.ts"],
-      "export function multiply(a: number, b: number) { return a * b; }"
-    );
+  if (!cliQuery) {
+    console.warn("Error: No query provided. Please provide a query in the terminal.");
+    console.log('Example: npm start -- "Write a greeting function"');
+    process.exit(1);
   }
+
+  console.log("=== KAIZEN RUNNING USER QUERY ===");
+  await executeAgentPipeline(cliQuery);
 }
 
 runDemo().catch(err => {

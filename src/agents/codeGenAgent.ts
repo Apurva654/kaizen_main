@@ -104,6 +104,7 @@ export function executeTask() {
     extractedContext: state.extractedContext 
       ? `${state.extractedContext}\n\nGenerated Code:\n${generatedCode}` 
       : `Generated code snippet for ${targetFile}:\n${generatedCode}`,
+    generatedPatch: generatedCode,
     status: "CODE_GENERATED"
   };
 }
