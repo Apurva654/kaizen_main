@@ -16,5 +16,6 @@ export interface KaizenStateType {
 }
 
 export const KaizenState = {
+  
   State: {} as KaizenStateType
 };
