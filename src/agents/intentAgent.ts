@@ -9,7 +9,7 @@ export const IntentSchema = z.object({
   intent: z.enum(['GENERATE_CODE', 'DEBUG_ERROR', 'EXPLAIN_CODE', 'REFACTOR'])
     .describe("The classified intent of the user request"),
   targetFiles: z.array(z.string())
-    .describe("Target source files identified for the task")
+    .describe("All target source file paths identified or implied for the task (e.g., ['src/sandbox/utils.ts', 'src/sandbox/main.ts'])")
 });
 
 export async function intentAgentNode(state: typeof KaizenState.State) {
@@ -32,7 +32,8 @@ Analyze the user's prompt (which may be in English, Hinglish, slang, or natural 
 - EXPLAIN_CODE: Explaining how code works, answering architecture/codebase questions.
 - REFACTOR: Cleaning up code, optimizing performance, renaming, or restructuring existing code.
 
-Extract any target file paths explicitly mentioned or implied in the request.`;
+IMPORTANT MULTI-FILE TARGET EXTRACTION:
+Extract ALL target file paths mentioned or implied in the request. If a prompt mentions multiple files (e.g. "Add a function in utils.ts and call it from main.ts"), return ALL relevant file paths prefixed with their relative path (e.g., ['src/sandbox/utils.ts', 'src/sandbox/main.ts']).`;
 
       const result = await structuredModel.invoke([
         { role: 'system', content: systemPrompt },
@@ -40,15 +41,24 @@ Extract any target file paths explicitly mentioned or implied in the request.`;
       ]);
 
       const intent = result.intent || 'GENERATE_CODE';
-      const targetFiles = result.targetFiles && result.targetFiles.length > 0
+      let extractedFiles = result.targetFiles && result.targetFiles.length > 0
         ? result.targetFiles
-        : (state.targetFiles.length > 0 ? state.targetFiles : ['src/sandbox.ts']);
+        : (state.targetFiles.length > 0 ? state.targetFiles : ['src/sandbox/main.ts']);
+
+      // Ensure proper paths
+      extractedFiles = extractedFiles.map(f => {
+        if (!f.includes('/') && !f.includes('\\')) {
+          return `src/sandbox/${f}`;
+        }
+        return f.replace(/\\/g, '/');
+      });
 
       return {
         status: `ROUTED_${intent}`,
-        targetFiles
+        targetFiles: Array.from(new Set(extractedFiles))
       };
-    } catch (error) {
+    } 
+    catch (error) {
       console.warn("ChatGroq execution failed, falling back to deterministic intent classifier:", error);
     }
   }
@@ -58,14 +68,28 @@ Extract any target file paths explicitly mentioned or implied in the request.`;
 
   if (input.includes('fix') || input.includes('bug') || input.includes('error') || input.includes('kar de')) {
     intent = 'DEBUG_ERROR';
-  } else if (input.includes('explain') || input.includes('how') || input.includes('samjha')) {
+  } 
+  else if (input.includes('explain') || input.includes('how') || input.includes('samjha')) {
     intent = 'EXPLAIN_CODE';
-  } else if (input.includes('refactor') || input.includes('clean')) {
+  } 
+  else if (input.includes('refactor') || input.includes('clean')) {
     intent = 'REFACTOR';
   }
 
+  const detectedFiles: string[] = [];
+  if (input.includes('utils.ts') || input.includes('utils')) {
+    detectedFiles.push('src/sandbox/utils.ts');
+  }
+  if (input.includes('main.ts') || input.includes('main')) {
+    detectedFiles.push('src/sandbox/main.ts');
+  }
+
+  const finalTargets = detectedFiles.length > 0 
+    ? detectedFiles 
+    : (state.targetFiles.length > 0 ? state.targetFiles : ['src/sandbox/main.ts']);
+
   return {
     status: `ROUTED_${intent}`,
-    targetFiles: state.targetFiles.length > 0 ? state.targetFiles : ['src/sandbox.ts']
+    targetFiles: Array.from(new Set(finalTargets))
   };
 }

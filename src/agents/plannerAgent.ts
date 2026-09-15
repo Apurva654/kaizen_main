@@ -10,8 +10,8 @@ dotenv.config();
 export const StepSchema = z.object({
   id: z.number().describe("Unique sequential step identifier"),
   description: z.string().describe("Detailed, actionable task description"),
-  targetFile: z.string().optional().describe("Target source file associated with this task"),
-  assignedTool: z.string().optional().describe("Tool or agent module assigned to execute this step")
+  targetFile: z.string().nullable().optional().describe("Target source file associated with this task"),
+  assignedTool: z.string().nullable().optional().describe("Tool or agent module assigned to execute this step")
 });
 
 export const PlannerSchema = z.object({
@@ -19,7 +19,7 @@ export const PlannerSchema = z.object({
 });
 
 export async function plannerAgentNode(state: typeof KaizenState.State) {
-  const targetFiles = state.targetFiles.length > 0 ? state.targetFiles : ['src/sandbox.ts'];
+  const targetFiles = state.targetFiles.length > 0 ? state.targetFiles : ['src/sandbox/main.ts'];
 
   const astParser = new ASTParserTool();
   const extractedSymbols = state.extractedContext
@@ -77,7 +77,8 @@ Create a structured list of logical, sequential implementation steps.`;
           status: "PLANNED"
         };
       }
-    } catch (error) {
+    } 
+    catch (error) {
       console.warn("ChatGroq planner execution failed, falling back to tool-guided plan:", error);
     }
   }

@@ -2,15 +2,16 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { KaizenStateType } from './state';
 import { intentAgentNode } from './agents/intentAgent';
+import { contextRetrievalAgentNode } from './graph/agents/contextRetrievalAgent';
 import { plannerAgentNode } from './agents/plannerAgent';
-import { codeGenAgentNode } from './agents/codeGenAgent';
+import { codeGenAgentNode, isProtectedFile } from './agents/codeGenAgent';
 
 async function executeAgentPipeline(userInput: string) {
   console.log(`\n=========================================`);
   console.log(`User Input: "${userInput}"`);
   console.log(`=========================================`);
 
-  // 1. Initialize State with empty context and files first (will be filled dynamically)
+  // 1. Initialize State
   let state: KaizenStateType = {
     userInput,
     targetFiles: [],
@@ -34,21 +35,16 @@ async function executeAgentPipeline(userInput: string) {
     targetFiles: intentOutput.targetFiles
   };
 
-  // 3. Read context dynamically from disk if the file exists
-  const targetFile = state.targetFiles[0];
-  let initialContext = "";
-  if (targetFile && fs.existsSync(targetFile)) {
-    try {
-      initialContext = fs.readFileSync(targetFile, 'utf-8');
-      console.log(`Loaded context from existing file: ${targetFile}`);
-    } catch (err) {
-      console.warn(`Could not read file ${targetFile}:`, err);
-    }
-  } else {
-    console.log(`No existing file found at: ${targetFile} (creating fresh file context)`);
-  }
+  // 3. Run Context Retrieval Agent (Graphify Engine + ASTParser)
+  console.log("\n-> Running Context Retrieval Agent (Graphify Engine)...");
+  const retrievalOutput = await contextRetrievalAgentNode(state);
+  console.log(`Context Retrieval Status: ${retrievalOutput.status}`);
 
-  state.extractedContext = initialContext;
+  state = {
+    ...state,
+    extractedContext: retrievalOutput.extractedContext,
+    targetFiles: retrievalOutput.targetFiles
+  };
 
   // 4. Conditional Routing
   if (state.status === "ROUTED_EXPLAIN_CODE") {
@@ -79,19 +75,40 @@ async function executeAgentPipeline(userInput: string) {
     console.log("\nExtracted Context (including generated code):");
     console.log(coderOutput.extractedContext);
 
-    // 5. Write the clean generated code back to disk
-    if (coderOutput.generatedPatch && targetFile) {
-      try {
-        const dir = path.dirname(targetFile);
-        if (!fs.existsSync(dir)) {
-          fs.mkdirSync(dir, { recursive: true });
+    // 5. Write all clean generated file patches back to disk
+    if (coderOutput.filePatches && coderOutput.filePatches.length > 0) {
+      for (const patch of coderOutput.filePatches) {
+        if (!isProtectedFile(patch.filePath)) {
+          try {
+            const dir = path.dirname(patch.filePath);
+            if (!fs.existsSync(dir)) {
+              fs.mkdirSync(dir, { recursive: true });
+            }
+            fs.writeFileSync(patch.filePath, patch.code, 'utf-8');
+            console.log(`\nSuccess! Saved code changes to: ${patch.filePath}`);
+          } catch (err) {
+            console.error(`Failed to write file ${patch.filePath}:`, err);
+          }
+        } else {
+          console.warn(`Skipped writing to protected file: ${patch.filePath}`);
         }
-        fs.writeFileSync(targetFile, coderOutput.generatedPatch, 'utf-8');
-        console.log(`\n🎉 Success! Saved code changes to: ${targetFile}`);
-      } catch (err) {
-        console.error(`Failed to write file ${targetFile}:`, err);
+      }
+    } else if (coderOutput.generatedPatch && state.targetFiles[0]) {
+      const targetFile = state.targetFiles[0];
+      if (!isProtectedFile(targetFile)) {
+        try {
+          const dir = path.dirname(targetFile);
+          if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+          }
+          fs.writeFileSync(targetFile, coderOutput.generatedPatch, 'utf-8');
+          console.log(`\nSuccess! Saved code changes to: ${targetFile}`);
+        } catch (err) {
+          console.error(`Failed to write file ${targetFile}:`, err);
+        }
       }
     }
+
     return;
   }
 
