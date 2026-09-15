@@ -1,10 +1,27 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as readline from 'readline';
 import { KaizenStateType } from './state';
 import { intentAgentNode } from './agents/intentAgent';
 import { contextRetrievalAgentNode } from './graph/agents/contextRetrievalAgent';
 import { plannerAgentNode } from './agents/plannerAgent';
 import { codeGenAgentNode, isProtectedFile } from './agents/codeGenAgent';
+import { reviewerAgentNode } from './agents/reviewerAgent';
+import { debuggerAgentNode } from './agents/debuggerAgent';
+
+function promptUserApproval(questionText: string): Promise<string> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+
+  return new Promise((resolve) => {
+    rl.question(questionText, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
 
 async function executeAgentPipeline(userInput: string) {
   console.log(`\n=========================================`);
@@ -69,6 +86,41 @@ async function executeAgentPipeline(userInput: string) {
       status: plannerOutput.status || "PLANNED"
     };
 
+    // Human-in-the-Loop (HITL) Approval Step
+    console.log("\n=========================================");
+    console.log("HUMAN-IN-THE-LOOP (HITL): PLAN APPROVAL");
+    console.log("=========================================");
+    const answer = await promptUserApproval(
+      "Do you approve this plan to proceed with code generation? [Y/n or enter feedback]: "
+    );
+
+    const lowerAns = answer.toLowerCase();
+    if (lowerAns === 'n' || lowerAns === 'no' || lowerAns === 'cancel' || lowerAns === 'reject') {
+      console.log("\n[HITL] Plan rejected by user. Aborting code generation.");
+      return;
+    }
+
+    if (lowerAns !== 'y' && lowerAns !== 'yes' && lowerAns !== 'approve' && lowerAns !== '') {
+      console.log(`\n[HITL] User provided feedback: "${answer}"`);
+      console.log("-> Re-running Planner Agent with feedback...");
+      state.userInput = `${state.userInput} (User plan feedback: ${answer})`;
+      const updatedPlannerOutput = await plannerAgentNode(state);
+      console.log(`Updated Planner Status: ${updatedPlannerOutput.status}`);
+      console.log("Updated Steps:");
+      updatedPlannerOutput.plan?.forEach(step => {
+        console.log(`- Step ${step.id} [${step.status}]: ${step.description}`);
+      });
+      state.plan = updatedPlannerOutput.plan || state.plan;
+
+      const confirmAns = await promptUserApproval("\nApprove updated plan? [Y/n]: ");
+      if (confirmAns.toLowerCase() === 'n' || confirmAns.toLowerCase() === 'no') {
+        console.log("\n[HITL] Updated plan rejected by user. Aborting code generation.");
+        return;
+      }
+    }
+
+    console.log("\n[HITL] Plan approved! Proceeding to code generation...");
+
     console.log("\n-> Running Coder Agent...");
     const coderOutput = await codeGenAgentNode(state);
     console.log(`Coder Status: ${coderOutput.status}`);
@@ -109,12 +161,39 @@ async function executeAgentPipeline(userInput: string) {
       }
     }
 
+    // 6. Run Code Reviewer Agent
+    const reviewResult = await reviewerAgentNode({
+      ...state,
+      extractedContext: coderOutput.extractedContext || state.extractedContext
+    });
+
+    if (!reviewResult.approved) {
+      console.log("\n[ReviewerAgent Notice]: Code patch requires revision based on review feedback.");
+    }
+
     return;
   }
 
   if (state.status === "ROUTED_DEBUG_ERROR") {
-    console.log("\n[Route: Debug Error] Initiating error resolution flow.");
-    console.log("Analyzing user report and context...");
+    console.log("\n[Route: Debug Error] Initiating automated bug diagnosis flow.");
+    const debugResult = await debuggerAgentNode(state);
+
+    if (debugResult.filePatches && debugResult.filePatches.length > 0) {
+      for (const patch of debugResult.filePatches) {
+        if (!isProtectedFile(patch.filePath)) {
+          try {
+            const dir = path.dirname(patch.filePath);
+            if (!fs.existsSync(dir)) {
+              fs.mkdirSync(dir, { recursive: true });
+            }
+            fs.writeFileSync(patch.filePath, patch.code, 'utf-8');
+            console.log(`\nSuccess! Saved bug fix changes to: ${patch.filePath}`);
+          } catch (err) {
+            console.error(`Failed to write file ${patch.filePath}:`, err);
+          }
+        }
+      }
+    }
     return;
   }
 

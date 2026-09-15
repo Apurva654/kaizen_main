@@ -2,12 +2,15 @@ import { z } from 'zod';
 import { ChatGroq } from '@langchain/groq';
 import * as dotenv from 'dotenv';
 import { KaizenState, PlanStep } from '../../state';
+import { langfuseTracer } from '../../tools/langfuseTracer';
 
 dotenv.config();
 
 export const FilePatchSchema = z.object({
-  filePath: z.string().describe("Target source file path to modify or create (e.g., 'src/sandbox/utils.ts' or 'src/sandbox/main.ts')"),
-  code: z.string().describe("Complete, precise raw TypeScript source code content for this file (NO markdown backticks)"),
+  filePath: z.string().optional().describe("Target source file path to modify or create (e.g., 'src/sandbox/utils.ts' or 'src/sandbox/main.ts')"),
+  path: z.string().optional().describe("Target source file path to modify or create (e.g., 'src/sandbox/utils.ts' or 'src/sandbox/main.ts')"),
+  code: z.string().optional().describe("Complete, precise raw TypeScript source code content for this file (NO markdown backticks)"),
+  content: z.string().optional().describe("Complete, precise raw TypeScript source code content for this file (NO markdown backticks)"),
   imports: z.array(z.string()).optional().describe("List of relative or standard imports required by this code")
 });
 
@@ -31,6 +34,10 @@ const PROTECTED_PATTERNS = [
 
 export function isProtectedFile(filePath: string): boolean {
   const norm = filePath.replace(/\\/g, '/');
+  // All generated/modified files MUST reside inside src/sandbox/
+  if (!norm.startsWith('src/sandbox/')) {
+    return true;
+  }
   return PROTECTED_PATTERNS.some((pattern) => pattern.test(norm));
 }
 
@@ -49,7 +56,7 @@ export async function codeGenAgentNode(state: typeof KaizenState.State) {
       const blockedPlan: PlanStep[] = state.plan.map((step) => ({
         ...step,
         status: 'failed',
-        description: `Security Policy Violation: Write access to protected file '${targetFile}' is strictly prohibited.`
+        description: `Security Policy Violation: Write access to protected file '${targetFile}' is strictly prohibited. All code must reside inside 'src/sandbox/'.`
       }));
 
       return {
@@ -67,9 +74,10 @@ export async function codeGenAgentNode(state: typeof KaizenState.State) {
   let explanations = '';
 
   const modelCandidates = [
-    'llama-3.3-70b-versatile',
     'openai/gpt-oss-120b',
-    'llama-3.1-8b-instant'
+    'groq/compound-mini',
+    'qwen/qwen3.8-27b',
+    'openai/gpt-oss-20b'
   ];
 
   if (apiKey && apiKey !== 'your_groq_api_key_here') {
@@ -81,17 +89,19 @@ export async function codeGenAgentNode(state: typeof KaizenState.State) {
           temperature: 0
         });
 
-        const structuredModel = model.withStructuredOutput(CodeGenSchema);
+        const structuredModel = model.withStructuredOutput(CodeGenSchema, { method: 'jsonMode' });
 
         const systemPrompt = `You are an expert AI software engineer for Kaizen AI specializing in multi-file modular code generation and relative import resolution.
-Your task is to generate precise, production-ready TypeScript/JavaScript source code patches for ALL files that need modifications to satisfy the user request.
+Your task is to generate precise, production-ready TypeScript/JavaScript source code patches for ALL files that need modifications to satisfy the user request. Respond in valid json format.
 
 === MANDATES & GUARDRAILS ===
 1. ${securityDirective}
-2. MULTI-FILE EDITS: Return a patch for EACH file that requires changes inside the 'files' array field. Target Files: [${targetFiles.join(', ')}].
-3. IMPORT RESOLUTION: Review the workspace graph, symbol mappings, and dependency facts in the context. When main.ts references functions/classes from utils.ts (or other relative modules), ensure correct relative file imports (e.g., import { multiply, add } from './utils';).
-4. Do NOT wrap code in markdown code blocks (\`\`\`typescript ... \`\`\`) inside the 'code' string fields. Return pure executable raw TypeScript code.
-5. In 'explanations', summarize how symbols and relative imports were resolved across the generated files.`;
+2. SANDBOX PLAYGROUND ISOLATION: All created or modified files MUST be located strictly inside the 'src/sandbox/' folder (e.g., 'src/sandbox/studentAverage.ts', 'src/sandbox/utils.ts').
+3. PRESERVATION MANDATE: When modifying an existing file inside 'src/sandbox/', NEVER erase, delete, or overwrite existing functions or exports created from previous queries. Append or integrate new functions cleanly while keeping all previously written code and exports completely intact!
+4. MULTI-FILE EDITS: Return a patch for EACH file that requires changes inside the 'files' array field. Target Files: [${targetFiles.join(', ')}].
+5. IMPORT RESOLUTION: Review the workspace graph, symbol mappings, and dependency facts in the context. When main.ts references functions/classes from utils.ts (or other relative modules), ensure correct relative file imports (e.g., import { multiply, add } from './utils';).
+6. Do NOT wrap code in markdown code blocks (\`\`\`typescript ... \`\`\`) inside the 'code' string fields. Return pure executable raw TypeScript code.
+7. In 'explanations', summarize how symbols and relative imports were resolved across the generated files.`;
 
         const userContextPrompt = `User Request: "${state.userInput}"
 Target Files: ${targetFiles.join(', ')}${retryContext}
@@ -99,17 +109,33 @@ Target Files: ${targetFiles.join(', ')}${retryContext}
 === EXTRACTED GRAPH CONTEXT & SYMBOL MAPS ===
 ${state.extractedContext || "No context provided."}`;
 
+        const startTime = Date.now();
         const result = await structuredModel.invoke([
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userContextPrompt }
         ]);
+        const latencyMs = Date.now() - startTime;
+
+        await langfuseTracer.recordGeneration(
+          'CoderAgent',
+          modelName,
+          userContextPrompt,
+          JSON.stringify(result),
+          latencyMs,
+          250,
+          450
+        );
 
         if (result && result.files && result.files.length > 0) {
-          generatedPatches = result.files.map(f => ({
-            filePath: f.filePath.replace(/\\/g, '/'),
-            code: f.code,
-            imports: f.imports
-          }));
+          generatedPatches = result.files.map((f: z.infer<typeof FilePatchSchema>) => {
+            const rawPath = f.filePath || f.path || targetFiles[0];
+            const rawCode = f.code || f.content || '';
+            return {
+              filePath: rawPath.replace(/\\/g, '/'),
+              code: rawCode,
+              imports: f.imports
+            };
+          });
           explanations = result.explanations;
           break;
         }

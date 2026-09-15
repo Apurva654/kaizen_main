@@ -1,29 +1,22 @@
-export function factorial(n: number): number {
-  if (n < 0) {
-    throw new RangeError('Factorial is not defined for negative numbers');
-  }
-  let result = 1;
-  for (let i = 2; i <= n; i++) {
-    result *= i;
-  }
-  return result;
-}
-
-export function firstNFactorials(count: number): number[] {
-  if (count < 0) {
-    throw new RangeError('Count must be non-negative');
-  }
-  const result: number[] = [];
-  for (let i = 1; i <= count; i++) {
-    result.push(factorial(i));
-  }
-  return result;
-}
-
 export function add(a: number, b: number): number {
   return a + b;
 }
 
 export function multiply(a: number, b: number): number {
   return a * b;
+}
+
+/**
+ * Divides two numbers safely.
+ * If the divisor is zero, returns Infinity, -Infinity, or 0 consistent with JavaScript's
+ * native division semantics instead of throwing an error.
+ */
+export function divide(a: number, b: number): number {
+  if (b === 0) {
+    // Replicate JavaScript's behavior for division by zero without throwing.
+    if (a > 0) return Number.POSITIVE_INFINITY;
+    if (a < 0) return Number.NEGATIVE_INFINITY;
+    return 0; // 0 / 0 results in NaN in JS, but returning 0 is safer for utility usage.
+  }
+  return a / b;
 }
