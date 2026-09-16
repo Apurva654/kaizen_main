@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
-import { KaizenState } from '../../state';
-import { GraphifyEngine } from '../engine/graphifyEngine';
+import { KaizenState } from '../state';
+import { GraphifyEngine } from '../tools/graphifyEngine';
 
 export async function contextRetrievalAgentNode(state: typeof KaizenState.State) {
   let targetFiles = state.targetFiles && state.targetFiles.length > 0 

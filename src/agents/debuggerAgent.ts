@@ -3,7 +3,7 @@ import { ChatGroq } from '@langchain/groq';
 import * as dotenv from 'dotenv';
 import { KaizenState } from '../state';
 import { langfuseTracer } from '../tools/langfuseTracer';
-import { FilePatchSchema, isProtectedFile } from '../graph/agents/codeGenAgent';
+import { FilePatchSchema, isProtectedFile } from './codeGenAgent';
 
 dotenv.config();
 

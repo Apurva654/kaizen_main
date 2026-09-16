@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as readline from 'readline';
 import { KaizenStateType } from './state';
 import { intentAgentNode } from './agents/intentAgent';
-import { contextRetrievalAgentNode } from './graph/agents/contextRetrievalAgent';
+import { contextRetrievalAgentNode } from './agents/contextRetrievalAgent';
 import { plannerAgentNode } from './agents/plannerAgent';
 import { codeGenAgentNode, isProtectedFile } from './agents/codeGenAgent';
 import { reviewerAgentNode } from './agents/reviewerAgent';

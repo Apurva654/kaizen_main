@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { ASTParserTool, ExtractedSymbol } from '../../tools/astParser';
+import { ASTParserTool, ExtractedSymbol } from './astParser';
 
 export interface SymbolFact {
   name: string;
