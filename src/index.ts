@@ -122,53 +122,128 @@ async function executeAgentPipeline(userInput: string) {
     console.log("\n[HITL] Plan approved! Proceeding to code generation...");
 
     console.log("\n-> Running Coder Agent...");
-    const coderOutput = await codeGenAgentNode(state);
+    let coderOutput = await codeGenAgentNode(state);
     console.log(`Coder Status: ${coderOutput.status}`);
     console.log("\nExtracted Context (including generated code):");
     console.log(coderOutput.extractedContext);
 
     // 5. Write all clean generated file patches back to disk
-    if (coderOutput.filePatches && coderOutput.filePatches.length > 0) {
-      for (const patch of coderOutput.filePatches) {
-        if (!isProtectedFile(patch.filePath)) {
+    function saveFilePatches(output: typeof coderOutput) {
+      if (output.filePatches && output.filePatches.length > 0) {
+        for (const patch of output.filePatches) {
+          if (!isProtectedFile(patch.filePath)) {
+            try {
+              const dir = path.dirname(patch.filePath);
+              if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+              }
+              fs.writeFileSync(patch.filePath, patch.code, 'utf-8');
+              console.log(`\nSuccess! Saved code changes to: ${patch.filePath}`);
+            } catch (err) {
+              console.error(`Failed to write file ${patch.filePath}:`, err);
+            }
+          } else {
+            console.warn(`Skipped writing to protected file: ${patch.filePath}`);
+          }
+        }
+      } else if (output.generatedPatch && state.targetFiles[0]) {
+        const targetFile = state.targetFiles[0];
+        if (!isProtectedFile(targetFile)) {
           try {
-            const dir = path.dirname(patch.filePath);
+            const dir = path.dirname(targetFile);
             if (!fs.existsSync(dir)) {
               fs.mkdirSync(dir, { recursive: true });
             }
-            fs.writeFileSync(patch.filePath, patch.code, 'utf-8');
-            console.log(`\nSuccess! Saved code changes to: ${patch.filePath}`);
+            fs.writeFileSync(targetFile, output.generatedPatch, 'utf-8');
+            console.log(`\nSuccess! Saved code changes to: ${targetFile}`);
           } catch (err) {
-            console.error(`Failed to write file ${patch.filePath}:`, err);
+            console.error(`Failed to write file ${targetFile}:`, err);
           }
-        } else {
-          console.warn(`Skipped writing to protected file: ${patch.filePath}`);
-        }
-      }
-    } else if (coderOutput.generatedPatch && state.targetFiles[0]) {
-      const targetFile = state.targetFiles[0];
-      if (!isProtectedFile(targetFile)) {
-        try {
-          const dir = path.dirname(targetFile);
-          if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir, { recursive: true });
-          }
-          fs.writeFileSync(targetFile, coderOutput.generatedPatch, 'utf-8');
-          console.log(`\nSuccess! Saved code changes to: ${targetFile}`);
-        } catch (err) {
-          console.error(`Failed to write file ${targetFile}:`, err);
         }
       }
     }
 
+    saveFilePatches(coderOutput);
+    state.extractedContext = coderOutput.extractedContext || state.extractedContext;
+
     // 6. Run Code Reviewer Agent
-    const reviewResult = await reviewerAgentNode({
-      ...state,
-      extractedContext: coderOutput.extractedContext || state.extractedContext
-    });
+    let reviewResult = await reviewerAgentNode(state);
+
+    // 7. Automatic Self-Correction Feedback Loop
+    const maxRetries = 2;
+    while (!reviewResult.approved && state.retryCount < maxRetries) {
+      state.retryCount += 1;
+      console.log(`\n=========================================`);
+      console.log(`[SELF-HEALING REVISION LOOP]: ATTEMPT #${state.retryCount} / ${maxRetries}`);
+      console.log(`Reviewer feedback: ${reviewResult.summary}`);
+      if (reviewResult.issues.length > 0) {
+        console.log(`Issues flagged for correction:`);
+        reviewResult.issues.forEach(i => console.log(`  - [ISSUE] ${i}`));
+      }
+      console.log(`=========================================\n`);
+
+      const feedbackContext = reviewResult.issues.length > 0
+        ? reviewResult.issues.map(i => `- ${i}`).join('\n')
+        : reviewResult.summary;
+
+      state.extractedContext = `${state.extractedContext}\n\n[REVIEWER REVISION MANDATE - ATTEMPT #${state.retryCount}]:\n${feedbackContext}\nPlease address all issues and regenerate corrected source code.`;
+
+      console.log(`-> Re-running Coder Agent with Reviewer Feedback (Attempt #${state.retryCount})...`);
+      coderOutput = await codeGenAgentNode(state);
+      console.log(`Coder Status: ${coderOutput.status}`);
+
+      saveFilePatches(coderOutput);
+      state.extractedContext = coderOutput.extractedContext || state.extractedContext;
+
+      console.log(`-> Re-running Code Reviewer Agent to verify revised code...`);
+      reviewResult = await reviewerAgentNode(state);
+    }
 
     if (!reviewResult.approved) {
-      console.log("\n[ReviewerAgent Notice]: Code patch requires revision based on review feedback.");
+      console.log("\n=========================================");
+      console.log("HUMAN-IN-THE-LOOP (HITL): UNRESOLVED REVIEW ERRORS ESCALATION");
+      console.log("=========================================");
+      console.log(`Automated retries (${maxRetries}) exhausted without meeting Reviewer approval threshold.`);
+      console.log(`Review Summary: ${reviewResult.summary}`);
+      if (reviewResult.issues && reviewResult.issues.length > 0) {
+        console.log(`Unresolved Issues:`);
+        reviewResult.issues.forEach(i => console.log(`  - [ISSUE] ${i}`));
+      }
+      console.log("=========================================");
+
+      const userInstruction = await promptUserApproval(
+        "\nProvide custom guidance/feedback to retry generation, or type 'accept' to keep as-is / 'cancel' to abort: "
+      );
+
+      const cleanInput = userInstruction.trim().toLowerCase();
+      if (cleanInput === 'cancel' || cleanInput === 'abort') {
+        console.log("\n[HITL Escalation] Task aborted by user.");
+        return;
+      } else if (cleanInput === 'accept' || cleanInput === 'keep') {
+        console.log("\n[HITL Escalation] User accepted generated code despite reviewer warnings.");
+        return;
+      } else if (userInstruction.trim().length > 0) {
+        console.log(`\n[HITL Escalation] Received developer guidance: "${userInstruction}"`);
+        console.log("-> Re-running Coder Agent with developer guidance...");
+
+        state.userInput = `${state.userInput} (Developer guidance: ${userInstruction})`;
+        state.extractedContext = `${state.extractedContext}\n\n[DEVELOPER FIX GUIDANCE]:\n${userInstruction}\nPlease rewrite the code patches to resolve the review issues and incorporate the developer's instructions.`;
+
+        coderOutput = await codeGenAgentNode(state);
+        saveFilePatches(coderOutput);
+        state.extractedContext = coderOutput.extractedContext || state.extractedContext;
+
+        console.log(`-> Re-evaluating revised code with Code Reviewer Agent...`);
+        reviewResult = await reviewerAgentNode(state);
+
+        if (reviewResult.approved) {
+          console.log(`\n[HITL Escalation Success]: Code updated with developer guidance and APPROVED by Reviewer Agent!`);
+        } else {
+          console.log(`\n[HITL Escalation Completed]: Code updated with developer guidance. Final Review Status: ${reviewResult.approved ? "APPROVED" : "REVISED"} (Score: ${reviewResult.codeQualityScore}/100).`);
+        }
+      }
+    } else if (state.retryCount > 0) {
+      console.log(`\n[Self-Healing Success]: Code successfully revised and APPROVED by Reviewer Agent after ${state.retryCount} retry attempt(s)!`);
     }
 
     return;

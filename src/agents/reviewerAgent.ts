@@ -7,11 +7,13 @@ import { langfuseTracer } from '../tools/langfuseTracer';
 dotenv.config();
 
 export const ReviewerSchema = z.object({
-  approved: z.boolean().describe("Whether the code patch is approved for production"),
-  codeQualityScore: z.number().describe("Code quality rating from 1 to 100"),
+  approved: z.boolean().optional().describe("Whether the code patch is approved for production"),
+  codeQualityScore: z.number().optional().describe("Code quality rating from 1 to 100"),
   issues: z.array(z.string()).optional().describe("List of critical syntax, security, or logical issues found"),
   suggestions: z.array(z.string()).optional().describe("List of code improvement or optimization suggestions"),
-  summary: z.string().describe("Executive code review summary")
+  summary: z.string().optional().describe("Executive code review summary"),
+  overview: z.string().optional().describe("Executive code review summary"),
+  feedback: z.string().optional().describe("Executive code review summary")
 });
 
 export interface ReviewResult {
@@ -90,7 +92,7 @@ ${state.extractedContext || "No generated context available"}`;
         const codeQualityScore = result.codeQualityScore ?? 90;
         const issues = result.issues || [];
         const suggestions = result.suggestions || [];
-        const summary = result.summary || "Code patch passes automated code review standards.";
+        const summary = result.summary || result.overview || result.feedback || "Code patch passes automated code review standards.";
 
         console.log(`\n=========================================`);
         console.log(`CODE REVIEW REPORT (${modelName})`);
