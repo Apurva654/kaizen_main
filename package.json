@@ -43,6 +43,12 @@
   },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test:test1": "tsc && node dist/sandbox/test1/main.js",
+    "test:test2": "tsc && node --max-old-space-size=35 dist/sandbox/test2/main.js",
+    "test:test3": "tsc && node dist/sandbox/test3/main.js",
+    "test:test4": "tsc && node --max-old-space-size=20 dist/sandbox/test4/main.js",
+    "test:test5": "tsc && node --max-old-space-size=50 dist/sandbox/test5/main.js",
     "start": "tsc && node dist/index.js",
     "server": "ts-node-dev --respawn --transpile-only src/server.ts",
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts"

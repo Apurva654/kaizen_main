@@ -40,7 +40,7 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
 
     webview.html = this._getHtmlForWebview(webview);
 
-    webview.onDidReceiveMessage(async (message) => {
+    webview.onDidReceiveMessage(async (message: any) => {
       switch (message.type) {
         case 'RUN_PIPELINE': {
           this.runAgentPipeline(message.userInput);
