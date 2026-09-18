@@ -7,6 +7,16 @@ export interface PlanStep {
 }
 
 export const KaizenState = Annotation.Root({
+  sessionId: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
+
+  createdAt: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
+
   userInput: Annotation<string>(),
 
   targetFiles: Annotation<string[]>({
@@ -54,8 +64,35 @@ export const KaizenState = Annotation.Root({
   status: Annotation<string>({
     reducer: (_, y) => y,
     default: () => "INITIALIZED"
+  }),
+
+  runId: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
+
+  lifecycleStatus: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => "INITIALIZED"
+  }),
+
+  currentStage: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => "intent"
+  }),
+
+  completedStages: Annotation<string[] | undefined>({
+    reducer: (x, y) => Array.from(new Set([...(x || []), ...(y || [])])),
+    default: () => []
+  }),
+
+  skippedStages: Annotation<string[] | undefined>({
+    reducer: (x, y) => Array.from(new Set([...(x || []), ...(y || [])])),
+    default: () => []
   })
 });
 
 export type KaizenStateType = typeof KaizenState.State;
+
+
 

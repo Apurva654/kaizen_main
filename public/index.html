@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kaizen AI - Client Tier & Generative UI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app" class="app-layout">
+    
+    <!-- Top Header Bar -->
+    <header class="app-header">
+      <div class="header-brand">
+        <div class="brand-logo">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+            <polyline points="2 17 12 22 22 17"></polyline>
+            <polyline points="2 12 12 17 22 12"></polyline>
+          </svg>
+        </div>
+        <div class="brand-title">
+          <span class="title-primary">KAIZEN</span>
+          <span class="title-sub">AI Copilot & Generative UI</span>
+        </div>
+      </div>
+
+      <div class="header-status">
+        <div class="status-indicator online">
+          <span class="pulse-dot"></span>
+          <span class="status-text">Server Connected</span>
+        </div>
+        <button id="toggle-telemetry-btn" class="icon-btn-secondary" title="View Langfuse Traces">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+          Telemetry
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Container -->
+    <div class="main-body">
+
+      <!-- 1. Workspace Manager & File Explorer (Left Tier) -->
+      <aside class="workspace-panel">
+        <div class="panel-header">
+          <div class="panel-title">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            Workspace Manager
+          </div>
+          <button id="refresh-files-btn" class="icon-btn-tiny" title="Refresh Sandbox Files">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+          </button>
+        </div>
+
+        <div class="workspace-section">
+          <div class="section-label">SANDBOX PLAYGROUND</div>
+          <div id="file-tree" class="file-tree-list">
+            <!-- Dynamically populated files -->
+            <div class="tree-placeholder">Loading sandbox files...</div>
+          </div>
+        </div>
+
+        <div class="workspace-section">
+          <div class="section-label">ACTIVE TARGET FILES</div>
+          <div id="target-files-list" class="target-badge-list">
+            <span class="target-badge empty">None selected</span>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Resizer Handle 1 (Left Sidebar Resizer) -->
+      <div id="resizer-left" class="resizer-handle" title="Drag with mouse pointer to resize sidebar width"></div>
+
+      <!-- 2. Active Editor & Code Viewer (Center Tier) -->
+      <main class="editor-panel">
+        <div class="editor-tabs" id="editor-tabs">
+          <div class="tab active" data-path="src/sandbox/main.ts">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            <span>main.ts</span>
+            <span class="tab-unsaved-dot"></span>
+          </div>
+        </div>
+
+        <div class="editor-toolbar">
+          <div class="file-path-breadcrumb" id="editor-file-path">src/sandbox/main.ts</div>
+          <div class="toolbar-actions">
+            <button id="save-file-btn" class="btn-primary-sm">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+              Save File
+            </button>
+          </div>
+        </div>
+
+        <div class="editor-body">
+          <div class="line-numbers" id="line-numbers">1</div>
+          <textarea id="code-editor" class="code-area" spellcheck="false" placeholder="// Select or edit code inside src/sandbox/..."></textarea>
+        </div>
+      </main>
+
+      <!-- Resizer Handle 2 (Right Generative UI Panel Resizer) -->
+      <div id="resizer-right" class="resizer-handle" title="Drag with mouse pointer to extend panel width"></div>
+
+      <!-- 3. Client Tier & Generative UI (VS Code Extension Sidebar) (Right Tier) -->
+      <aside class="sidebar-webview" id="sidebar-webview">
+        <div class="webview-header">
+          <div class="webview-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            Kaizen Extension Sidebar
+          </div>
+          <span class="badge-pill">Generative UI</span>
+        </div>
+
+        <!-- Agent Workflow Execution Stepper -->
+        <div class="agent-stepper-container">
+          <div class="stepper-title">AGENT PIPELINE TIMELINE</div>
+          <div class="stepper-timeline">
+            <div class="step-item" id="step-intent">
+              <div class="step-icon">1</div>
+              <div class="step-content">
+                <div class="step-name">Intent Classification</div>
+                <div class="step-detail">Routing query to agent nodes</div>
+              </div>
+            </div>
+            <div class="step-item" id="step-context">
+              <div class="step-icon">2</div>
+              <div class="step-content">
+                <div class="step-name">Context Retrieval</div>
+                <div class="step-detail">Graphify AST & symbol extraction</div>
+              </div>
+            </div>
+            <div class="step-item" id="step-planner">
+              <div class="step-icon">3</div>
+              <div class="step-content">
+                <div class="step-name">Planner Agent</div>
+                <div class="step-detail">Grounded task step generation</div>
+              </div>
+            </div>
+            <div class="step-item" id="step-coder">
+              <div class="step-icon">4</div>
+              <div class="step-content">
+                <div class="step-name">Coder Agent</div>
+                <div class="step-detail">Multi-file patch generation</div>
+              </div>
+            </div>
+            <div class="step-item" id="step-testrunner">
+              <div class="step-icon">5</div>
+              <div class="step-content">
+                <div class="step-name">Test Suite Execution</div>
+                <div class="step-detail">Workspace unit test verification</div>
+              </div>
+            </div>
+            <div class="step-item" id="step-debugger">
+              <div class="step-icon">6</div>
+              <div class="step-content">
+                <div class="step-name">Self-Healing Debugger</div>
+                <div class="step-detail">Diagnosing failure & applying fix</div>
+              </div>
+            </div>
+            <div class="step-item" id="step-reviewer">
+              <div class="step-icon">7</div>
+              <div class="step-content">
+                <div class="step-name">Code Reviewer</div>
+                <div class="step-detail">Quality audit & approval</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Generative UI Dynamic Widgets Container -->
+        <div class="generative-widgets-area" id="widgets-container">
+          <!-- Default welcome card -->
+          <div class="gen-card welcome-card">
+            <div class="card-icon">⚡</div>
+            <h3>Generative UI Playground</h3>
+            <p>Type a natural language prompt below to trigger the multi-agent graph. Interactive Code Diff Cards and HITL Choice Cards will render here in real-time.</p>
+          </div>
+        </div>
+
+        <!-- Quick Prompt Chips -->
+        <div class="quick-prompts">
+          <span class="chip-label">Quick Prompts:</span>
+          <button class="prompt-chip" data-prompt="Create a student average grade calculator in utils.ts and call it in main.ts">Grading System</button>
+          <button class="prompt-chip" data-prompt="Create a fibonacci and factorial utility module in utils.ts and call them in main.ts">Math Utilities</button>
+          <button class="prompt-chip" data-prompt="Explain how main.ts handles symbol imports and task execution">Explain Architecture</button>
+        </div>
+
+        <!-- Chat Panel Input Bar -->
+        <div class="chat-input-container">
+          <form id="chat-form">
+            <textarea id="chat-input" class="chat-textarea" placeholder="Ask Kaizen to generate features, refactor, or debug..." rows="2"></textarea>
+            <button type="submit" id="send-btn" class="btn-send" title="Send Prompt">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            </button>
+          </form>
+        </div>
+
+      </aside>
+
+    </div>
+
+    <!-- Telemetry Modal -->
+    <div id="telemetry-modal" class="modal-overlay hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>Langfuse Telemetry & Traces</h3>
+          <button id="close-modal-btn" class="icon-btn-tiny">&times;</button>
+        </div>
+        <div id="telemetry-body" class="modal-body">
+          <div class="trace-placeholder">No trace logs recorded yet. Run a prompt to capture telemetry.</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

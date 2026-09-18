@@ -50,13 +50,13 @@ export async function reviewerAgentNode(state: typeof KaizenState.State): Promis
         const structuredModel = model.withStructuredOutput(ReviewerSchema, { method: 'jsonMode' });
 
         const systemPrompt = `You are an expert AI Code Reviewer Agent for Kaizen AI. Respond in valid json format.
-Your task is to perform an automated code review on the generated TypeScript code patches.
+Your task is to perform an automated code review on the generated code patches across Python, TypeScript, and supported languages.
 
 === REVIEW CHECKLIST ===
 1. Security & Safety: Ensure no system file deletion, env leakage, or unsafe execution.
-2. Correctness & Logic: Check if the code correctly implements the requested functionality.
-3. Import Resolution: Ensure relative imports (e.g., './utils') are accurate and valid.
-4. Code Quality & Standards: Check TypeScript types, exception handling, and readability.
+2. Correctness & Logic: Check if the code correctly implements the requested functionality and satisfies unit tests.
+3. Import Resolution: Ensure relative imports (e.g., './utils' or 'from string_utils import ...') are accurate and valid.
+4. Code Quality & Standards: Check language-specific syntax conventions (PEP 8 for Python, TypeScript types for TS), exception handling, and readability.
 
 Evaluate the code and return:
 - approved: boolean (true if score >= 75 and no critical issues)
@@ -72,10 +72,15 @@ Target Files: ${targetFiles.join(', ')}
 ${state.extractedContext || "No generated context available"}`;
 
         const startTime = Date.now();
-        const result = await structuredModel.invoke([
+        const invokePromise = structuredModel.invoke([
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
         ]);
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error(`ChatGroq model '${modelName}' execution timed out after 8000ms`)), 8000);
+        });
+
+        const result = await Promise.race([invokePromise, timeoutPromise]);
         const latencyMs = Date.now() - startTime;
 
         await langfuseTracer.recordGeneration(

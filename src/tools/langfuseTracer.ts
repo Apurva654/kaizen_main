@@ -28,6 +28,7 @@ const MODEL_PRICING: Record<string, { prompt: number; completion: number }> = {
 export class LangfuseTracerManager {
   private langfuseClient: Langfuse | null = null;
   private isEnabled: boolean = false;
+  private recordedTraces: LLMMetrics[] = [];
 
   constructor() {
     const publicKey = process.env.LANGFUSE_PUBLIC_KEY;
@@ -125,8 +126,13 @@ export class LangfuseTracerManager {
       traceId
     };
 
+    this.recordedTraces.push(metrics);
     this.logMetric(metrics);
     return metrics;
+  }
+
+  public getRecordedTraces(): LLMMetrics[] {
+    return this.recordedTraces;
   }
 }
 

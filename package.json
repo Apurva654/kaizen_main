@@ -1,24 +1,70 @@
 {
-  "name": "kaizen-minimal-agents",
+  "name": "kaizen-ai",
+  "displayName": "Kaizen AI Copilot & Generative UI",
+  "publisher": "kaizen-ai",
   "version": "1.0.0",
-  "description": "Minimal standalone Kaizen AI Planner and Coder agents",
-  "main": "dist/index.js",
+  "description": "Kaizen AI Planner, Coder, Reviewer Agents & Generative UI Sidebar Extension",
+  "main": "./dist/extension.js",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "activationEvents": [
+    "onView:kaizen.sidebarView"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "kaizen-activitybar",
+          "title": "Kaizen AI",
+          "icon": "$(sparkle)"
+        }
+      ]
+    },
+    "views": {
+      "kaizen-activitybar": [
+        {
+          "id": "kaizen.sidebarView",
+          "name": "Generative UI Chat",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "kaizen.openSidebar",
+        "title": "Kaizen: Open Generative UI Sidebar"
+      },
+      {
+        "command": "kaizen.applyPatch",
+        "title": "Kaizen: Apply Code Patch"
+      }
+    ]
+  },
   "scripts": {
     "build": "tsc",
-    "start": "tsc && node dist/index.js"
+    "start": "tsc && node dist/index.js",
+    "server": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "dev": "ts-node-dev --respawn --transpile-only src/server.ts"
   },
   "dependencies": {
     "@langchain/core": "^1.2.9",
     "@langchain/groq": "^1.3.1",
     "@langchain/langgraph": "^1.4.13",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "cors": "^2.8.6",
     "csv-parse": "^7.0.2",
     "dotenv": "^17.4.2",
+    "express": "^5.2.1",
     "langfuse": "^3.39.2",
+    "ts-node-dev": "^2.0.0",
     "web-tree-sitter": "^0.26.13",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@types/vscode": "^1.138.0",
     "typescript": "^5.0.0"
   }
 }

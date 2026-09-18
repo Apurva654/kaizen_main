@@ -8,6 +8,7 @@ import { plannerAgentNode } from './agents/plannerAgent';
 import { codeGenAgentNode, isProtectedFile } from './agents/codeGenAgent';
 import { reviewerAgentNode } from './agents/reviewerAgent';
 import { debuggerAgentNode } from './agents/debuggerAgent';
+import { persistenceEngine } from './tools/persistenceEngine';
 
 function promptUserApproval(questionText: string): Promise<string> {
   const rl = readline.createInterface({
@@ -28,8 +29,14 @@ async function executeAgentPipeline(userInput: string) {
   console.log(`User Input: "${userInput}"`);
   console.log(`=========================================`);
 
+  const sessionId = persistenceEngine.generateSessionId();
+  const createdAt = new Date().toISOString();
+
   // 1. Initialize State
   let state: KaizenStateType = {
+    sessionId,
+    runId: `run_${Date.now()}`,
+    createdAt,
     userInput,
     targetFiles: [],
     extractedContext: "",
@@ -37,8 +44,14 @@ async function executeAgentPipeline(userInput: string) {
     generatedPatch: "",
     choices: [],
     retryCount: 0,
-    status: "INITIALIZED"
+    status: "INITIALIZED",
+    lifecycleStatus: "RUNNING",
+    currentStage: "intent",
+    completedStages: [],
+    skippedStages: []
   };
+
+  persistenceEngine.saveCheckpoint(sessionId, 'INITIALIZED', state);
 
   // 2. Run Intent Agent to identify targets
   console.log("-> Running Intent Agent...");
