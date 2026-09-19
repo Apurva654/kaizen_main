@@ -40,7 +40,7 @@ export async function runWorkspaceTests(targetFiles: string[] = []): Promise<Tes
     const report = await validateBeforeSubmission(sandboxFiles, rootDir);
     const passed = report.canSubmit;
     const summary = report.formattedReport;
-    const testedFiles = targetFiles.length > 0 ? targetFiles : sandboxFiles.map(f => f.path);
+    const testedFiles = targetFiles.length > 0 ? targetFiles : sandboxFiles.map(f => f.path || f.name);
 
     return {
       passed,
