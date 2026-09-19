@@ -12,7 +12,7 @@ import { debuggerAgentNode } from './agents/debuggerAgent';
 import { langfuseTracer } from './tools/langfuseTracer';
 import { persistenceEngine } from './tools/persistenceEngine';
 import { runWorkspaceTests, extractFailingFilesFromLogs } from './tools/testRunner';
-import { preprocessUserRequest, saveAgentState, loadAgentState } from './tools/context-manager';
+import { preprocessUserRequest, saveAgentState, loadAgentState, recordConversationTurn } from './tools/context-manager';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -171,6 +171,10 @@ async function runPipeline(rawUserInput: string) {
       errors: (state as any).reviewReport?.issues || [],
       timestamp: new Date()
     });
+
+    if (extraData.explanation || state.userInput) {
+      recordConversationTurn(rawUserInput, extraData.explanation || 'Task executed successfully.');
+    }
 
     emitSSE('pipeline_complete', {
       sessionId,

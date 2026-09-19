@@ -3,7 +3,9 @@ import {
   formatContextForPrompt, 
   handleContextCommand, 
   saveAgentState, 
-  loadAgentState 
+  loadAgentState,
+  recordConversationTurn,
+  formatStateForPrompt
 } from './context-manager';
 
 export async function testContextIntegration() {
@@ -50,6 +52,14 @@ export async function testContextIntegration() {
   assert(formatted.includes('PROJECT CONTEXT'), 'Context formatted');
   assert(formatted.includes('RECENT CHANGES'), 'Git log included');
   assert(formatted.includes('KEY SOURCE FILES'), 'Files included');
+
+  // Test 6: Conversational User Facts & Turn Persistence ("my name is Nole")
+  recordConversationTurn('my name is Nole', 'Nice to meet you, Nole! How can I assist you today?');
+  const stateWithMemory = loadAgentState();
+  assert(stateWithMemory !== null && stateWithMemory.userFacts?.['Name'] === 'Nole', 'User name "Nole" remembered in state');
+  const formattedState = formatStateForPrompt(stateWithMemory!);
+  assert(formattedState.includes('Name: Nole'), 'User name included in prompt state context');
+  assert(formattedState.includes('my name is Nole'), 'Recent conversation turn included in prompt history');
 
   console.log('\n✅ All integration tests passed!');
 }

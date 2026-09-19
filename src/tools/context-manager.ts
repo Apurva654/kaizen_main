@@ -28,6 +28,11 @@ export interface ProjectContext {
   lastModified: Date;
 }
 
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 /**
  * Agent state persisted between requests
  */
@@ -37,6 +42,8 @@ export interface AgentState {
   completedSteps: string[];
   generatedFiles: Map<string, string>;
   errors: string[];
+  conversationHistory?: ChatMessage[];
+  userFacts?: Record<string, string>;
   timestamp: Date;
 }
 
@@ -305,6 +312,8 @@ export function loadAgentState(): AgentState | null {
       completedSteps: raw.completedSteps || [],
       generatedFiles: new Map(raw.generatedFiles || []),
       errors: raw.errors || [],
+      conversationHistory: raw.conversationHistory || [],
+      userFacts: raw.userFacts || {},
       timestamp: new Date(raw.timestamp)
     };
   } catch {
@@ -313,9 +322,65 @@ export function loadAgentState(): AgentState | null {
 }
 
 /**
+ * Record a single conversation turn (user prompt + assistant response) and extract user facts.
+ */
+export function recordConversationTurn(userText: string, assistantText: string): void {
+  const state = loadAgentState() || {
+    conversationId: `conv_${Date.now()}`,
+    currentTask: userText,
+    completedSteps: [],
+    generatedFiles: new Map<string, string>(),
+    errors: [],
+    conversationHistory: [] as ChatMessage[],
+    userFacts: {} as Record<string, string>,
+    timestamp: new Date()
+  };
+
+  const history: ChatMessage[] = state.conversationHistory || [];
+  const facts: Record<string, string> = state.userFacts || {};
+
+  // Fact extraction rule: "my name is X", "i am X", "call me X"
+  const nameMatch = userText.match(/(?:my name is|i am|call me)\s+([a-zA-Z0-9_-]+)/i);
+  if (nameMatch && nameMatch[1]) {
+    const name = nameMatch[1].trim();
+    facts['Name'] = name.charAt(0).toUpperCase() + name.slice(1);
+  }
+
+  // Push turn to history
+  history.push({ role: 'user', content: userText });
+  history.push({ role: 'assistant', content: assistantText });
+
+  // Keep last 20 messages
+  state.conversationHistory = history.length > 20 ? history.slice(-20) : history;
+  state.userFacts = facts;
+  state.timestamp = new Date();
+
+  saveAgentState(state);
+}
+
+/**
  * Format agent state object into prompt block string.
  */
 export function formatStateForPrompt(state: AgentState): string {
+  let factsStr = '';
+  if (state.userFacts && Object.keys(state.userFacts).length > 0) {
+    factsStr = `
+USER PROFILE & KNOWN FACTS:
+===========================
+${Object.entries(state.userFacts).map(([k, v]) => `  - ${k}: ${v}`).join('\n')}
+`;
+  }
+
+  let historyStr = '';
+  if (state.conversationHistory && state.conversationHistory.length > 0) {
+    const recentTurns = state.conversationHistory.slice(-6);
+    historyStr = `
+RECENT CONVERSATION HISTORY:
+============================
+${recentTurns.map(msg => `  ${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content.substring(0, 150)}`).join('\n')}
+`;
+  }
+
   return `
 AGENT STATE (from previous request):
 ====================================
@@ -328,7 +393,7 @@ ${state.generatedFiles.size > 0 ? Array.from(state.generatedFiles.keys()).map(f 
 
 Errors Encountered: ${state.errors.length}
 ${state.errors.length > 0 ? state.errors.map(e => '  ✗ ' + e).join('\n') : '  (None)'}
-
+${factsStr}${historyStr}
 Current Status: IN PROGRESS
 `;
 }
