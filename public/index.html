@@ -190,19 +190,14 @@
           </div>
         </div>
 
-        <!-- Quick Prompt Chips -->
-        <div class="quick-prompts">
-          <span class="chip-label">Quick Prompts:</span>
-          <button class="prompt-chip" data-prompt="Create a student average grade calculator in utils.ts and call it in main.ts">Grading System</button>
-          <button class="prompt-chip" data-prompt="Create a fibonacci and factorial utility module in utils.ts and call them in main.ts">Math Utilities</button>
-          <button class="prompt-chip" data-prompt="Explain how main.ts handles symbol imports and task execution">Explain Architecture</button>
-        </div>
-
         <!-- Chat Panel Input Bar -->
         <div class="chat-input-container">
+          <div id="prompt-resize-bar" class="prompt-resize-bar" title="Drag up or down to adjust prompt box height">
+            <span class="resize-handle-icon">⇯ Drag up/down to adjust prompt area height ⇮</span>
+          </div>
           <form id="chat-form">
             <div id="image-preview-container" class="image-preview-container hidden"></div>
-            <textarea id="chat-input" class="chat-textarea" placeholder="Ask anything or describe feature to build..." rows="2"></textarea>
+            <textarea id="chat-input" class="chat-textarea" placeholder="Ask anything or describe feature to build..." rows="3"></textarea>
             <button type="submit" id="send-btn" class="btn-send" title="Send Prompt (Enter)">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             </button>

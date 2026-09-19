@@ -166,6 +166,44 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       }
     });
+
+    // Interactive Prompt Textarea Drag-to-Resize Handler
+    const promptResizeBar = document.getElementById('prompt-resize-bar');
+    if (promptResizeBar) {
+      let isDraggingPrompt = false;
+      let startY = 0;
+      let startHeight = 0;
+
+      promptResizeBar.addEventListener('mousedown', (e) => {
+        isDraggingPrompt = true;
+        startY = e.clientY;
+        startHeight = chatInput.offsetHeight;
+        document.body.style.userSelect = 'none';
+        document.body.style.cursor = 'ns-resize';
+      });
+
+      document.addEventListener('mousemove', (e) => {
+        if (!isDraggingPrompt) return;
+        const deltaY = startY - e.clientY; // Dragging UP increases prompt box height
+        const newHeight = Math.max(60, Math.min(650, startHeight + deltaY));
+        chatInput.style.height = `${newHeight}px`;
+      });
+
+      document.addEventListener('mouseup', () => {
+        if (isDraggingPrompt) {
+          isDraggingPrompt = false;
+          document.body.style.userSelect = '';
+          document.body.style.cursor = '';
+        }
+      });
+    }
+
+    // Auto-expand textarea as user types multi-line prompts
+    chatInput.addEventListener('input', () => {
+      chatInput.style.height = 'auto';
+      const newHeight = Math.max(60, Math.min(650, chatInput.scrollHeight));
+      chatInput.style.height = `${newHeight}px`;
+    });
   }
 
   // 1. Initialize File Explorer
@@ -739,7 +777,7 @@ document.addEventListener('DOMContentLoaded', () => {
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
         <span>Architecture Analysis & Code Explanation</span>
       </div>
-      <div style="font-size: 12px; color: var(--text-main); line-height: 1.6; white-space: pre-wrap; font-family: var(--font-mono); background: #0f1017; padding: 10px; border-radius: 6px; border: 1px solid var(--border-color); max-height: 300px; overflow-y: auto;">
+      <div class="explanation-text-content">
 ${escapeHtml(text)}
       </div>
     `;
