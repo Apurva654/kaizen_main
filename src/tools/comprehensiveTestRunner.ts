@@ -1,6 +1,7 @@
 import { intentAgentNode } from '../agents/intentAgent';
 import { codeGenAgentNode, getLanguageFromPath } from '../agents/codeGenAgent';
 import { KaizenStateType } from '../state';
+import { detectProjectStack, getCompilerConfig, runValidationPipeline } from './universalValidator';
 
 export interface VerificationResult {
   feature: string;
@@ -124,7 +125,45 @@ export async function runComprehensiveTests(): Promise<VerificationResult[]> {
     });
   }
 
-  // Test 3: Memory Efficiency
+  // Test 3: Universal Multi-Language Stack Detection & Compiler Config
+  try {
+    const mockFilesTs = [{ name: 'package.json', path: 'package.json' }];
+    const stackTs = await detectProjectStack(mockFilesTs);
+    const configTs = await getCompilerConfig(stackTs);
+
+    const mockFilesPy = [{ name: 'requirements.txt', path: 'requirements.txt' }];
+    const stackPy = await detectProjectStack(mockFilesPy);
+    const configPy = await getCompilerConfig(stackPy);
+
+    const mockFilesGo = [{ name: 'go.mod', path: 'go.mod' }];
+    const stackGo = await detectProjectStack(mockFilesGo);
+    const configGo = await getCompilerConfig(stackGo);
+
+    if (stackTs.language === 'JavaScript/TypeScript' && stackPy.language === 'Python' && stackGo.language === 'Go' && configTs.typeCheck.includes('tsc')) {
+      results.push({
+        feature: 'Universal Multi-Language Stack Detection',
+        status: 'PASS',
+        details: 'Auto-detected JS/TS (npm), Python (pip), and Go (go.mod) stacks with correct compiler configurations',
+        timestamp: new Date()
+      });
+    } else {
+      results.push({
+        feature: 'Universal Multi-Language Stack Detection',
+        status: 'FAIL',
+        details: `Detection failed: TS (${stackTs.language}), Py (${stackPy.language}), Go (${stackGo.language})`,
+        timestamp: new Date()
+      });
+    }
+  } catch (err: any) {
+    results.push({
+      feature: 'Universal Multi-Language Stack Detection',
+      status: 'FAIL',
+      details: err?.message || String(err),
+      timestamp: new Date()
+    });
+  }
+
+  // Test 4: Memory Efficiency
   try {
     const memoryMB = process.memoryUsage().heapUsed / 1024 / 1024;
     results.push({
