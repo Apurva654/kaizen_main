@@ -108,6 +108,7 @@ export async function plannerAgentNode(state: typeof KaizenState.State) {
 
         const structuredModel = model.withStructuredOutput(PlannerSchema, { method: 'jsonMode' });
 
+        const truncatedContext = (state.extractedContext || "").slice(-2500);
         const systemPrompt = `You are an expert technical software planner for Kaizen AI.
 Analyze the user prompt, target files, AST symbol facts, and full workspace context below to construct a grounded, step-by-step implementation plan. Respond in valid json format.
 Do NOT invent non-existent files or hallucinate steps. Base your plan directly on the target files, source code, and dependency context provided.
@@ -121,7 +122,7 @@ Existing Workspace Files: ${existingFiles.length > 0 ? existingFiles.join(', ') 
 ${symbolSummary}
 
 === WORKSPACE GRAPH & SOURCE CONTEXT ===
-${state.extractedContext || "No context provided."}
+${truncatedContext || "No context provided."}
 
 MANDATES FOR PLAN GENERATION:
 1. For NEW target files that do not exist in the workspace yet (e.g., ${newFiles.join(', ') || 'new files'}), generate implementation steps stating file creation and function/class implementation.

@@ -453,9 +453,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (data.result && data.result.diffCards) {
           renderDiffCards(data.result.diffCards);
         }
-        if (data.agent === 'ReviewerAgent' && data.status === 'completed') {
-          renderReviewerBadgeCard(data.result);
-        }
         break;
 
       case 'HITL_REQUEST':
@@ -465,7 +462,6 @@ document.addEventListener('DOMContentLoaded', () => {
       case 'PIPELINE_COMPLETE':
         finalizeStepper(data);
         if (data.status === 'SUCCESS' || data.status === 'DEBUG_COMPLETE' || data.status === 'TESTS_PASSED') {
-          renderCompletionCard(data);
           loadSandboxFiles();
           if (data.targetFiles && data.targetFiles[0]) {
             openFileInEditor(data.targetFiles[0]);
@@ -766,21 +762,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderExplanationCard(data) {
     const card = document.createElement('div');
-    card.className = 'gen-card';
-    card.style.borderColor = 'var(--primary)';
-    card.style.background = 'linear-gradient(180deg, rgba(99, 102, 241, 0.1), var(--bg-card))';
+    card.className = 'agent-msg-wall';
     
-    const text = data.explanation || (data.state && data.state.extractedContext) || 'Architecture analysis completed.';
+    const text = data.explanation || (data.state && data.state.extractedContext) || 'Task completed.';
     
-    card.innerHTML = `
-      <div style="display: flex; align-items: center; gap: 8px; color: #a5b4fc; font-weight: 600; font-size: 13px;">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-        <span>Architecture Analysis & Code Explanation</span>
-      </div>
-      <div class="explanation-text-content">
-${escapeHtml(text)}
-      </div>
-    `;
+    card.innerHTML = `${escapeHtml(text)}`;
     widgetsContainer.appendChild(card);
     card.scrollIntoView({ behavior: 'smooth' });
   }
@@ -834,13 +820,10 @@ ${escapeHtml(text)}
     resetStepper();
 
     const userCard = document.createElement('div');
-    userCard.className = 'gen-card';
-    userCard.style.background = 'rgba(99, 102, 241, 0.1)';
-    userCard.style.borderColor = 'var(--primary)';
+    userCard.className = 'user-msg-bubble';
     let imageHtml = activeImage ? `<div style="margin-top: 6px;"><img src="${activeImage}" style="height: 60px; border-radius: 4px; border: 1px solid var(--border-color);" /></div>` : '';
     userCard.innerHTML = `
-      <div style="font-size: 11px; color: #a5b4fc; font-weight: 600;">USER PROMPT</div>
-      <div style="font-size: 13px; color: var(--text-main); font-weight: 500;">${escapeHtml(query || 'Attached image query')}</div>
+      <div style="font-size: 13px; color: #e0e7ff; font-weight: 500;">${escapeHtml(query || 'Attached image query')}</div>
       ${imageHtml}
     `;
     widgetsContainer.appendChild(userCard);
