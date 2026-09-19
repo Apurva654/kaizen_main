@@ -8,7 +8,7 @@ import { langfuseTracer } from '../tools/langfuseTracer';
 dotenv.config();
 
 export const IntentSchema = z.object({
-  intent: z.enum(['GENERATE_CODE', 'DEBUG_ERROR', 'EXPLAIN_CODE', 'REFACTOR', 'RUN_EXISTING_TESTS'])
+  intent: z.enum(['GENERATE_CODE', 'DEBUG_ERROR', 'EXPLAIN_CODE', 'REFACTOR', 'RUN_EXISTING_TESTS', 'GENERAL_QUERY'])
     .describe("The classified intent of the user request"),
   targetFiles: z.array(z.string()).optional()
     .describe("All target source file paths identified or implied for the task (e.g., ['src/sandbox/utils.ts', 'src/sandbox/main.ts'])"),
@@ -16,7 +16,47 @@ export const IntentSchema = z.object({
     .describe("All target source file paths identified or implied for the task")
 });
 
+export function isGeneralQuery(input: string): boolean {
+  const trimmed = input.trim().toLowerCase();
+  
+  const codingKeywords = [
+    'code', 'file', 'function', 'class', 'bug', 'error', 'repo', 'workspace', 'script',
+    'app', 'build', 'html', 'css', 'javascript', 'typescript', 'ts', 'js', 'py', 'python',
+    'json', 'component', 'test', 'create', 'write', 'make', 'delete', 'refactor', 'fix',
+    'implement', 'add', 'modify', 'directory', 'folder', 'npm', 'node', 'run', 'execute',
+    'calculator', 'utils', 'main.ts', 'solution', 'import', 'export', 'const', 'let', 'var'
+  ];
+
+  const hasCodingKeyword = codingKeywords.some(kw => {
+    const reg = new RegExp(`\\b${kw}\\b`, 'i');
+    return reg.test(trimmed);
+  });
+
+  if (hasCodingKeyword) return false;
+
+  // 1. Direct short greetings or conversational phrases
+  const greetingsRegex = /^(hello|hi|hey|greetings|good morning|good afternoon|good evening|howdy|yo|sup|ping|test)(\b|[!?. ]|$)/i;
+  if (greetingsRegex.test(trimmed)) return true;
+
+  // 2. Common general knowledge / conversational starters
+  const gkStartersRegex = /^(who is|what is|where is|when did|why is|how is|tell me|explain who|explain what|do you know|is it|are you|can you tell|how far|how many|who was|what was)/i;
+  if (gkStartersRegex.test(trimmed)) return true;
+
+  // 3. Short prompts without any coding keywords (e.g., "who is nole?", "what is 2+2", "hello!!")
+  if (trimmed.length < 80) return true;
+
+  return false;
+}
+
 export async function intentAgentNode(state: typeof KaizenState.State): Promise<{ status: string; targetFiles: string[] }> {
+  // Fast-track heuristic for general greetings and general knowledge questions BEFORE LLM call
+  if (isGeneralQuery(state.userInput)) {
+    return {
+      status: 'ROUTED_GENERAL_QUERY',
+      targetFiles: []
+    };
+  }
+
   const apiKey = process.env.GROQ_API_KEY;
 
   if (apiKey && apiKey !== 'your_groq_api_key_here') {
@@ -37,19 +77,16 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
 
         const structuredModel = model.withStructuredOutput(IntentSchema, { method: 'jsonMode' });
 
-        const systemPrompt = `You are an intent classification and target file selector agent for Kaizen AI. Respond in valid json format.
-Analyze the user's prompt (which may be in English, Hinglish, slang, or natural developer phrasing) and classify their intent into one of:
+        const systemPrompt = `You are an intent classification and target file selector agent. Respond in valid json format.
+Analyze the user's prompt and classify their intent into one of:
+- GENERAL_QUERY: General knowledge, greetings, chit-chat, or questions unrelated to code implementation or editing (e.g. "hello", "who is nole?", "who is roger federer?", "what is the capital of France?").
 - GENERATE_CODE: Creating new features, boilerplate, or implementing requested functionality.
 - DEBUG_ERROR: Fixing bugs, addressing runtime errors, broken builds, or troubleshooting code.
-- EXPLAIN_CODE: Explaining how code works, answering architecture/codebase questions.
+- EXPLAIN_CODE: Explaining how codebase code works, answering architecture/codebase questions.
 - REFACTOR: Cleaning up code, optimizing performance, renaming, or restructuring existing code.
-- RUN_EXISTING_TESTS: Executing existing test suite, identifying test failures, and fixing implementation if tests fail.
+- RUN_EXISTING_TESTS: Executing existing test suite, identifying test failures.
 
-=== SANDBOX PLAYGROUND & FILE ISOLATION RULES ===
-1. All target files MUST be located inside the 'src/sandbox/' folder (e.g., 'src/sandbox/studentAverage.ts', 'src/sandbox/utils.ts').
-2. FILE ISOLATION: If the prompt explicitly mentions a file (e.g. "in main.ts" or "in utils.ts"), set targetFiles to that file path inside 'src/sandbox/'.
-3. EXISTING APP/FEATURE TARGETING: If the user request relates to an existing application in the workspace (e.g. To-Do application, CLI, task service, persistence, test suite), set targetFiles to the relevant existing workspace files (e.g., ['src/sandbox/cli.py', 'src/sandbox/service.py', 'src/sandbox/task.py', 'src/sandbox/tests/test_task.py']).
-4. NEW ISOLATED SCRIPT: Only generate a brand new file path inside 'src/sandbox/' (e.g., 'src/sandbox/studentAverage.ts') if the prompt is for a completely novel, standalone feature unrelated to existing workspace code.`;
+For GENERAL_QUERY, targetFiles must be an empty array [].`;
 
         const startTime = Date.now();
         const invokePromise = structuredModel.invoke([
@@ -74,12 +111,18 @@ Analyze the user's prompt (which may be in English, Hinglish, slang, or natural 
         );
 
         const intent = result.intent || 'GENERATE_CODE';
+        if (intent === 'GENERAL_QUERY') {
+          return {
+            status: 'ROUTED_GENERAL_QUERY',
+            targetFiles: []
+          };
+        }
+
         const rawFiles = result.targetFiles || result.target_files;
         let extractedFiles: string[] = (rawFiles && rawFiles.length > 0)
           ? (rawFiles as string[])
           : (state.targetFiles.length > 0 ? state.targetFiles : ['src/sandbox/main.ts']);
 
-        // Ensure proper paths
         extractedFiles = extractedFiles.map((f: string) => {
           if (!f.includes('/') && !f.includes('\\')) {
             return `src/sandbox/${f}`;
@@ -101,56 +144,29 @@ Analyze the user's prompt (which may be in English, Hinglish, slang, or natural 
   const input = state.userInput.toLowerCase();
   let intent: z.infer<typeof IntentSchema>['intent'] = 'GENERATE_CODE';
 
-  if (input.includes('run the existing test') || input.includes('run existing test') || input.includes('test suite') || input.includes('rerun the existing test')) {
-    intent = 'RUN_EXISTING_TESTS';
+  if (isGeneralQuery(state.userInput)) {
+    return {
+      status: 'ROUTED_GENERAL_QUERY',
+      targetFiles: []
+    };
   }
-  else if (input.includes('fix') || input.includes('bug') || input.includes('error') || input.includes('failing')) {
+
+  if (input.includes('run the existing test') || input.includes('run existing test') || input.includes('test suite')) {
+    intent = 'RUN_EXISTING_TESTS';
+  } else if (input.includes('fix') || input.includes('bug') || input.includes('error') || input.includes('failing')) {
     intent = 'DEBUG_ERROR';
-  } 
-  else if (input.includes('explain') || input.includes('how') || input.includes('inspect') || input.includes('analyze') || input.includes('determine') || input.includes('samjha')) {
+  } else if (input.includes('explain') || input.includes('how') || input.includes('inspect') || input.includes('analyze')) {
     intent = 'EXPLAIN_CODE';
-  } 
-  else if (input.includes('refactor') || input.includes('clean')) {
+  } else if (input.includes('refactor') || input.includes('clean')) {
     intent = 'REFACTOR';
   }
 
   const detectedFiles: string[] = [];
-  if (input.includes('string_utils.py') || input.includes('string_utils') || input.includes('reverse_string')) {
-    detectedFiles.push('src/sandbox/string_utils.py');
-    if (fs.existsSync('src/sandbox/tests/test_string_utils.py')) {
-      detectedFiles.push('src/sandbox/tests/test_string_utils.py');
-    }
-  }
-  if (input.includes('cli.py') || input.includes('cli')) {
-    detectedFiles.push('src/sandbox/cli.py');
-  }
-  if (input.includes('service.py') || input.includes('service')) {
-    detectedFiles.push('src/sandbox/service.py');
-  }
-  if (input.includes('task.py') || input.includes('task')) {
-    detectedFiles.push('src/sandbox/task.py');
-  }
-  if (input.includes('tests') || input.includes('test')) {
-    if (fs.existsSync('src/sandbox/tests/test_string_utils.py')) {
-      detectedFiles.push('src/sandbox/tests/test_string_utils.py');
-    }
-    if (fs.existsSync('src/sandbox/tests/test_task.py')) {
-      detectedFiles.push('src/sandbox/tests/test_task.py');
-    }
-  }
   if (input.includes('utils.ts') || input.includes('utils')) {
-    if (!detectedFiles.includes('src/sandbox/string_utils.py')) {
-      detectedFiles.push('src/sandbox/utils.ts');
-    }
+    detectedFiles.push('src/sandbox/utils.ts');
   }
   if (input.includes('main.ts') || input.includes('main')) {
     detectedFiles.push('src/sandbox/main.ts');
-  }
-  if (input.includes('to-do') || input.includes('todo') || input.includes('persist') || input.includes('persistence')) {
-    if (fs.existsSync('src/sandbox/cli.py') && !detectedFiles.includes('src/sandbox/cli.py')) detectedFiles.push('src/sandbox/cli.py');
-    if (fs.existsSync('src/sandbox/service.py') && !detectedFiles.includes('src/sandbox/service.py')) detectedFiles.push('src/sandbox/service.py');
-    if (fs.existsSync('src/sandbox/task.py') && !detectedFiles.includes('src/sandbox/task.py')) detectedFiles.push('src/sandbox/task.py');
-    if (fs.existsSync('src/sandbox/tests/test_task.py') && !detectedFiles.includes('src/sandbox/tests/test_task.py')) detectedFiles.push('src/sandbox/tests/test_task.py');
   }
 
   let finalTargets: string[];

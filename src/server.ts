@@ -58,6 +58,17 @@ app.post('/api/hitl/respond', (req: Request, res: Response) => {
   }
 });
 
+// Comprehensive Verification Test Suite Endpoint
+app.get('/api/test/comprehensive', async (req: Request, res: Response) => {
+  try {
+    const { runComprehensiveTests } = await import('./tools/comprehensiveTestRunner');
+    const results = await runComprehensiveTests();
+    res.json({ success: true, results });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || String(err) });
+  }
+});
+
 // Run Agent Pipeline Endpoint
 app.post('/api/pipeline/run', async (req: Request, res: Response) => {
   const { userInput } = req.body;
@@ -105,7 +116,8 @@ async function runPipeline(userInput: string) {
     lifecycleStatus: "RUNNING",
     currentStage: "intent",
     completedStages: [],
-    skippedStages: []
+    skippedStages: [],
+    generalAnswer: undefined
   };
 
   persistenceEngine.saveCheckpoint(sessionId, 'INITIALIZED', state);
@@ -161,6 +173,33 @@ async function runPipeline(userInput: string) {
       result: { status: state.status, targetFiles: state.targetFiles } 
     });
 
+    // Routing Logic for General Knowledge & Greetings
+    if (state.status === "ROUTED_GENERAL_QUERY") {
+      skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
+      
+      let answer = `Hello! How can I help you with your coding project today?`;
+      const apiKey = process.env.GROQ_API_KEY;
+      if (apiKey && apiKey !== 'your_groq_api_key_here') {
+        try {
+          const { ChatGroq } = await import('@langchain/groq');
+          const model = new ChatGroq({ apiKey, model: 'groq/compound-mini', temperature: 0.5 });
+          const res = await model.invoke([
+            { role: 'system', content: 'You are a helpful AI assistant. Provide concise, clear, and direct answers to general questions or greetings without generating file code unless explicitly requested.' },
+            { role: 'user', content: userInput }
+          ]);
+          answer = typeof res.content === 'string' ? res.content : String(res.content);
+        } catch (err) {
+          console.warn('General query LLM invocation failed:', err);
+        }
+      }
+
+      await finalizeExecution('GENERAL_COMPLETE', {
+        route: 'GENERAL_QUERY',
+        explanation: answer
+      });
+      return;
+    }
+
     // 2. Context Retrieval Agent
     logDiagnostic('GRAPH', 'ENTER ContextRetrievalAgent', { targetFiles: state.targetFiles });
     emitSSE('agent_step', { agent: 'ContextRetrievalAgent', status: 'running', message: 'Analyzing workspace graph & AST symbols...' });
@@ -177,7 +216,7 @@ async function runPipeline(userInput: string) {
       result: { extractedContext: state.extractedContext } 
     });
 
-    // Routing Logic
+    // Routing Logic for Explanation
     if (state.status === "ROUTED_EXPLAIN_CODE") {
       skippedStages.push('planner', 'coder', 'testrunner', 'debugger', 'reviewer');
       await finalizeExecution('EXPLAIN_COMPLETE', {
@@ -490,6 +529,9 @@ app.get('/api/workspace/files', (req: Request, res: Response) => {
   if (fs.existsSync(sandboxDir)) {
     const list = fs.readdirSync(sandboxDir);
     for (const item of list) {
+      // Hide internal benchmark folders test1..test5
+      if (/^test[1-5]$/i.test(item)) continue;
+
       const fullPath = path.join(sandboxDir, item);
       const stat = fs.statSync(fullPath);
       files.push({
@@ -542,6 +584,47 @@ app.post('/api/workspace/file', (req: Request, res: Response) => {
 
   fs.writeFileSync(fullPath, content, 'utf-8');
   res.json({ success: true, message: `Saved changes to ${relPath}` });
+});
+
+// Delete Single Sandbox File API
+app.delete('/api/workspace/file', (req: Request, res: Response) => {
+  const relPath = req.query.path as string;
+  if (!relPath) {
+    res.status(400).json({ error: 'path parameter is required' });
+    return;
+  }
+
+  if (isProtectedFile(relPath)) {
+    res.status(403).json({ error: `Cannot delete protected file '${relPath}'` });
+    return;
+  }
+
+  const fullPath = path.resolve(process.cwd(), relPath);
+  if (fs.existsSync(fullPath)) {
+    const stat = fs.statSync(fullPath);
+    if (stat.isDirectory()) {
+      fs.rmSync(fullPath, { recursive: true, force: true });
+    } else {
+      fs.unlinkSync(fullPath);
+    }
+    res.json({ success: true, message: `Deleted ${relPath}` });
+  } else {
+    res.status(404).json({ error: 'File not found' });
+  }
+});
+
+// Clear All User Sandbox Files API
+app.post('/api/workspace/clear-sandbox', (req: Request, res: Response) => {
+  const sandboxDir = path.resolve(process.cwd(), 'src/sandbox');
+  if (fs.existsSync(sandboxDir)) {
+    const list = fs.readdirSync(sandboxDir);
+    for (const item of list) {
+      if (/^test[1-5]$/i.test(item)) continue; // preserve benchmark dirs
+      const fullPath = path.join(sandboxDir, item);
+      fs.rmSync(fullPath, { recursive: true, force: true });
+    }
+  }
+  res.json({ success: true, message: 'All user sandbox files cleared' });
 });
 
 // Storage Tier Endpoints

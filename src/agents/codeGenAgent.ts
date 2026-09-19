@@ -131,7 +131,8 @@ Your task is to generate precise, production-ready source code patches in each t
 5. PRESERVATION MANDATE: When modifying an existing file inside 'src/sandbox/', NEVER erase or overwrite existing functions or exports unless instructed. Append or integrate new functions cleanly while keeping pre-existing code intact.
 6. MULTI-FILE EDITS: Return a patch for EACH target file inside the 'files' array field. Target Files:\n${fileLangSummary}
 7. CODE FORMAT: Do NOT wrap code in markdown code blocks (\`\`\`python ... \`\`\` or \`\`\`typescript ... \`\`\`) inside the 'code' string fields. Return pure executable raw source code matching the target file extension.
-8. In 'explanations', summarize how functions, classes, and imports were implemented.`;
+8. ZERO TEMPLATE BOILERPLATE MANDATE: NEVER output generic 'export function taskHandler()' boilerplate or TypeScript syntax for .html, .css, or .js files. For .html files, output valid HTML (<!DOCTYPE html><html>...). For .css files, output valid CSS rules (body { ... }). For .js files, output valid JavaScript code.
+9. In 'explanations', summarize how functions, classes, and imports were implemented.`;
 
         const userContextPrompt = `User Request: "${state.userInput}"
 Target Files & Languages:
@@ -187,15 +188,21 @@ ${state.extractedContext || "No context provided."}`;
   // Fallback generation if LLM is unavailable or unparseable
   if (generatedPatches.length === 0) {
     for (const targetFile of targetFiles) {
-      const lang = getLanguageFromPath(targetFile);
+      const ext = targetFile.split('.').pop()?.toLowerCase();
       let fallbackCode = "";
 
-      if (lang === 'Python') {
-        fallbackCode = `# Target File: ${targetFile}\n# User Task: ${state.userInput}\n\ndef greet(name: str) -> str:\n    """Return Hello, followed by name."""\n    return f"Hello, {name}"\n`;
-      } else if (targetFile.endsWith('main.ts')) {
-        fallbackCode = `${securityDirective}import { factorial, add, multiply } from './utils';\n\n// task: ${state.userInput}\nexport function executeTask() {\n  const sum = add(10, 20);\n  const prod = multiply(5, 4);\n  const fact = factorial(5);\n  return { status: "success", sum, prod, fact, task: "${state.userInput}" };\n}\n`;
+      if (ext === 'html') {
+        fallbackCode = `<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n  <title>${state.userInput}</title>\n  <link rel="stylesheet" href="style.css">\n</head>\n<body>\n  <div id="app">\n    <h1>${state.userInput}</h1>\n  </div>\n  <script src="script.js"></script>\n</body>\n</html>\n`;
+      } else if (ext === 'css') {
+        fallbackCode = `/* Styles for ${targetFile} */\n* {\n  box-sizing: border-box;\n  margin: 0;\n  padding: 0;\n}\nbody {\n  font-family: system-ui, -apple-system, sans-serif;\n  background: #0f172a;\n  color: #f8fafc;\n  display: flex;\n  justify-content: center;\n  align-items: center;\n  min-height: 100vh;\n}\n`;
+      } else if (ext === 'js' || ext === 'jsx') {
+        fallbackCode = `// ${state.userInput}\nconsole.log("Initializing ${targetFile}...");\n\ndocument.addEventListener("DOMContentLoaded", () => {\n  console.log("App ready!");\n});\n`;
+      } else if (ext === 'py') {
+        fallbackCode = `# ${targetFile} - ${state.userInput}\n\ndef main():\n    print("Running task: ${state.userInput.replace(/"/g, '\\"')}")\n\nif __name__ == "__main__":\n    main()\n`;
+      } else if (ext === 'json') {
+        fallbackCode = `{\n  "task": "${state.userInput.replace(/"/g, '\\"')}",\n  "status": "initialized"\n}\n`;
       } else {
-        fallbackCode = `${securityDirective}// task: ${state.userInput}\n// target file: ${targetFile}\n\nexport function taskHandler(input: string): string {\n  return "Processed task: " + input;\n}\n`;
+        fallbackCode = `${securityDirective}// ${state.userInput}\n// target file: ${targetFile}\n\nexport function taskHandler(input: string): string {\n  return "Processed task: " + input;\n}\n`;
       }
 
       generatedPatches.push({

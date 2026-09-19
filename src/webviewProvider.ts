@@ -120,7 +120,8 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
       lifecycleStatus: "RUNNING",
       currentStage: "intent",
       completedStages: [],
-      skippedStages: []
+      skippedStages: [],
+      generalAnswer: undefined
     };
 
     const completedStages: string[] = [];
@@ -155,6 +156,33 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
         status: 'completed', 
         result: { status: state.status, targetFiles: state.targetFiles } 
       });
+
+      // Routing Logic for General Knowledge & Greetings
+      if (state.status === "ROUTED_GENERAL_QUERY") {
+        skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
+        
+        let answer = `Hello! How can I help you with your coding project today?`;
+        const apiKey = process.env.GROQ_API_KEY;
+        if (apiKey && apiKey !== 'your_groq_api_key_here') {
+          try {
+            const { ChatGroq } = await import('@langchain/groq');
+            const model = new ChatGroq({ apiKey, model: 'groq/compound-mini', temperature: 0.5 });
+            const res = await model.invoke([
+              { role: 'system', content: 'You are a helpful AI assistant. Provide concise, clear, and direct answers to general questions or greetings without generating file code unless explicitly requested.' },
+              { role: 'user', content: userInput }
+            ]);
+            answer = typeof res.content === 'string' ? res.content : String(res.content);
+          } catch (err) {
+            console.warn('General query LLM invocation failed:', err);
+          }
+        }
+
+        await finalizeExecution('GENERAL_COMPLETE', {
+          route: 'GENERAL_QUERY',
+          explanation: answer
+        });
+        return;
+      }
 
       // 2. Context Retrieval Agent
       postWebviewEvent('AGENT_STEP', { agent: 'ContextRetrievalAgent', status: 'running', message: 'Analyzing workspace AST symbols...' });

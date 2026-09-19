@@ -89,6 +89,11 @@ export const KaizenState = Annotation.Root({
   skippedStages: Annotation<string[] | undefined>({
     reducer: (x, y) => Array.from(new Set([...(x || []), ...(y || [])])),
     default: () => []
+  }),
+
+  generalAnswer: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
   })
 });
 

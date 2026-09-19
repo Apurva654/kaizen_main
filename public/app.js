@@ -18,6 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let activeFilePath = 'src/sandbox/main.ts';
   let sseSource = null;
+  let pastedImagePayload = null;
 
   // Detect VS Code Extension Environment
   const vscode = (typeof acquireVsCodeApi === 'function') ? acquireVsCodeApi() : null;
@@ -25,7 +26,146 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (isVsCodeEnv) {
     document.body.classList.add('vscode-environment');
-    console.log('[Kaizen UI] Running inside Native VS Code Extension Webview');
+    console.log('[UI] Running inside Native VS Code Extension Webview');
+  }
+
+  // Stepper Header Collapsible Accordion Toggle
+  const stepperContainer = document.getElementById('agent-stepper-container');
+  const stepperHeaderToggle = document.getElementById('stepper-header-toggle');
+  const stepperInlineStatus = document.getElementById('stepper-inline-status');
+
+  if (stepperHeaderToggle && stepperContainer) {
+    stepperHeaderToggle.addEventListener('click', () => {
+      stepperContainer.classList.toggle('collapsed');
+    });
+  }
+
+  // Toast Notification System
+  function showToast(message, type = 'info') {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
+
+    setTimeout(() => {
+      toast.style.opacity = '0';
+      setTimeout(() => toast.remove(), 200);
+    }, 3000);
+  }
+
+  // Prompt History Manager
+  const HISTORY_KEY = 'kaizen_prompt_history_v1';
+  let promptHistory = [];
+  let historyIndex = -1;
+  try {
+    promptHistory = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+  } catch (e) {
+    promptHistory = [];
+  }
+
+  function addPromptToHistory(prompt) {
+    if (!prompt) return;
+    promptHistory = promptHistory.filter(p => p !== prompt);
+    promptHistory.unshift(prompt);
+    if (promptHistory.length > 50) promptHistory.pop();
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(promptHistory));
+    } catch (e) {}
+    historyIndex = -1;
+  }
+
+  // Keyboard Shortcuts Modal Toggle
+  const shortcutsModal = document.getElementById('shortcuts-modal');
+  const closeShortcutsBtn = document.getElementById('close-shortcuts-btn');
+  const toggleShortcuts = () => shortcutsModal && shortcutsModal.classList.toggle('hidden');
+
+  if (closeShortcutsBtn) closeShortcutsBtn.addEventListener('click', toggleShortcuts);
+
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === '/') {
+      e.preventDefault();
+      toggleShortcuts();
+    }
+    if (e.key === 'Escape') {
+      if (shortcutsModal && !shortcutsModal.classList.contains('hidden')) {
+        shortcutsModal.classList.add('hidden');
+      } else if (stepperContainer && !stepperContainer.classList.contains('collapsed')) {
+        stepperContainer.classList.add('collapsed');
+      }
+    }
+  });
+
+  // Clipboard Screenshot Paste & Keyboard Listener
+  const imagePreviewContainer = document.getElementById('image-preview-container');
+  if (chatInput && imagePreviewContainer) {
+    chatInput.addEventListener('paste', (e) => {
+      const items = e.clipboardData && e.clipboardData.items;
+      if (!items) return;
+
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') !== -1) {
+          e.preventDefault();
+          const file = items[i].getAsFile();
+          if (!file) continue;
+
+          // Validate image size < 10MB
+          if (file.size > 10 * 1024 * 1024) {
+            showToast('Image size exceeds 10MB limit', 'error');
+            return;
+          }
+
+          const reader = new FileReader();
+          reader.onload = (evt) => {
+            pastedImagePayload = evt.target.result;
+            imagePreviewContainer.innerHTML = `
+              <div class="image-thumb-wrapper">
+                <img src="${pastedImagePayload}" alt="Pasted Screenshot Preview" />
+                <button type="button" class="image-thumb-remove" title="Remove Screenshot">&times;</button>
+              </div>
+            `;
+            imagePreviewContainer.classList.remove('hidden');
+            showToast(`✓ Screenshot attached (${(file.size / 1024).toFixed(0)} KB)`, 'success');
+
+            const removeBtn = imagePreviewContainer.querySelector('.image-thumb-remove');
+            if (removeBtn) {
+              removeBtn.addEventListener('click', () => {
+                pastedImagePayload = null;
+                imagePreviewContainer.innerHTML = '';
+                imagePreviewContainer.classList.add('hidden');
+                showToast('Screenshot removed', 'info');
+              });
+            }
+          };
+          reader.readAsDataURL(file);
+          break;
+        }
+      }
+    });
+
+    // Enter Key Submission & Up/Down Prompt History Navigation
+    chatInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        chatForm.requestSubmit();
+      } else if (e.key === 'ArrowUp') {
+        if (chatInput.selectionStart === 0 && promptHistory.length > 0) {
+          if (historyIndex < promptHistory.length - 1) {
+            historyIndex++;
+            chatInput.value = promptHistory[historyIndex];
+          }
+        }
+      } else if (e.key === 'ArrowDown') {
+        if (historyIndex > 0) {
+          historyIndex--;
+          chatInput.value = promptHistory[historyIndex];
+        } else if (historyIndex === 0) {
+          historyIndex = -1;
+          chatInput.value = '';
+        }
+      }
+    });
   }
 
   // 1. Initialize File Explorer
@@ -40,25 +180,117 @@ document.addEventListener('DOMContentLoaded', () => {
       fileTree.innerHTML = '';
 
       if (!data.sandboxFiles || data.sandboxFiles.length === 0) {
-        fileTree.innerHTML = `<div class="tree-placeholder">No files in src/sandbox yet. Run a prompt to generate code!</div>`;
+        fileTree.innerHTML = `<div class="tree-placeholder">Empty window. Run a prompt to generate code!</div>`;
         return;
       }
 
-      data.sandboxFiles.forEach(file => {
+      // Strict filter for internal benchmark test suite folders (test1..test5)
+      const visibleFiles = data.sandboxFiles.filter(file => {
+        const nameLower = file.name.toLowerCase();
+        const pathLower = file.path.toLowerCase();
+        if (/^test[1-5]$/i.test(file.name)) return false;
+        if (pathLower.includes('/test1') || pathLower.includes('/test2') ||
+            pathLower.includes('/test3') || pathLower.includes('/test4') ||
+            pathLower.includes('/test5') || pathLower.includes('\\test1') ||
+            pathLower.includes('\\test2') || pathLower.includes('\\test3') ||
+            pathLower.includes('\\test4') || pathLower.includes('\\test5')) {
+          return false;
+        }
+        return true;
+      });
+
+      if (visibleFiles.length === 0) {
+        fileTree.innerHTML = `<div class="tree-placeholder">Workspace empty. Type a prompt to create project files!</div>`;
+        return;
+      }
+
+      visibleFiles.forEach(file => {
         const item = document.createElement('div');
         item.className = `tree-item ${file.path === activeFilePath ? 'active' : ''}`;
         item.setAttribute('data-path', file.path);
+        
         item.innerHTML = `
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-          <span>${file.name}</span>
+          <div class="tree-item-label">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            <span>${file.name}</span>
+          </div>
+          <button type="button" class="tree-item-delete-btn" title="Delete file '${file.name}'">&times;</button>
         `;
-        item.addEventListener('click', () => openFileInEditor(file.path));
+
+        item.querySelector('.tree-item-label').addEventListener('click', () => openFileInEditor(file.path));
+
+        const delBtn = item.querySelector('.tree-item-delete-btn');
+        if (delBtn) {
+          delBtn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (confirm(`Delete '${file.name}' from sandbox?`)) {
+              try {
+                const deleteRes = await fetch(`/api/workspace/file?path=${encodeURIComponent(file.path)}`, {
+                  method: 'DELETE'
+                });
+                if (deleteRes.ok) {
+                  showToast(`Deleted ${file.name}`, 'info');
+                  if (activeFilePath === file.path) {
+                    activeFilePath = '';
+                    if (codeEditor) codeEditor.value = '';
+                    if (editorFilePath) editorFilePath.textContent = 'No file open';
+                    updateLineNumbers();
+                  }
+                  loadSandboxFiles();
+                } else {
+                  showToast('Failed to delete file', 'error');
+                }
+              } catch (err) {
+                showToast('Error deleting file', 'error');
+              }
+            }
+          });
+        }
+
         fileTree.appendChild(item);
       });
     } catch (err) {
       fileTree.innerHTML = `<div class="tree-placeholder">Workspace files managed via VS Code.</div>`;
     }
   }
+
+  // Clear Sandbox Workspace Listener
+  const clearSandboxBtn = document.getElementById('clear-sandbox-btn');
+  if (clearSandboxBtn) {
+    clearSandboxBtn.addEventListener('click', async () => {
+      if (confirm('Are you sure you want to clear all sandbox files and make an empty window?')) {
+        try {
+          const res = await fetch('/api/workspace/clear-sandbox', { method: 'POST' });
+          if (res.ok) {
+            showToast('Sandbox playground cleared (Empty Window)', 'success');
+            activeFilePath = '';
+            if (codeEditor) codeEditor.value = '';
+            if (editorFilePath) editorFilePath.textContent = 'No file open';
+            updateLineNumbers();
+            loadSandboxFiles();
+          } else {
+            showToast('Failed to clear sandbox', 'error');
+          }
+        } catch (err) {
+          showToast('Error clearing sandbox', 'error');
+        }
+      }
+    });
+  }
+
+  function updateLineNumbers() {
+    if (!codeEditor || !lineNumbers) return;
+    const lines = codeEditor.value.split('\n').length;
+    let numbersHtml = '';
+    for (let i = 1; i <= lines; i++) {
+      numbersHtml += `${i}<br>`;
+    }
+    lineNumbers.innerHTML = numbersHtml;
+  }
+
+  if (codeEditor) codeEditor.addEventListener('input', updateLineNumbers);
+  if (saveFileBtn) saveFileBtn.addEventListener('click', saveActiveFile);
+  if (refreshFilesBtn) refreshFilesBtn.addEventListener('click', loadSandboxFiles);
 
   // 2. Open File in Editor
   async function openFileInEditor(relPath) {
@@ -256,6 +488,24 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     const key = map[agentName];
     if (!key) return;
+
+    if (stepperInlineStatus) {
+      if (status === 'running') {
+        const readableNames = {
+          'IntentAgent': 'Routing intent...',
+          'ContextRetrievalAgent': 'Analyzing context...',
+          'PlannerAgent': 'Generating plan...',
+          'CoderAgent': 'Generating code...',
+          'TestRunnerAgent': 'Running tests...',
+          'DebuggerAgent': 'Debugging code...',
+          'ReviewerAgent': 'Reviewing files...'
+        };
+        stepperInlineStatus.textContent = `⚡ ${readableNames[agentName] || agentName}`;
+      } else if (status === 'completed') {
+        stepperInlineStatus.textContent = `✔ Step completed`;
+      }
+    }
+
     const stepEl = document.getElementById(`step-${key}`);
     if (!stepEl) return;
 
@@ -438,20 +688,21 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // 8. Generative UI Widget: Reviewer Quality Score Badge Card
+  // 8. Generative UI Widget: Reviewer Quality Report Card
   function renderReviewerBadgeCard(review) {
     if (!review) return;
     const card = document.createElement('div');
     card.className = 'gen-card reviewer-card';
 
     const isApproved = review.approved;
-    const scoreColor = isApproved ? 'var(--success)' : 'var(--danger)';
+    const badgeText = isApproved ? '✔ Code Review Passed' : '✖ Review Flagged Issues';
+    const badgeColor = isApproved ? 'var(--success)' : 'var(--danger)';
 
     card.innerHTML = `
       <div style="display: flex; justify-content: space-between; align-items: center;">
-        <span style="font-size: 13px; font-weight: 600;">Code Reviewer Report</span>
-        <span class="score-badge" style="border-color: ${scoreColor}; color: ${scoreColor};">
-          Score: ${review.codeQualityScore || 90} / 100
+        <span style="font-size: 13px; font-weight: 600;">Code Review Report</span>
+        <span class="score-badge" style="border-color: ${badgeColor}; color: ${badgeColor}; font-weight: 500;">
+          ${badgeText}
         </span>
       </div>
       <p style="font-size: 12px; color: var(--text-muted);">${review.summary || review.overview || 'Review complete.'}</p>
@@ -466,10 +717,10 @@ document.addEventListener('DOMContentLoaded', () => {
     card.style.borderColor = 'var(--success)';
     card.innerHTML = `
       <div style="color: var(--success); font-weight: 600; font-size: 13px;">
-        ✨ Kaizen Execution Completed
+        ✨ Task Completed
       </div>
       <p style="font-size: 12px; color: var(--text-muted);">
-        Target files updated in <code>src/sandbox/</code>. Review diff cards above or inspect active editor.
+        Target files updated in workspace. Review diff cards above or inspect active editor.
       </p>
     `;
     widgetsContainer.appendChild(card);
@@ -520,10 +771,26 @@ ${escapeHtml(text)}
   }
 
   // 9. Prompt Submission Logic
+  let isSubmitting = false;
   chatForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const query = chatInput.value.trim();
-    if (!query) return;
+    if (!query && !pastedImagePayload) {
+      showToast('Prompt cannot be empty', 'error');
+      return;
+    }
+
+    if (isSubmitting) return; // Prevent double-tap submit
+    isSubmitting = true;
+
+    addPromptToHistory(query);
+
+    const activeImage = pastedImagePayload;
+    pastedImagePayload = null;
+    if (imagePreviewContainer) {
+      imagePreviewContainer.innerHTML = '';
+      imagePreviewContainer.classList.add('hidden');
+    }
 
     chatInput.value = '';
     resetStepper();
@@ -532,26 +799,71 @@ ${escapeHtml(text)}
     userCard.className = 'gen-card';
     userCard.style.background = 'rgba(99, 102, 241, 0.1)';
     userCard.style.borderColor = 'var(--primary)';
+    let imageHtml = activeImage ? `<div style="margin-top: 6px;"><img src="${activeImage}" style="height: 60px; border-radius: 4px; border: 1px solid var(--border-color);" /></div>` : '';
     userCard.innerHTML = `
       <div style="font-size: 11px; color: #a5b4fc; font-weight: 600;">USER PROMPT</div>
-      <div style="font-size: 13px; color: var(--text-main); font-weight: 500;">"${query}"</div>
+      <div style="font-size: 13px; color: var(--text-main); font-weight: 500;">${escapeHtml(query || 'Attached image query')}</div>
+      ${imageHtml}
     `;
     widgetsContainer.appendChild(userCard);
+    userCard.scrollIntoView({ behavior: 'smooth' });
+
+    // Handle @test comprehensive / @test all-features verification command
+    if (query.startsWith('@test')) {
+      showToast('→ Running comprehensive verification suite...', 'info');
+      try {
+        const res = await fetch('/api/test/comprehensive');
+        const data = await res.json();
+        renderVerificationReportCard(data.results);
+      } catch (err) {
+        showToast('Verification test execution failed', 'error');
+      } finally {
+        isSubmitting = false;
+      }
+      return;
+    }
+
+    showToast('→ Submitting prompt to pipeline...', 'info');
 
     if (isVsCodeEnv) {
-      vscode.postMessage({ type: 'RUN_PIPELINE', userInput: query });
+      vscode.postMessage({ type: 'RUN_PIPELINE', userInput: query, imagePayload: activeImage });
+      isSubmitting = false;
     } else {
       try {
         await fetch('/api/pipeline/run', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userInput: query })
+          body: JSON.stringify({ userInput: query, imagePayload: activeImage })
         });
       } catch (err) {
-        alert('Failed to launch pipeline execution.');
+        showToast('Failed to launch pipeline execution', 'error');
+      } finally {
+        isSubmitting = false;
       }
     }
   });
+
+  function renderVerificationReportCard(results) {
+    if (!results) return;
+    const card = document.createElement('div');
+    card.className = 'gen-card';
+    card.style.borderColor = 'var(--primary)';
+    
+    let rowsHtml = results.map(r => {
+      const color = r.status === 'PASS' ? 'var(--success)' : (r.status === 'WARN' ? 'var(--warning)' : 'var(--danger)');
+      return `<div style="display: flex; justify-content: space-between; font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--border-color);">
+        <span>${escapeHtml(r.feature)}</span>
+        <span style="color: ${color}; font-weight: 600;">${r.status}: ${escapeHtml(r.details)}</span>
+      </div>`;
+    }).join('');
+
+    card.innerHTML = `
+      <div style="font-weight: 600; font-size: 13px; color: #a5b4fc; margin-bottom: 8px;">📊 COMPREHENSIVE VERIFICATION REPORT</div>
+      <div style="display: flex; flex-direction: column; gap: 4px;">${rowsHtml}</div>
+    `;
+    widgetsContainer.appendChild(card);
+    card.scrollIntoView({ behavior: 'smooth' });
+  }
 
   // Prompt Chips listener
   document.querySelectorAll('.prompt-chip').forEach(chip => {

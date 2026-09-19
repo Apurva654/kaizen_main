@@ -23,8 +23,8 @@
           </svg>
         </div>
         <div class="brand-title">
-          <span class="title-primary">KAIZEN</span>
-          <span class="title-sub">AI Copilot & Generative UI</span>
+          <span class="title-primary">AI COPILOT</span>
+          <span class="title-sub">Generative UI & Workspace Agent</span>
         </div>
       </div>
 
@@ -56,7 +56,12 @@
         </div>
 
         <div class="workspace-section">
-          <div class="section-label">SANDBOX PLAYGROUND</div>
+          <div class="section-label-row">
+            <span class="section-label">SANDBOX PLAYGROUND</span>
+            <button id="clear-sandbox-btn" class="btn-clear-window" title="Clear all user sandbox files (Empty Window)">
+              🗑️ Clear Window
+            </button>
+          </div>
           <div id="file-tree" class="file-tree-list">
             <!-- Dynamically populated files -->
             <div class="tree-placeholder">Loading sandbox files...</div>
@@ -108,15 +113,21 @@
         <div class="webview-header">
           <div class="webview-title">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            Kaizen Extension Sidebar
+            Extension Sidebar
           </div>
           <span class="badge-pill">Generative UI</span>
         </div>
 
         <!-- Agent Workflow Execution Stepper -->
-        <div class="agent-stepper-container">
-          <div class="stepper-title">AGENT PIPELINE TIMELINE</div>
-          <div class="stepper-timeline">
+        <div class="agent-stepper-container" id="agent-stepper-container">
+          <div class="stepper-header" id="stepper-header-toggle">
+            <div class="stepper-title-group">
+              <svg id="stepper-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+              <span class="stepper-title">AGENT PIPELINE TIMELINE</span>
+            </div>
+            <div id="stepper-inline-status" class="stepper-inline-status">Ready</div>
+          </div>
+          <div class="stepper-timeline" id="stepper-timeline-body">
             <div class="step-item" id="step-intent">
               <div class="step-icon">1</div>
               <div class="step-content">
@@ -175,7 +186,7 @@
           <div class="gen-card welcome-card">
             <div class="card-icon">⚡</div>
             <h3>Generative UI Playground</h3>
-            <p>Type a natural language prompt below to trigger the multi-agent graph. Interactive Code Diff Cards and HITL Choice Cards will render here in real-time.</p>
+            <p>Type a prompt or paste a screenshot below to trigger the multi-agent graph. Interactive Code Diff Cards and HITL Choice Cards will render here in real-time.</p>
           </div>
         </div>
 
@@ -190,8 +201,9 @@
         <!-- Chat Panel Input Bar -->
         <div class="chat-input-container">
           <form id="chat-form">
-            <textarea id="chat-input" class="chat-textarea" placeholder="Ask Kaizen to generate features, refactor, or debug..." rows="2"></textarea>
-            <button type="submit" id="send-btn" class="btn-send" title="Send Prompt">
+            <div id="image-preview-container" class="image-preview-container hidden"></div>
+            <textarea id="chat-input" class="chat-textarea" placeholder="Ask anything or describe feature to build..." rows="2"></textarea>
+            <button type="submit" id="send-btn" class="btn-send" title="Send Prompt (Enter)">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             </button>
           </form>
@@ -199,6 +211,32 @@
 
       </aside>
 
+    </div>
+
+    <!-- Toast Notification Container -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Keyboard Shortcuts Help Modal -->
+    <div id="shortcuts-modal" class="modal-overlay hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>⌨️ Keyboard Shortcuts & Usage</h3>
+          <button id="close-shortcuts-btn" class="icon-btn-tiny">&times;</button>
+        </div>
+        <div class="modal-body">
+          <table class="shortcuts-table">
+            <tr><td><kbd>Enter</kbd></td><td>Submit prompt</td></tr>
+            <tr><td><kbd>Shift + Enter</kbd></td><td>Insert new line</td></tr>
+            <tr><td><kbd>Up / Down</kbd></td><td>Navigate prompt history</td></tr>
+            <tr><td><kbd>Ctrl + /</kbd></td><td>Toggle shortcuts modal</td></tr>
+            <tr><td><kbd>Esc</kbd></td><td>Close modals / Collapse timeline</td></tr>
+            <tr><td><kbd>Ctrl + V</kbd></td><td>Paste screenshot from clipboard</td></tr>
+          </table>
+          <div style="margin-top: 12px; font-size: 11px; color: var(--text-muted);">
+            Type <code>@test comprehensive</code> or <code>@test all-features</code> in prompt to run automated feature verification checks.
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Telemetry Modal -->

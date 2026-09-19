@@ -48,7 +48,8 @@ async function executeAgentPipeline(userInput: string) {
     lifecycleStatus: "RUNNING",
     currentStage: "intent",
     completedStages: [],
-    skippedStages: []
+    skippedStages: [],
+    generalAnswer: undefined
   };
 
   persistenceEngine.saveCheckpoint(sessionId, 'INITIALIZED', state);

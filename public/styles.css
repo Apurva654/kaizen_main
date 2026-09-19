@@ -753,6 +753,107 @@ body {
   background: var(--bg-card-hover);
 }
 
+/* Stepper Collapsible Accordion Styles */
+.agent-stepper-container {
+  background-color: var(--bg-panel);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+}
+
+.stepper-header {
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  user-select: none;
+  background-color: var(--bg-panel);
+  transition: background 0.2s;
+}
+
+.stepper-header:hover {
+  background-color: var(--bg-card-hover);
+}
+
+.stepper-title-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#stepper-chevron {
+  transition: transform 0.2s ease;
+  color: var(--text-muted);
+}
+
+.agent-stepper-container.collapsed #stepper-chevron {
+  transform: rotate(-90deg);
+}
+
+.stepper-inline-status {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--primary);
+  background: var(--primary-bg);
+  padding: 2px 8px;
+  border-radius: 10px;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-stepper-container.collapsed .stepper-timeline {
+  display: none;
+}
+
+/* Image Attachment Clipboard Preview Container */
+.image-preview-container {
+  display: flex;
+  gap: 8px;
+  padding: 6px 0;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.image-preview-container.hidden {
+  display: none;
+}
+
+.image-thumb-wrapper {
+  position: relative;
+  display: inline-block;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-dark);
+}
+
+.image-thumb-wrapper img {
+  height: 50px;
+  width: auto;
+  display: block;
+  object-fit: cover;
+}
+
+.image-thumb-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  width: 16px;
+  height: 16px;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
 /* Chat Input Bar */
 .chat-input-container {
   padding: 12px;
@@ -762,8 +863,15 @@ body {
 
 #chat-form {
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-input-wrapper {
+  display: flex;
   gap: 8px;
   align-items: flex-end;
+  width: 100%;
 }
 
 .chat-textarea {
@@ -775,7 +883,9 @@ body {
   font-family: var(--font-sans);
   font-size: 13px;
   padding: 8px 12px;
-  resize: none;
+  resize: vertical;
+  min-height: 48px;
+  max-height: 250px;
   outline: none;
   transition: border-color 0.2s;
 }
@@ -845,4 +955,137 @@ body {
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-muted);
+}
+
+/* Toast Notifications Container */
+.toast-container {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 200;
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  animation: toastIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: opacity 0.2s;
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(-10px) scale(0.95); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.toast.success { border-color: var(--success); color: #6ee7b7; }
+.toast.error { border-color: var(--danger); color: #fca5a5; }
+.toast.info { border-color: var(--primary); color: #a5b4fc; }
+
+/* Keyboard Shortcuts Table */
+.shortcuts-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.shortcuts-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 12px;
+}
+
+.shortcuts-table td:first-child {
+  width: 130px;
+}
+
+kbd {
+  background: var(--bg-dark);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--primary);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+}
+
+/* Clear Window & Workspace File Actions */
+.section-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.btn-clear-window {
+  background: transparent;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #f87171;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-clear-window:hover {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: #ef4444;
+  color: #ef4444;
+}
+
+.tree-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted);
+  transition: all 0.15s ease;
+}
+
+.tree-item-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.tree-item-delete-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  opacity: 0.5;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.tree-item:hover .tree-item-delete-btn {
+  opacity: 1;
+}
+
+.tree-item-delete-btn:hover {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.2);
 }
