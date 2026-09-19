@@ -349,34 +349,39 @@ export function toggleMemory(enable?: boolean): boolean {
 /**
  * Handle special user commands (@context, @files, @state, @history, @memory).
  */
-export async function handleSpecialCommand(command: string): Promise<string | null> {
-  const trimmed = command.trim().toLowerCase();
+export async function handleContextCommand(command: string): Promise<string> {
+  const cmd = command.toLowerCase().trim();
 
-  if (trimmed === '@context') {
-    const ctx = await loadProjectContext();
-    return formatContextForPrompt(ctx);
+  if (cmd === '@context') {
+    const context = await loadProjectContext();
+    return formatContextForPrompt(context);
   }
 
-  if (trimmed === '@files') {
+  if (cmd === '@files') {
     return await listAllProjectFiles();
   }
 
-  if (trimmed === '@state') {
+  if (cmd === '@state') {
     const state = loadAgentState();
-    return state ? formatStateForPrompt(state) : 'ℹ️ No saved agent state found.';
+    return state ? formatStateForPrompt(state) : 'No previous state';
   }
 
-  if (trimmed === '@history') {
+  if (cmd === '@history') {
     const logs = getGitLog(10);
-    return `📜 RECENT GIT COMMITS:\n\n` + (logs.length > 0 ? logs.map(l => '  ' + l).join('\n') : '  (No git commits found)');
+    return `GIT HISTORY:\n` + (logs.length > 0 ? logs.join('\n') : '(No git commits)');
   }
 
-  if (trimmed === '@memory') {
+  if (cmd === '@memory') {
     const status = toggleMemory();
-    return `🧠 Agent Context Memory is now ${status ? 'ENABLED' : 'DISABLED'}.`;
+    return `Memory toggled: ${status ? 'ENABLED' : 'DISABLED'}`;
   }
 
-  return null;
+  return 'Unknown command. Use: @context, @files, @state, @history, @memory';
+}
+
+export async function handleSpecialCommand(command: string): Promise<string | null> {
+  if (!command.trim().startsWith('@')) return null;
+  return await handleContextCommand(command);
 }
 
 /**
