@@ -53,19 +53,20 @@ export async function testContextIntegration() {
   assert(formatted.includes('RECENT CHANGES'), 'Git log included');
   assert(formatted.includes('KEY SOURCE FILES'), 'Files included');
 
-  // Test 6: Conversational User Facts & Turn Persistence ("my name is Carlitos")
-  recordConversationTurn('my name is Carlitos', 'Nice to meet you, Carlitos! How can I assist you today?');
+  // Test 6: Conversational User Facts & Turn Persistence ("my name is Jannik")
+  recordConversationTurn('my name is Jannik', 'Nice to meet you, Jannik! How can I assist you today?');
   const stateWithMemory = loadAgentState();
-  assert(stateWithMemory !== null && stateWithMemory.userFacts?.['Name'] === 'Carlitos', 'User name "Carlitos" remembered in state');
+  assert(stateWithMemory !== null && stateWithMemory.userFacts?.['Name'] === 'Jannik', 'User name "Jannik" remembered in state');
   const formattedState = formatStateForPrompt(stateWithMemory!);
-  assert(formattedState.includes('Name: Carlitos'), 'User name Carlitos included in prompt state context');
-  assert(formattedState.includes('my name is Carlitos'), 'Recent conversation turn included in prompt history');
+  assert(formattedState.includes('Name: Jannik'), 'User name Jannik included in prompt state context');
+  assert(formattedState.includes('my name is Jannik'), 'Recent conversation turn included in prompt history');
 
   // Test 7: General Query Intent Routing Test
   const { isGeneralQuery } = require('../agents/intentAgent');
-  assert(isGeneralQuery('my name is Carlitos') === true, 'General query "my name is Carlitos" routed correctly');
+  assert(isGeneralQuery('my name is Jannik') === true, 'General query "my name is Jannik" routed correctly');
   assert(isGeneralQuery('Whats my name?') === true, 'General query "Whats my name?" routed correctly');
-  assert(isGeneralQuery('who is nole?') === true, 'General query "who is nole?" routed correctly');
+  assert(isGeneralQuery('ny name?') === true, 'General query typo "ny name?" routed correctly');
+  assert(isGeneralQuery('my name??') === true, 'General query "my name??" routed correctly');
 
   console.log('\n✅ All integration tests passed!');
 }

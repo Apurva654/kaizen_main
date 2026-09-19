@@ -9,6 +9,7 @@ import { codeGenAgentNode, isProtectedFile, GeneratedFilePatch } from './agents/
 import { reviewerAgentNode } from './agents/reviewerAgent';
 import { debuggerAgentNode } from './agents/debuggerAgent';
 import { runWorkspaceTests, extractFailingFilesFromLogs } from './tools/testRunner';
+import { preprocessUserRequest, saveAgentState, loadAgentState, recordConversationTurn } from './tools/context-manager';
 
 export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'kaizen.sidebarView';
@@ -103,13 +104,23 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
       this.postMessageToWebview(type, { ...data, runId });
     };
 
-    postWebviewEvent('PIPELINE_START', { userInput, timestamp: createdAt });
+    const rawUserInput = userInput || '';
+    const processed = await preprocessUserRequest(rawUserInput);
+    if (processed.isCommand && processed.commandResult) {
+      this.postMessageToWebview('PIPELINE_COMPLETE', {
+        status: 'GENERAL_COMPLETE',
+        explanation: processed.commandResult
+      });
+      return;
+    }
+
+    const enhancedUserInput = processed.enhancedPrompt || rawUserInput;
 
     let state: KaizenStateType = {
       sessionId: `sess_${Date.now()}`,
       runId,
       createdAt,
-      userInput,
+      userInput: enhancedUserInput,
       targetFiles: initialTargets,
       extractedContext: "",
       plan: [],
@@ -131,6 +142,19 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
       state.lifecycleStatus = finalStatus;
       state.completedStages = Array.from(new Set(completedStages));
       state.skippedStages = Array.from(new Set(skippedStages));
+
+      saveAgentState({
+        conversationId: state.sessionId || 'sess_default',
+        currentTask: rawUserInput,
+        completedSteps: completedStages,
+        generatedFiles: new Map((state.targetFiles || []).map(f => [f, 'updated'])),
+        errors: (state as any).reviewReport?.issues || [],
+        timestamp: new Date()
+      });
+
+      if (extraData.explanation || state.userInput) {
+        recordConversationTurn(rawUserInput, extraData.explanation || 'Task executed successfully.');
+      }
 
       postWebviewEvent('PIPELINE_COMPLETE', {
         status: finalStatus,
@@ -161,15 +185,25 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
       if (state.status === "ROUTED_GENERAL_QUERY") {
         skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
         
-        let answer = `Hello! How can I help you with your coding project today?`;
+        let answer = `Hello! I am Kaizen, an advanced AI Coding Agent. How can I assist you with your project today?`;
         const apiKey = process.env.GROQ_API_KEY;
         if (apiKey && apiKey !== 'your_groq_api_key_here') {
           try {
             const { ChatGroq } = await import('@langchain/groq');
-            const model = new ChatGroq({ apiKey, model: 'groq/compound-mini', temperature: 0.5 });
+            const model = new ChatGroq({ apiKey, model: 'groq/compound-mini', temperature: 0.3 });
+            const systemContent = `You are Kaizen, an advanced AI Coding Agent.
+Always check the USER PROFILE & KNOWN FACTS and RECENT CONVERSATION HISTORY provided below to answer user queries:
+
+${enhancedUserInput}
+
+Directives:
+- You are KAIZEN, an advanced AI Coding Agent (never identify as ChatGPT or OpenAI).
+- If the user asks for their name, identity, or previous details (e.g. "my name?", "whats my name?", "Jannik"), state their name/identity directly from the KNOWN FACTS and CONVERSATION HISTORY above.
+- Provide concise, friendly, and direct answers without generating code unless explicitly requested.`;
+
             const res = await model.invoke([
-              { role: 'system', content: 'You are a helpful AI assistant. Provide concise, clear, and direct answers to general questions or greetings without generating file code unless explicitly requested.' },
-              { role: 'user', content: userInput }
+              { role: 'system', content: systemContent },
+              { role: 'user', content: rawUserInput }
             ]);
             answer = typeof res.content === 'string' ? res.content : String(res.content);
           } catch (err) {
