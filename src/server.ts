@@ -12,6 +12,7 @@ import { debuggerAgentNode } from './agents/debuggerAgent';
 import { langfuseTracer } from './tools/langfuseTracer';
 import { persistenceEngine } from './tools/persistenceEngine';
 import { runWorkspaceTests, extractFailingFilesFromLogs } from './tools/testRunner';
+import { preprocessUserRequest, saveAgentState, loadAgentState } from './tools/context-manager';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -89,7 +90,7 @@ function logDiagnostic(category: string, action: string, data: Record<string, an
   console.log(`[KAIZEN][${category}] ${action}`, JSON.stringify(data));
 }
 
-async function runPipeline(userInput: string) {
+async function runPipeline(rawUserInput: string) {
   const sessionId = persistenceEngine.generateSessionId();
   const runId = `run_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
   const createdAt = new Date().toISOString();
@@ -98,8 +99,26 @@ async function runPipeline(userInput: string) {
     broadcastSSE(eventType, { ...data, runId, sessionId });
   };
 
-  logDiagnostic('RUN', 'INITIATED', { runId, sessionId, userInput });
-  emitSSE('pipeline_start', { sessionId, userInput, timestamp: createdAt });
+  logDiagnostic('RUN', 'INITIATED', { runId, sessionId, rawUserInput });
+  emitSSE('pipeline_start', { sessionId, userInput: rawUserInput, timestamp: createdAt });
+
+  // Preprocess input with context manager & handle special @ commands
+  const processed = await preprocessUserRequest(rawUserInput);
+  if (processed.isCommand && processed.commandResult) {
+    emitSSE('agent_step', { agent: 'ContextManager', status: 'completed', message: 'Command executed.' });
+    broadcastSSE('pipeline_complete', {
+      sessionId,
+      runId,
+      status: 'GENERAL_COMPLETE',
+      route: 'GENERAL_QUERY',
+      explanation: processed.commandResult,
+      completedStages: ['context'],
+      skippedStages: ['intent', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer']
+    });
+    return;
+  }
+
+  const userInput = processed.enhancedPrompt || rawUserInput;
 
   let state: KaizenStateType = {
     sessionId,
@@ -142,6 +161,15 @@ async function runPipeline(userInput: string) {
       plan: state.plan,
       retryCount: state.retryCount,
       ...extraData
+    });
+
+    saveAgentState({
+      conversationId: sessionId,
+      currentTask: rawUserInput,
+      completedSteps: completedStages,
+      generatedFiles: new Map((state.targetFiles || []).map(f => [f, 'updated'])),
+      errors: (state as any).reviewReport?.issues || [],
+      timestamp: new Date()
     });
 
     emitSSE('pipeline_complete', {
