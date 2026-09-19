@@ -334,6 +334,22 @@ export function parseErrors(output: string, language: string): ParsedError[] {
       });
     }
 
+    // MSVC style tsc format: file.ts(2,14): error TS7006: ...
+    const msvcTsPattern = /([^\s(\n]+)\((\d+),(\d+)\):\s*error\s*(TS\d+)?:\s*(.+)/g;
+    while ((match = msvcTsPattern.exec(output)) !== null) {
+      const lineNum = parseInt(match[2], 10);
+      if (!errors.some(e => e.line === lineNum && e.file === match![1].trim())) {
+        errors.push({
+          file: match[1].trim(),
+          line: lineNum,
+          column: parseInt(match[3], 10),
+          code: match[4] || undefined,
+          message: match[5].trim(),
+          severity: 'error'
+        });
+      }
+    }
+
     const simpleTsPattern = /^([^:\n]+):(\d+):(\d+)\s+-\s+error\s+(.+)$/gm;
     while ((match = simpleTsPattern.exec(output)) !== null) {
       if (!errors.some(e => e.line === parseInt(match![2], 10))) {
@@ -378,7 +394,7 @@ export function parseErrors(output: string, language: string): ParsedError[] {
 
   // 3. Go
   if (language === 'Go') {
-    const goPattern = /^([^:\n]+):(\d+):(\d+):\s+(.+)$/gm;
+    const goPattern = /([^\s:\n]+\.go):(\d+):(\d+):\s*(.+)/g;
     let match;
     while ((match = goPattern.exec(output)) !== null) {
       errors.push({
