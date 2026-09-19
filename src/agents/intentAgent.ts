@@ -16,8 +16,19 @@ export const IntentSchema = z.object({
     .describe("All target source file paths identified or implied for the task")
 });
 
+export function extractRawUserPrompt(input: string): string {
+  if (input.includes('USER REQUEST:\n==============\n')) {
+    return input.split('USER REQUEST:\n==============\n')[1].split('\n---\n')[0].trim();
+  }
+  if (input.includes('USER REQUEST:\n')) {
+    return input.split('USER REQUEST:\n')[1].trim();
+  }
+  return input.trim();
+}
+
 export function isGeneralQuery(input: string): boolean {
-  const trimmed = input.trim().toLowerCase();
+  const rawPrompt = extractRawUserPrompt(input);
+  const trimmed = rawPrompt.toLowerCase();
   
   const codingKeywords = [
     'code', 'file', 'function', 'class', 'bug', 'error', 'repo', 'workspace', 'script',
@@ -38,12 +49,12 @@ export function isGeneralQuery(input: string): boolean {
   const greetingsRegex = /^(hello|hi|hey|greetings|good morning|good afternoon|good evening|howdy|yo|sup|ping|test)(\b|[!?. ]|$)/i;
   if (greetingsRegex.test(trimmed)) return true;
 
-  // 2. Common general knowledge / conversational starters
-  const gkStartersRegex = /^(who is|what is|where is|when did|why is|how is|tell me|explain who|explain what|do you know|is it|are you|can you tell|how far|how many|who was|what was)/i;
+  // 2. Common general knowledge / conversational starters & identity questions
+  const gkStartersRegex = /^(who is|whats|what is|where is|when did|why is|how is|tell me|explain who|explain what|do you know|is it|are you|can you tell|how far|how many|who was|what was|my name|whats my name|what is my name|who am i)/i;
   if (gkStartersRegex.test(trimmed)) return true;
 
-  // 3. Short prompts without any coding keywords (e.g., "who is nole?", "what is 2+2", "hello!!")
-  if (trimmed.length < 80) return true;
+  // 3. Short prompts without any coding keywords (e.g., "who is nole?", "my name is carlitos")
+  if (trimmed.length < 150) return true;
 
   return false;
 }

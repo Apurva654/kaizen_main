@@ -214,10 +214,19 @@ async function runPipeline(rawUserInput: string) {
       if (apiKey && apiKey !== 'your_groq_api_key_here') {
         try {
           const { ChatGroq } = await import('@langchain/groq');
-          const model = new ChatGroq({ apiKey, model: 'groq/compound-mini', temperature: 0.5 });
+          const model = new ChatGroq({ apiKey, model: 'groq/compound-mini', temperature: 0.3 });
+          const systemContent = `You are Kaizen, a helpful AI assistant.
+Always check the USER PROFILE & KNOWN FACTS and RECENT CONVERSATION HISTORY provided below to answer user queries:
+
+${userInput}
+
+Directives:
+- If the user asks for their name, identity, or previous details, state their name/identity from the KNOWN FACTS and CONVERSATION HISTORY above.
+- Provide concise, friendly, and direct answers without generating code unless explicitly requested.`;
+
           const res = await model.invoke([
-            { role: 'system', content: 'You are a helpful AI assistant. Provide concise, clear, and direct answers to general questions or greetings without generating file code unless explicitly requested.' },
-            { role: 'user', content: userInput }
+            { role: 'system', content: systemContent },
+            { role: 'user', content: rawUserInput }
           ]);
           answer = typeof res.content === 'string' ? res.content : String(res.content);
         } catch (err) {

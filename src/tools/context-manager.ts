@@ -339,11 +339,15 @@ export function recordConversationTurn(userText: string, assistantText: string):
   const history: ChatMessage[] = state.conversationHistory || [];
   const facts: Record<string, string> = state.userFacts || {};
 
-  // Fact extraction rule: "my name is X", "i am X", "call me X"
-  const nameMatch = userText.match(/(?:my name is|i am|call me)\s+([a-zA-Z0-9_-]+)/i);
+  // Fact extraction rule: "my name is X", "my name X", "i am X", "i'm X", "call me X"
+  const nameMatch = userText.match(/(?:my name is|my name|i am|i'm|call me|name:)\s+([a-zA-Z0-9_-]+)/i);
   if (nameMatch && nameMatch[1]) {
-    const name = nameMatch[1].trim();
-    facts['Name'] = name.charAt(0).toUpperCase() + name.slice(1);
+    const rawName = nameMatch[1].trim();
+    // Exclude common non-name words
+    const stopWords = ['is', 'a', 'the', 'an', 'not', 'here', 'testing', 'going'];
+    if (!stopWords.includes(rawName.toLowerCase())) {
+      facts['Name'] = rawName.charAt(0).toUpperCase() + rawName.slice(1);
+    }
   }
 
   // Push turn to history

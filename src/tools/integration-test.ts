@@ -53,13 +53,19 @@ export async function testContextIntegration() {
   assert(formatted.includes('RECENT CHANGES'), 'Git log included');
   assert(formatted.includes('KEY SOURCE FILES'), 'Files included');
 
-  // Test 6: Conversational User Facts & Turn Persistence ("my name is Nole")
-  recordConversationTurn('my name is Nole', 'Nice to meet you, Nole! How can I assist you today?');
+  // Test 6: Conversational User Facts & Turn Persistence ("my name is Carlitos")
+  recordConversationTurn('my name is Carlitos', 'Nice to meet you, Carlitos! How can I assist you today?');
   const stateWithMemory = loadAgentState();
-  assert(stateWithMemory !== null && stateWithMemory.userFacts?.['Name'] === 'Nole', 'User name "Nole" remembered in state');
+  assert(stateWithMemory !== null && stateWithMemory.userFacts?.['Name'] === 'Carlitos', 'User name "Carlitos" remembered in state');
   const formattedState = formatStateForPrompt(stateWithMemory!);
-  assert(formattedState.includes('Name: Nole'), 'User name included in prompt state context');
-  assert(formattedState.includes('my name is Nole'), 'Recent conversation turn included in prompt history');
+  assert(formattedState.includes('Name: Carlitos'), 'User name Carlitos included in prompt state context');
+  assert(formattedState.includes('my name is Carlitos'), 'Recent conversation turn included in prompt history');
+
+  // Test 7: General Query Intent Routing Test
+  const { isGeneralQuery } = require('../agents/intentAgent');
+  assert(isGeneralQuery('my name is Carlitos') === true, 'General query "my name is Carlitos" routed correctly');
+  assert(isGeneralQuery('Whats my name?') === true, 'General query "Whats my name?" routed correctly');
+  assert(isGeneralQuery('who is nole?') === true, 'General query "who is nole?" routed correctly');
 
   console.log('\n✅ All integration tests passed!');
 }
