@@ -9,12 +9,28 @@ import { langfuseTracer } from '../tools/langfuseTracer';
 
 dotenv.config();
 
+export function normalizeSandboxPath(pathStr: string): string {
+  if (!pathStr) return 'src/sandbox/main.ts';
+  let norm = pathStr.replace(/\\/g, '/').trim();
+  norm = norm.replace(/^\.\//, '');
+  if (!norm.startsWith('src/sandbox/')) {
+    if (norm.startsWith('src/')) {
+      norm = norm.replace(/^src\//, 'src/sandbox/');
+    } else {
+      norm = `src/sandbox/${norm}`;
+    }
+  }
+  return norm;
+}
+
 export const StepObjectSchema = z.object({
   id: z.number().optional().describe("Unique sequential step identifier"),
   step_number: z.number().optional().describe("Step number"),
   description: z.string().describe("Detailed, actionable task description explaining what will be created, modified, or tested"),
   task: z.string().optional().describe("Detailed task description"),
-  targetFile: z.string().nullable().optional().describe("Target source file path for this step"),
+  targetFile: z.string().nullable().optional().describe("Target source file path for this step (must be under src/sandbox/...)"),
+  action: z.string().nullable().optional().describe("Action type (create, modify, test)"),
+  isNewFile: z.boolean().nullable().optional().describe("Whether target file is new"),
   assignedTool: z.string().nullable().optional().describe("Tool or agent module")
 });
 
@@ -32,7 +48,6 @@ function extractSymbolsFromWorkspace(targetFiles: string[], extractedContext: st
   const symbols: ExtractedSymbol[] = [];
   const seenNames = new Set<string>();
 
-  // 1. Parse target files directly from filesystem if available
   for (const tf of targetFiles) {
     if (fs.existsSync(tf)) {
       try {
@@ -53,7 +68,6 @@ function extractSymbolsFromWorkspace(targetFiles: string[], extractedContext: st
     }
   }
 
-  // 2. Parse file blocks from extractedContext
   if (extractedContext) {
     const fileBlocks = extractedContext.split(/--- FILE: (.*?) ---/g);
     for (let i = 1; i < fileBlocks.length; i += 2) {
@@ -75,27 +89,35 @@ function extractSymbolsFromWorkspace(targetFiles: string[], extractedContext: st
 }
 
 export async function plannerAgentNode(state: typeof KaizenState.State) {
-  const targetFiles = state.targetFiles.length > 0 ? state.targetFiles : ['src/sandbox/main.ts'];
+  const targetFiles = (state.targetFiles.length > 0 ? state.targetFiles : ['src/sandbox/main.ts'])
+    .map(f => normalizeSandboxPath(f));
 
   const existingFiles = targetFiles.filter(tf => fs.existsSync(tf));
   const newFiles = targetFiles.filter(tf => !fs.existsSync(tf));
 
   const astParser = new ASTParserTool();
-  // Parse AST symbols ONLY for existing files in workspace
   const extractedSymbols = extractSymbolsFromWorkspace(existingFiles, state.extractedContext, astParser);
 
   const symbolSummary = extractedSymbols.length > 0
     ? extractedSymbols.map((s: ExtractedSymbol) => `- [${s.language || 'code'}] ${s.type} ${s.name}`).join('\n')
     : "No existing file AST symbols pre-extracted.";
 
+  const cleanUserQuery = state.originalUserRequest || state.userInput;
+
+  console.log(`[PLANNER][INPUT] originalUserRequest: "${state.originalUserRequest}"`);
+  console.log(`[PLANNER][INPUT] userInput: "${state.userInput}"`);
+  console.log(`[PLANNER][INPUT] cleanUserQuery: "${cleanUserQuery}"`);
+  console.log(`[PLANNER][INPUT] targetFiles: [${targetFiles.join(', ')}]`);
+  console.log(`[PLANNER][CONTEXT] extractedContext length: ${state.extractedContext.length} chars`);
+
   const apiKey = process.env.GROQ_API_KEY;
 
   if (apiKey && apiKey !== 'your_groq_api_key_here') {
     const modelCandidates = [
-      'openai/gpt-oss-120b',
-      'groq/compound-mini',
-      'qwen/qwen3.8-27b',
-      'openai/gpt-oss-20b'
+      'llama-3.3-70b-versatile',
+      'llama-3.1-8b-instant',
+      'mixtral-8x7b-32768',
+      'gemma2-9b-it'
     ];
 
     for (const modelName of modelCandidates) {
@@ -108,33 +130,40 @@ export async function plannerAgentNode(state: typeof KaizenState.State) {
 
         const structuredModel = model.withStructuredOutput(PlannerSchema, { method: 'jsonMode' });
 
-        const truncatedContext = (state.extractedContext || "").slice(-2500);
         const systemPrompt = `You are an expert technical software planner for Kaizen AI.
-Analyze the user prompt, target files, AST symbol facts, and full workspace context below to construct a grounded, step-by-step implementation plan. Respond in valid json format.
-Do NOT invent non-existent files or hallucinate steps. Base your plan directly on the target files, source code, and dependency context provided.
+Construct a grounded, step-by-step implementation plan for the user request. Respond in valid JSON format.
 
-=== WORKSPACE TARGET FILES ===
-Target Files: ${targetFiles.join(', ')}
+=== ORIGINAL USER REQUEST ===
+${cleanUserQuery}
+
+=== WORKSPACE CONTEXT ===
+Target Directory: src/sandbox/
+Existing Files: ${existingFiles.length > 0 ? existingFiles.join(', ') : 'None'}
 New Files to Create: ${newFiles.length > 0 ? newFiles.join(', ') : 'None'}
-Existing Workspace Files: ${existingFiles.length > 0 ? existingFiles.join(', ') : 'None'}
 
-=== EXTRACTED AST SYMBOLS (EXISTING FILES ONLY) ===
+=== RELEVANT FILES ===
+${targetFiles.join(', ')}
+
+=== AST/SYMBOL CONTEXT ===
 ${symbolSummary}
 
-=== WORKSPACE GRAPH & SOURCE CONTEXT ===
-${truncatedContext || "No context provided."}
+=== GRAPHIFY DEPENDENCIES ===
+${(state.extractedContext || "No context provided.").slice(-4000)}
 
-MANDATES FOR PLAN GENERATION:
-1. For NEW target files that do not exist in the workspace yet (e.g., ${newFiles.join(', ') || 'new files'}), generate implementation steps stating file creation and function/class implementation.
-2. Do NOT output internal context retrieval or tool names (such as 'ASTParserTool', 'GraphifyEngine', or 'AST extraction') as user-facing implementation steps.
-3. Do NOT execute, modify, or write to any files on disk during planning. Planner only outputs a proposed implementation plan for developer approval.
+=== CONSTRAINTS ===
+1. All target files MUST reside inside 'src/sandbox/' (e.g., 'src/sandbox/models/Order.ts').
+2. Do NOT collapse modular architectures (such as Order/Event management) into a single file. Decompose into models, repositories, services, controllers, and unit tests.
+3. Every step MUST include an explicit targetFile under 'src/sandbox/'.
+4. Do NOT modify any files on disk during planning.
 
-Create a structured list of logical, sequential implementation steps.`;
+=== PLANNING REQUIREMENTS ===
+1. Produce modular steps with targetFile, action, isNewFile, and dependencies.
+2. Step Descriptions must be clear and actionable without using internal class names like ASTParserTool.`;
 
         const startTime = Date.now();
         const invokePromise = structuredModel.invoke([
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: state.userInput }
+          { role: 'user', content: cleanUserQuery }
         ]);
         const timeoutPromise = new Promise<never>((_, reject) => {
           setTimeout(() => reject(new Error(`ChatGroq model '${modelName}' execution timed out after 8000ms`)), 8000);
@@ -143,10 +172,12 @@ Create a structured list of logical, sequential implementation steps.`;
         const result = await Promise.race([invokePromise, timeoutPromise]);
         const latencyMs = Date.now() - startTime;
 
+        console.log(`[PLANNER][LLM_RAW] Model '${modelName}' returned structured output successfully in ${latencyMs}ms.`);
+
         await langfuseTracer.recordGeneration(
           'PlannerAgent',
           modelName,
-          state.userInput,
+          cleanUserQuery,
           JSON.stringify(result),
           latencyMs,
           120,
@@ -155,100 +186,186 @@ Create a structured list of logical, sequential implementation steps.`;
 
         const rawSteps = (result && (result.steps || result.plan)) || [];
         if (rawSteps.length > 0) {
-          const verifiedSteps: PlanStep[] = rawSteps.map((step: any, idx: number) => {
+          const parsedSteps: Array<{ id: number; description: string; targetFile: string; isNewFile?: boolean }> = [];
+
+          for (let idx = 0; idx < rawSteps.length; idx++) {
+            const step = rawSteps[idx];
             let desc = typeof step === 'string'
               ? step
               : (step.description || step.task || step.details || step.action || step.text || step.summary);
 
-            // Strip internal tool references if generated by LLM
             if (desc && (desc.includes('ASTParserTool') || desc.includes('GraphifyEngine') || desc.includes('AST Context Verified'))) {
-              if (newFiles.length > 0) {
-                desc = `Create ${newFiles[0]} in the workspace`;
-              } else {
-                desc = `Inspect existing workspace structure and code in ${targetFiles[0]}`;
-              }
+              desc = idx === 0 ? `Inspect workspace structure and models in ${targetFiles[0]}` : `Implement module logic for query: "${cleanUserQuery.slice(0, 50)}"`;
             }
 
             if (!desc || desc.trim().toLowerCase() === 'step 1' || desc.trim().toLowerCase() === `step ${idx + 1}`) {
-              if (idx === 0) {
-                desc = newFiles.length > 0 
-                  ? `Create ${newFiles[0]} in the workspace`
-                  : `Inspect workspace structure and existing symbols in ${targetFiles[0]}`;
-              } else if (idx === 1) {
-                desc = `Implement core requested functionality for query: "${state.userInput.slice(0, 60)}"`;
-              } else {
-                desc = `Verify code patches and ensure zero syntax/security regressions in ${targetFiles[0]}`;
+              desc = `Implement step ${idx + 1} for query: "${cleanUserQuery.slice(0, 50)}"`;
+            }
+
+            let stepTargetFile = (typeof step === 'object' && step?.targetFile) ? step.targetFile : undefined;
+
+            // Extract file path from description string if omitted
+            if (!stepTargetFile && desc) {
+              const pathMatch = desc.match(/\b(src\/[a-zA-Z0-9_\-\/]+\.[a-zA-Z0-9]+|[a-zA-Z0-9_\-]+\/[a-zA-Z0-9_\-\/]+\.[a-zA-Z0-9]+|\b[a-zA-Z0-9_\-]+\.(ts|py|js|tsx|jsx|json))\b/i);
+              if (pathMatch && pathMatch[1]) {
+                stepTargetFile = pathMatch[1];
               }
             }
 
-            const fileToCheck = (typeof step === 'object' && step?.targetFile) ? step.targetFile : targetFiles[0];
-            const isBlocked = isProtectedFile(fileToCheck);
+            if (!stepTargetFile) {
+              stepTargetFile = targetFiles[Math.min(idx, targetFiles.length - 1)];
+            }
 
-            return {
+            const normalizedTarget = normalizeSandboxPath(stepTargetFile);
+
+            parsedSteps.push({
               id: (typeof step === 'object' && (step?.id || step?.step_number)) ? (step.id || step.step_number) : (idx + 1),
+              description: desc,
+              targetFile: normalizedTarget,
+              isNewFile: (typeof step === 'object' && step?.isNewFile !== undefined) ? !!step.isNewFile : !fs.existsSync(normalizedTarget)
+            });
+          }
+
+          // Plan Validation: Detect single-file collapse on multi-step plans (>3 steps)
+          const uniqueTargetFiles = new Set(parsedSteps.map(s => s.targetFile));
+          if (parsedSteps.length > 3 && uniqueTargetFiles.size === 1) {
+            console.warn(`[PLANNER][VALIDATION] Detected ${parsedSteps.length} steps collapsed into single file '${Array.from(uniqueTargetFiles)[0]}'. Auto-decomposing modular targets...`);
+
+            parsedSteps.forEach((step, idx) => {
+              const d = step.description.toLowerCase();
+              if (d.includes('user') || d.includes('auth') || d.includes('profile')) {
+                step.targetFile = 'src/sandbox/models/User.ts';
+              } else if (d.includes('registration') || d.includes('attendee')) {
+                step.targetFile = 'src/sandbox/models/Registration.ts';
+              } else if (d.includes('repo') || d.includes('storage') || d.includes('db')) {
+                step.targetFile = d.includes('user') ? 'src/sandbox/repositories/UserRepository.ts' : 'src/sandbox/repositories/OrderRepository.ts';
+              } else if (d.includes('service') || d.includes('business')) {
+                step.targetFile = d.includes('attendee') ? 'src/sandbox/services/AttendeeService.ts' : 'src/sandbox/services/OrderService.ts';
+              } else if (d.includes('notification') || d.includes('email')) {
+                step.targetFile = 'src/sandbox/notifications/NotificationService.ts';
+              } else if (d.includes('controller') || d.includes('route') || d.includes('api')) {
+                step.targetFile = 'src/sandbox/controllers/OrderController.ts';
+              } else if (d.includes('test') || d.includes('spec') || d.includes('verify')) {
+                step.targetFile = 'src/sandbox/tests/OrderService.test.ts';
+              } else {
+                step.targetFile = `src/sandbox/models/Order.ts`;
+              }
+            });
+          }
+
+          const verifiedSteps: PlanStep[] = parsedSteps.map((step, idx) => {
+            const isBlocked = isProtectedFile(step.targetFile);
+            const actionType = step.isNewFile ? 'create' : (step.targetFile.includes('/tests/') || step.targetFile.includes('.test.') ? 'test' : 'modify');
+            return {
+              id: step.id,
+              targetFile: step.targetFile,
+              action: actionType,
+              isNewFile: step.isNewFile,
+              dependencies: idx > 0 ? [parsedSteps[idx - 1].targetFile] : [],
               description: isBlocked
-                ? `[GUARDRAIL BLOCKED] Security Policy Violation for '${fileToCheck}': ${desc}`
-                : desc,
-              status: idx === 0 ? 'completed' : (isBlocked ? 'failed' : 'pending')
+                ? `[GUARDRAIL BLOCKED] Security Policy Violation for '${step.targetFile}': ${step.description}`
+                : step.description,
+              status: isBlocked ? 'failed' : 'pending'
             };
           });
 
+          console.log(`[PLANNER][NORMALIZED] Produced ${verifiedSteps.length} steps across targets: [${Array.from(new Set(verifiedSteps.map(s => s.targetFile))).join(', ')}]`);
+
           return {
             plan: verifiedSteps,
+            targetFiles: Array.from(new Set(verifiedSteps.map(s => s.targetFile!))),
             status: verifiedSteps.some(s => s.status === 'failed') ? "SECURITY_VIOLATION_BLOCKED" : "PLANNED"
           };
         }
-      } 
+      }
       catch (error: any) {
-        console.warn(`ChatGroq planner model '${modelName}' execution failed:`, error?.message || error);
+        console.warn(`[PLANNER][GROQ_WARN] Model '${modelName}' execution failed: ${error?.message || error}`);
       }
     }
   }
 
-  const firstTarget = targetFiles[0];
-  const firstTargetExists = fs.existsSync(firstTarget);
+  console.warn(`[PLANNER][FALLBACK] Groq API models unavailable or timed out. Generating dynamic modular fallback plan for query: "${cleanUserQuery}"`);
 
-  const fallbackSteps: PlanStep[] = firstTargetExists
-    ? [
-        {
-          id: 1,
-          description: `Inspect existing workspace structure and code in ${firstTarget}`,
-          status: 'completed'
-        },
-        {
-          id: 2,
-          description: `Implement requested refactoring/features for query: "${state.userInput.slice(0, 60)}"`,
-          status: 'pending'
-        },
-        {
-          id: 3,
-          description: `Verify updated code and ensure zero syntax/security regressions in ${firstTarget}`,
-          status: 'pending'
-        }
-      ]
-    : [
-        {
-          id: 1,
-          description: `Create ${firstTarget} in the workspace`,
-          status: 'completed'
-        },
-        {
-          id: 2,
-          description: `Implement requested functions and module structure for query: "${state.userInput.slice(0, 60)}"`,
-          status: 'pending'
-        },
-        {
-          id: 3,
-          description: `Verify syntax, type annotations, and module exports in ${firstTarget}`,
-          status: 'pending'
-        }
-      ];
+  const fallbackSteps = buildModularFallbackPlan(cleanUserQuery, targetFiles);
+  const fallbackTargets = Array.from(new Set(fallbackSteps.map(s => s.targetFile!)));
+
+  console.log(`[PLANNER][FINAL_STATE] Fallback plan generated ${fallbackSteps.length} modular steps across: [${fallbackTargets.join(', ')}]`);
 
   return {
     plan: fallbackSteps,
+    targetFiles: fallbackTargets,
     status: "PLANNED"
   };
 }
 
+function buildModularFallbackPlan(userQuery: string, targetFiles: string[]): PlanStep[] {
+  const queryLower = userQuery.toLowerCase();
+  
+  const entityMatch = queryLower.match(/\b(order|event|user|product|item|inventory|payment|registration|auth|notification|customer|booking)\b/i);
+  const rawEntity = entityMatch ? entityMatch[1] : 'Module';
+  const entity = rawEntity.charAt(0).toUpperCase() + rawEntity.slice(1);
 
+  const modelFile = `src/sandbox/models/${entity}.ts`;
+  const typeFile = `src/sandbox/types/${entity.toLowerCase()}Types.ts`;
+  const repoFile = `src/sandbox/repositories/${entity}Repository.ts`;
+  const serviceFile = `src/sandbox/services/${entity}Service.ts`;
+  const controllerFile = `src/sandbox/controllers/${entity}Controller.ts`;
+  const testFile = `src/sandbox/tests/${entity}Service.test.ts`;
 
+  return [
+    {
+      id: 1,
+      targetFile: modelFile,
+      action: 'create',
+      isNewFile: !fs.existsSync(modelFile),
+      dependencies: [],
+      description: `Define core ${entity} domain data model structure, properties, and interface contracts`,
+      status: 'pending'
+    },
+    {
+      id: 2,
+      targetFile: typeFile,
+      action: 'create',
+      isNewFile: !fs.existsSync(typeFile),
+      dependencies: [modelFile],
+      description: `Create shared TypeScript types, enums, status codes, and error definitions for ${entity} management`,
+      status: 'pending'
+    },
+    {
+      id: 3,
+      targetFile: repoFile,
+      action: 'create',
+      isNewFile: !fs.existsSync(repoFile),
+      dependencies: [modelFile, typeFile],
+      description: `Implement ${entity}Repository for data storage operations, queries, and persistence management`,
+      status: 'pending'
+    },
+    {
+      id: 4,
+      targetFile: serviceFile,
+      action: 'create',
+      isNewFile: !fs.existsSync(serviceFile),
+      dependencies: [repoFile],
+      description: `Implement ${entity}Service containing core business logic, validation rules, and operations`,
+      status: 'pending'
+    },
+    {
+      id: 5,
+      targetFile: controllerFile,
+      action: 'create',
+      isNewFile: !fs.existsSync(controllerFile),
+      dependencies: [serviceFile],
+      description: `Implement ${entity}Controller route handlers and API request/response processing`,
+      status: 'pending'
+    },
+    {
+      id: 6,
+      targetFile: testFile,
+      action: 'test',
+      isNewFile: !fs.existsSync(testFile),
+      dependencies: [serviceFile],
+      description: `Implement ${entity}Service automated unit tests verifying business logic and edge cases`,
+      status: 'pending'
+    }
+  ];
+}

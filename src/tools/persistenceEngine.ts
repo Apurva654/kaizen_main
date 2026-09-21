@@ -27,6 +27,7 @@ export interface WorkspaceGraphCacheRecord {
   timestamp: string;
   summary: string;
   fileFactsCount: number;
+  structuredPayload?: any;
 }
 
 export class PersistenceEngine {
@@ -104,7 +105,7 @@ export class PersistenceEngine {
 
       fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), 'utf-8');
     } catch (err) {
-      console.warn(`[PersistenceEngine] Error updating session index:`, err);
+      console.error(`[PersistenceEngine] Error updating session index:`, err);
     }
   }
 
@@ -184,7 +185,7 @@ export class PersistenceEngine {
 
   // --- Workspace Graph & AST Cache ---
 
-  public cacheWorkspaceGraph(workspaceRoot: string, summary: string, fileFactsCount: number): boolean {
+  public cacheWorkspaceGraph(workspaceRoot: string, summary: string, fileFactsCount: number, structuredPayload?: any): boolean {
     try {
       this.ensureDirectories();
       const key = workspaceRoot.replace(/[^a-zA-Z0-9]/g, '_');
@@ -193,7 +194,8 @@ export class PersistenceEngine {
         workspaceRoot,
         timestamp: new Date().toISOString(),
         summary,
-        fileFactsCount
+        fileFactsCount,
+        structuredPayload
       };
       fs.writeFileSync(cachePath, JSON.stringify(record, null, 2), 'utf-8');
       return true;

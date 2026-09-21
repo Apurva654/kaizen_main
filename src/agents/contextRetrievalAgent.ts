@@ -35,8 +35,14 @@ export async function contextRetrievalAgentNode(state: typeof KaizenState.State)
       // 3. Assemble structured context summary
       const summary = engine.buildContextSummary(expandedTargets);
 
-      // 4. Cache workspace graph summary in Persistence Engine
-      persistenceEngine.cacheWorkspaceGraph(workspaceRoot, summary, expandedTargets.length);
+      // 4. Export structured Graphify payload for Graphify Explorer UI
+      const graphPayload = engine.exportGraphData({
+        scope: 'current-task',
+        targetFiles: expandedTargets
+      });
+
+      // 5. Cache workspace graph summary and structured payload in Persistence Engine
+      persistenceEngine.cacheWorkspaceGraph(workspaceRoot, summary, expandedTargets.length, graphPayload);
 
       // 5. Expand targetFiles with resolved internal workspace dependencies from Graphify Engine
       const dependencyTree = engine.getDependencyTree();

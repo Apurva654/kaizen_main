@@ -7,6 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -23,22 +24,102 @@
           </svg>
         </div>
         <div class="brand-title">
-          <span class="title-primary">AI COPILOT</span>
-          <span class="title-sub">Generative UI & Workspace Agent</span>
+          <span class="title-primary">KAIZEN</span>
+          <span class="title-sub">Autonomous AI Coding Agent</span>
         </div>
       </div>
 
       <div class="header-status">
+        <button id="permission-mode-btn" class="permission-gate-pill deny-first" title="Toggle Permission Gate Mode (Deny-First vs Auto-Mode)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <span id="permission-mode-text">Deny-First Mode</span>
+        </button>
+        <div id="risk-score-badge" class="risk-score-badge low-risk" title="Current Task Risk Assessment Score">
+          <span class="risk-score-label">Risk Score:</span>
+          <span id="risk-score-val">10</span>
+        </div>
         <div class="status-indicator online">
           <span class="pulse-dot"></span>
           <span class="status-text">Server Connected</span>
         </div>
+        <button id="btn-toggle-graphify" class="icon-btn-secondary" title="Open Graphify Knowledge Graph Explorer">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+          Graphify Explorer
+        </button>
         <button id="toggle-telemetry-btn" class="icon-btn-secondary" title="View Langfuse Traces">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
           Telemetry
         </button>
       </div>
     </header>
+
+    <!-- Top Row Agent Timeline Pipeline Bar -->
+    <div class="agent-stepper-container top-pipeline-bar" id="agent-stepper-container">
+      <div class="stepper-header" id="stepper-header-toggle">
+        <div class="stepper-title-group">
+          <svg id="stepper-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+          <span class="stepper-title">AGENT GRAPH PIPELINE</span>
+        </div>
+        <div id="stepper-inline-status" class="stepper-inline-status">Ready</div>
+      </div>
+      <div class="stepper-timeline horizontal" id="stepper-timeline-body">
+        <div class="step-item" id="step-intent" title="1. Intent Classification: Routing query to agent nodes">
+          <div class="step-icon">1</div>
+          <div class="step-content">
+            <div class="step-name">Intent</div>
+            <div class="step-detail">Routing query</div>
+          </div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item" id="step-context" title="2. Context Retrieval: Graphify AST & symbol extraction">
+          <div class="step-icon">2</div>
+          <div class="step-content">
+            <div class="step-name">Context</div>
+            <div class="step-detail">Symbol extraction</div>
+          </div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item" id="step-planner" title="3. Planner Agent: Grounded task step generation">
+          <div class="step-icon">3</div>
+          <div class="step-content">
+            <div class="step-name">Planner</div>
+            <div class="step-detail">Task generation</div>
+          </div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item" id="step-coder" title="4. Coder Agent: Multi-file patch generation">
+          <div class="step-icon">4</div>
+          <div class="step-content">
+            <div class="step-name">Coder</div>
+            <div class="step-detail">Patch generation</div>
+          </div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item" id="step-testrunner" title="5. Test Suite Execution: Workspace unit test verification">
+          <div class="step-icon">5</div>
+          <div class="step-content">
+            <div class="step-name">Test Suite</div>
+            <div class="step-detail">Unit test run</div>
+          </div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item" id="step-debugger" title="6. Self-Healing Debugger: Diagnosing failure & applying fix">
+          <div class="step-icon">6</div>
+          <div class="step-content">
+            <div class="step-name">Debugger</div>
+            <div class="step-detail">Self-healing fix</div>
+          </div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item" id="step-reviewer" title="7. Code Reviewer: Quality audit & approval">
+          <div class="step-icon">7</div>
+          <div class="step-content">
+            <div class="step-name">Reviewer</div>
+            <div class="step-detail">Quality audit</div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- Main Container -->
     <div class="main-body">
@@ -68,6 +149,13 @@
           </div>
         </div>
 
+        <div id="browser-session-section" class="workspace-section hidden">
+          <div class="section-label">BROWSER SESSION</div>
+          <div id="browser-session-list" class="target-badge-list">
+            <span class="target-badge browser-badge">🌐 <span id="browser-session-url">http://localhost:3000/</span> <span class="badge-tag">Read-Only</span></span>
+          </div>
+        </div>
+
         <div class="workspace-section">
           <div class="section-label">ACTIVE TARGET FILES</div>
           <div id="target-files-list" class="target-badge-list">
@@ -81,28 +169,96 @@
 
       <!-- 2. Active Editor & Code Viewer (Center Tier) -->
       <main class="editor-panel">
-        <div class="editor-tabs" id="editor-tabs">
-          <div class="tab active" data-path="src/sandbox/main.ts">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-            <span>main.ts</span>
-            <span class="tab-unsaved-dot"></span>
+        <!-- View Switcher Tabs Header -->
+        <div class="panel-view-switcher">
+          <button id="view-tab-editor" class="view-switch-btn active" title="Switch to Code Editor">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            Code Editor
+          </button>
+          <button id="view-tab-graphify" class="view-switch-btn" title="Switch to Graphify Knowledge Graph Explorer">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+            Graphify Explorer
+          </button>
+        </div>
+
+        <!-- Editor View Panel -->
+        <div id="editor-view-container" class="center-view-panel">
+          <div class="editor-tabs" id="editor-tabs">
+            <div class="tab active" data-path="src/sandbox/main.ts">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              <span>main.ts</span>
+              <span class="tab-unsaved-dot"></span>
+            </div>
+          </div>
+
+          <div class="editor-toolbar">
+            <div class="file-path-breadcrumb" id="editor-file-path">src/sandbox/main.ts</div>
+            <div class="toolbar-actions">
+              <button id="save-file-btn" class="btn-primary-sm">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                Save File
+              </button>
+            </div>
+          </div>
+
+          <div class="editor-body">
+            <div class="line-numbers" id="line-numbers">1</div>
+            <textarea id="code-editor" class="code-area" spellcheck="false" placeholder="// Select or edit code inside src/sandbox/..."></textarea>
           </div>
         </div>
 
-        <div class="editor-toolbar">
-          <div class="file-path-breadcrumb" id="editor-file-path">src/sandbox/main.ts</div>
-          <div class="toolbar-actions">
-            <button id="save-file-btn" class="btn-primary-sm">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-              Save File
-            </button>
+        <!-- Graphify Knowledge Graph Explorer Panel -->
+        <div id="graphify-view-container" class="center-view-panel hidden">
+          <!-- Graph Explorer Toolbar -->
+          <div class="graphify-toolbar">
+            <div class="graphify-search-box">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input type="text" id="graphify-search-input" placeholder="Search nodes, symbols, files..." />
+            </div>
+
+            <div class="graph-mode-pills">
+              <button class="graph-mode-btn active" data-mode="current-task" title="Focus on files & dependencies of current task">Current Task</button>
+              <button class="graph-mode-btn" data-mode="generated" title="Emphasize generated & modified files">Generated Files</button>
+              <button class="graph-mode-btn" data-mode="dependencies" title="Focus on dependency relationships">Dependencies</button>
+              <button class="graph-mode-btn" data-mode="full" title="Show full workspace graph context">Full Context</button>
+            </div>
+
+            <div class="graphify-actions">
+              <button id="graphify-btn-fit" class="icon-btn-secondary" title="Fit graph to viewport">🎯 Fit</button>
+              <button id="graphify-btn-refresh" class="icon-btn-secondary" title="Refresh Graphify data">🔄 Refresh</button>
+            </div>
+          </div>
+
+          <!-- Live Graph Statistics Bar -->
+          <div id="graphify-stats-bar" class="graphify-stats-bar">
+            <span class="stat-pill"><strong id="stat-files">0</strong> Files</span>
+            <span class="stat-pill"><strong id="stat-symbols">0</strong> Symbols</span>
+            <span class="stat-pill"><strong id="stat-deps">0</strong> Dependencies</span>
+            <span class="stat-pill"><strong id="stat-edges">0</strong> Edges</span>
+            <span class="stat-pill"><strong id="stat-ext">0</strong> External</span>
+            <span class="stat-pill"><strong id="stat-unresolved">0</strong> Unresolved</span>
+          </div>
+
+          <!-- Graph Explorer Main View Area with Canvas & Node Detail Drawer -->
+          <div class="graphify-main-area">
+            <div id="graphify-canvas-wrapper" class="graphify-canvas-wrapper">
+              <div id="graphify-network-canvas" class="graphify-network-canvas"></div>
+            </div>
+
+            <!-- Right Node Information Drawer -->
+            <aside id="graphify-node-drawer" class="graphify-node-drawer hidden">
+              <div class="drawer-header">
+                <div id="drawer-node-type-badge" class="badge-pill">FILE</div>
+                <button id="close-drawer-btn" class="icon-btn-tiny">&times;</button>
+              </div>
+              <div class="drawer-body" id="drawer-node-body">
+                <div class="drawer-title" id="drawer-node-label">Select a node</div>
+                <div class="drawer-sub" id="drawer-node-sub">Click any node on the graph canvas to inspect AST symbol facts & dependencies</div>
+              </div>
+            </aside>
           </div>
         </div>
 
-        <div class="editor-body">
-          <div class="line-numbers" id="line-numbers">1</div>
-          <textarea id="code-editor" class="code-area" spellcheck="false" placeholder="// Select or edit code inside src/sandbox/..."></textarea>
-        </div>
       </main>
 
       <!-- Resizer Handle 2 (Right Generative UI Panel Resizer) -->
@@ -116,68 +272,6 @@
             Extension Sidebar
           </div>
           <span class="badge-pill">Generative UI</span>
-        </div>
-
-        <!-- Agent Workflow Execution Stepper -->
-        <div class="agent-stepper-container" id="agent-stepper-container">
-          <div class="stepper-header" id="stepper-header-toggle">
-            <div class="stepper-title-group">
-              <svg id="stepper-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
-              <span class="stepper-title">AGENT PIPELINE TIMELINE</span>
-            </div>
-            <div id="stepper-inline-status" class="stepper-inline-status">Ready</div>
-          </div>
-          <div class="stepper-timeline" id="stepper-timeline-body">
-            <div class="step-item" id="step-intent">
-              <div class="step-icon">1</div>
-              <div class="step-content">
-                <div class="step-name">Intent Classification</div>
-                <div class="step-detail">Routing query to agent nodes</div>
-              </div>
-            </div>
-            <div class="step-item" id="step-context">
-              <div class="step-icon">2</div>
-              <div class="step-content">
-                <div class="step-name">Context Retrieval</div>
-                <div class="step-detail">Graphify AST & symbol extraction</div>
-              </div>
-            </div>
-            <div class="step-item" id="step-planner">
-              <div class="step-icon">3</div>
-              <div class="step-content">
-                <div class="step-name">Planner Agent</div>
-                <div class="step-detail">Grounded task step generation</div>
-              </div>
-            </div>
-            <div class="step-item" id="step-coder">
-              <div class="step-icon">4</div>
-              <div class="step-content">
-                <div class="step-name">Coder Agent</div>
-                <div class="step-detail">Multi-file patch generation</div>
-              </div>
-            </div>
-            <div class="step-item" id="step-testrunner">
-              <div class="step-icon">5</div>
-              <div class="step-content">
-                <div class="step-name">Test Suite Execution</div>
-                <div class="step-detail">Workspace unit test verification</div>
-              </div>
-            </div>
-            <div class="step-item" id="step-debugger">
-              <div class="step-icon">6</div>
-              <div class="step-content">
-                <div class="step-name">Self-Healing Debugger</div>
-                <div class="step-detail">Diagnosing failure & applying fix</div>
-              </div>
-            </div>
-            <div class="step-item" id="step-reviewer">
-              <div class="step-icon">7</div>
-              <div class="step-content">
-                <div class="step-name">Code Reviewer</div>
-                <div class="step-detail">Quality audit & approval</div>
-              </div>
-            </div>
-          </div>
         </div>
 
         <!-- Generative UI Dynamic Widgets Container -->
@@ -197,10 +291,19 @@
           </div>
           <form id="chat-form">
             <div id="image-preview-container" class="image-preview-container hidden"></div>
-            <textarea id="chat-input" class="chat-textarea" placeholder="Ask anything or describe feature to build..." rows="3"></textarea>
-            <button type="submit" id="send-btn" class="btn-send" title="Send Prompt (Enter)">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-            </button>
+            <textarea id="chat-input" class="chat-textarea" placeholder="Ask anything, talk via voice, or paste a screenshot..." rows="3"></textarea>
+            <div class="input-actions-group">
+              <button type="button" id="voice-input-btn" class="btn-voice-input" title="Click to speak (Voice Input)">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                  <line x1="12" y1="19" x2="12" y2="22"></line>
+                </svg>
+              </button>
+              <button type="submit" id="send-btn" class="btn-send" title="Send Prompt (Enter)">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+              </button>
+            </div>
           </form>
         </div>
 

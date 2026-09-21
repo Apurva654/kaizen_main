@@ -8,12 +8,14 @@ import { langfuseTracer } from '../tools/langfuseTracer';
 dotenv.config();
 
 export const IntentSchema = z.object({
-  intent: z.enum(['GENERATE_CODE', 'DEBUG_ERROR', 'EXPLAIN_CODE', 'REFACTOR', 'RUN_EXISTING_TESTS', 'GENERAL_QUERY'])
+  intent: z.enum(['GENERATE_CODE', 'DEBUG_ERROR', 'EXPLAIN_CODE', 'REFACTOR', 'RUN_EXISTING_TESTS', 'GENERAL_QUERY', 'MCP_GIT', 'MCP_TERMINAL'])
     .describe("The classified intent of the user request"),
   targetFiles: z.array(z.string()).optional()
     .describe("All target source file paths identified or implied for the task (e.g., ['src/sandbox/utils.ts', 'src/sandbox/main.ts'])"),
   target_files: z.array(z.string()).optional()
-    .describe("All target source file paths identified or implied for the task")
+    .describe("All target source file paths identified or implied for the task"),
+  gitActions: z.array(z.enum(['status', 'diff', 'commit', 'push', 'log'])).optional()
+    .describe("Git operations requested (e.g. ['status', 'diff'])")
 });
 
 export function extractRawUserPrompt(input: string): string {
@@ -26,16 +28,126 @@ export function extractRawUserPrompt(input: string): string {
   return input.trim();
 }
 
+export function isGitQuery(input: string): boolean {
+  const rawPrompt = extractRawUserPrompt(input).toLowerCase().trim();
+
+  const hasDomainCodeTerm = /\b(model|enum|property|field|http|code|payment|order|user|event|database|table|column|api|rest)\b/i.test(rawPrompt);
+  const hasExplicitGitMarker = /\b(git|github|repository|repo)\b/i.test(rawPrompt);
+
+  // Non-Git domain requests (e.g. "Order model/status", "payment status") without explicit git markers must not route to Git MCP
+  if (hasDomainCodeTerm && !hasExplicitGitMarker) {
+    return false;
+  }
+
+  // 1. Direct git command (e.g. "git status", "git diff", "git commit", "git push", "git log", "git branch", etc.)
+  if (/\bgit\s+(status|diff|commit|push|pull|log|branch|checkout|merge|rebase|stash)\b/i.test(rawPrompt)) {
+    return true;
+  }
+
+  // 2. Explicit repository / version-control intent queries
+  const gitIntentPatterns = [
+    /\b(show|check|view|display|get)\s+.*?\b(status|diff|log|history|branches|branch)\b/i,
+    /\b(check|show|view|display|get)\s+(repository|repo|workspace)\s+(status|diff|log|history|branches|branch)\b/i,
+    /\b(repository|repo|workspace)\s+(status|diff|log|history|branches|branch)\b/i,
+    /\b(commit|push)\s+(these|the|my|all|current)?\s*(changes|code|branch|repo|repository|commits?)\b/i,
+    /\b(switch|change|create)\s+(git\s+)?(branch)\b/i
+  ];
+
+  for (const pattern of gitIntentPatterns) {
+    if (pattern.test(rawPrompt)) {
+      return true;
+    }
+  }
+
+  // 3. Explicit git/repo marker + Git action verb
+  if (hasExplicitGitMarker) {
+    if (/\b(status|diff|commit|push|pull|log|branch|checkout|merge|rebase|stash)\b/i.test(rawPrompt)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function extractGitActions(input: string): Array<'status' | 'diff' | 'commit' | 'push' | 'log'> {
+  const rawPrompt = extractRawUserPrompt(input).toLowerCase();
+  const requestedActions: Array<'status' | 'diff' | 'commit' | 'push' | 'log'> = [];
+
+  if (/\b(git\s+status|repo(sitory)?\s+status|check\s+status|show\s+status|status\s+of\s+(repo|repository|git|workspace)|changes)\b/i.test(rawPrompt)) {
+    requestedActions.push('status');
+  }
+  if (/\b(git\s+diff|repo(sitory)?\s+diff|recent\s+diff|show\s+diff|check\s+diff)\b/i.test(rawPrompt) || /\bgit\s+diff\b/i.test(rawPrompt)) {
+    requestedActions.push('diff');
+  }
+  if (/\b(git\s+commit|commit\s+(these|the|my|all|current)?\s*(changes|code|branch|repo|repository|commits?))\b/i.test(rawPrompt)) {
+    requestedActions.push('commit');
+  }
+  if (/\b(git\s+push|push\s+(these|the|my|all|current)?\s*(branch|changes|remote|repo|repository))\b/i.test(rawPrompt)) {
+    requestedActions.push('push');
+  }
+  if (/\b(git\s+log|repo(sitory)?\s+log|git\s+history|commit\s+history)\b/i.test(rawPrompt)) {
+    requestedActions.push('log');
+  }
+
+  if (requestedActions.length === 0) {
+    requestedActions.push('status', 'diff');
+  }
+
+  return requestedActions;
+}
+
+export function isTerminalQuery(input: string): boolean {
+  const rawPrompt = extractRawUserPrompt(input).toLowerCase();
+  return /\b(terminal|command|exec|shell|rm|rm -rf|del|dir|ls|sudo|chmod|npm run|npm test|node -v|cat|pwd|mkdir|touch)\b/i.test(rawPrompt);
+}
+
+export function extractTerminalCommand(input: string): string {
+  const raw = extractRawUserPrompt(input).trim();
+  
+  // 1. If quoted with `...`, "...", or '...', extract inside quote
+  const matchQuote = raw.match(/[`'"]([^`'"]+)[`'"]/);
+  if (matchQuote && matchQuote[1]) {
+    return matchQuote[1].trim();
+  }
+
+  // 2. Check for explicit shell command syntax like rm -rf <path>, del <path>, npm <cmd>, git <cmd>, etc.
+  const explicitCmdMatch = raw.match(/\b(rm\s+-[a-zA-Z]+\s+[^\s,;]+|rm\s+[^\s,;]+|del\s+[^\s,;]+|rmdir\s+[^\s,;]+|npm\s+[^\s,;]+|node\s+[^\s,;]+|dir\b|ls\b|cat\s+[^\s,;]+|pwd\b|mkdir\s+[^\s,;]+)\b/i);
+  if (explicitCmdMatch) {
+    return explicitCmdMatch[0].trim();
+  }
+
+  // 3. Match natural language deletion / command intent patterns:
+  // e.g. "deletion of src/sandbox/fake_test_directory", "delete src/sandbox/fake_test_directory", "remove src/sandbox/fake_test_directory"
+  const deletionMatch = raw.match(/\b(deletion|delete|remove|cleanup|rm)\s+(of\s+)?([^\s,;]+)/i);
+  if (deletionMatch && deletionMatch[3]) {
+    const targetPath = deletionMatch[3].trim();
+    return `rm -rf ${targetPath}`;
+  }
+
+  // 4. Strip common conversational prefixes: "use terminal to run dir", "run command rm -rf src/temp", "execute dir"
+  let clean = raw.replace(/^(please\s+)?(use|run|execute|test|simulate)(\s+the)?(\s+terminal|\s+shell|\s+cmd)?(\s+command)?(\s+to\s+run|\s+to\s+execute|\s+to|\s*:)?\s*/i, '');
+  clean = clean.replace(/^(terminal|shell|cmd)\s+(exec|run|command)?\s*/i, '');
+
+  // Strip trailing sentence junk (e.g. "for Permission Gate testing...", "Do not create...")
+  clean = clean.split(/(\bfor\b|\bdo not\b|\bplease\b|\bto test\b|\bwith\b|\band\b)/i)[0].trim();
+  
+  return clean || raw;
+}
+
 export function isGeneralQuery(input: string): boolean {
   const rawPrompt = extractRawUserPrompt(input);
   const trimmed = rawPrompt.toLowerCase();
+
+  if (isGitQuery(input) || isTerminalQuery(input)) return false;
   
   const codingKeywords = [
     'code', 'file', 'function', 'class', 'bug', 'error', 'repo', 'workspace', 'script',
     'app', 'build', 'html', 'css', 'javascript', 'typescript', 'ts', 'js', 'py', 'python',
     'json', 'component', 'test', 'create', 'write', 'make', 'delete', 'refactor', 'fix',
     'implement', 'add', 'modify', 'directory', 'folder', 'npm', 'node', 'run', 'execute',
-    'calculator', 'utils', 'main.ts', 'solution', 'import', 'export', 'const', 'let', 'var'
+    'calculator', 'utils', 'main.ts', 'solution', 'import', 'export', 'const', 'let', 'var',
+    'git', 'status', 'diff', 'commit', 'push', 'branch', 'repository', 'log', 'checkout', 'stash',
+    'terminal', 'command', 'shell', 'rm', 'del', 'sudo', 'chmod'
   ];
 
   const hasCodingKeyword = codingKeywords.some(kw => {
@@ -59,7 +171,69 @@ export function isGeneralQuery(input: string): boolean {
   return false;
 }
 
+export function isBrowserQuery(input: string): boolean {
+  const rawPrompt = extractRawUserPrompt(input).toLowerCase().trim();
+
+  // 1. Contains a URL or localhost port
+  const hasUrl = /\b(https?:\/\/[^\s]+|localhost:\d+)\b/i.test(rawPrompt);
+
+  // 2. Contains browser UI / inspection keywords
+  const hasBrowserAction = /\b(open|inspect|navigate|visit|browse|login|page|screenshot|snapshot|view\s+page|check\s+page|ui)\b/i.test(rawPrompt);
+  const hasBrowserKeyword = /\b(browser|playwright|chrome|chromium|page|webpage)\b/i.test(rawPrompt);
+
+  if (hasUrl && (hasBrowserAction || hasBrowserKeyword)) {
+    return true;
+  }
+
+  if (hasBrowserKeyword && (hasBrowserAction || /\b(open|navigate|visit|goto|inspect)\b/i.test(rawPrompt))) {
+    return true;
+  }
+
+  if (/\b(open|inspect|navigate|goto)\s+https?:\/\/[^\s]+/i.test(rawPrompt)) {
+    return true;
+  }
+
+  return false;
+}
+
+export function extractBrowserUrl(input: string): string {
+  const raw = extractRawUserPrompt(input);
+  const match = raw.match(/\b(https?:\/\/[^\s]+|localhost:\d+)\b/i);
+  if (match) {
+    let url = match[0];
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      url = `http://${url}`;
+    }
+    return url;
+  }
+  return 'http://localhost:3000';
+}
+
 export async function intentAgentNode(state: typeof KaizenState.State): Promise<{ status: string; targetFiles: string[] }> {
+  // Fast-track heuristic for MCP Browser operations
+  if (isBrowserQuery(state.userInput)) {
+    return {
+      status: 'ROUTED_MCP_BROWSER',
+      targetFiles: []
+    };
+  }
+
+  // Fast-track heuristic for MCP Git operations
+  if (isGitQuery(state.userInput)) {
+    return {
+      status: 'ROUTED_MCP_GIT',
+      targetFiles: []
+    };
+  }
+
+  // Fast-track heuristic for MCP Terminal operations
+  if (isTerminalQuery(state.userInput)) {
+    return {
+      status: 'ROUTED_MCP_TERMINAL',
+      targetFiles: []
+    };
+  }
+
   // Fast-track heuristic for general greetings and general knowledge questions BEFORE LLM call
   if (isGeneralQuery(state.userInput)) {
     return {
@@ -72,10 +246,10 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
 
   if (apiKey && apiKey !== 'your_groq_api_key_here') {
     const modelCandidates = [
-      'openai/gpt-oss-120b',
-      'groq/compound-mini',
-      'qwen/qwen3.8-27b',
-      'openai/gpt-oss-20b'
+      'llama-3.3-70b-versatile',
+      'llama-3.1-8b-instant',
+      'mixtral-8x7b-32768',
+      'gemma2-9b-it'
     ];
 
     for (const modelName of modelCandidates) {

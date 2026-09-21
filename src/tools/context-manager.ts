@@ -44,6 +44,7 @@ export interface AgentState {
   errors: string[];
   conversationHistory?: ChatMessage[];
   userFacts?: Record<string, string>;
+  status?: string;
   timestamp: Date;
 }
 
@@ -314,6 +315,7 @@ export function loadAgentState(): AgentState | null {
       errors: raw.errors || [],
       conversationHistory: raw.conversationHistory || [],
       userFacts: raw.userFacts || {},
+      status: raw.status || (raw.completedSteps?.length ? 'COMPLETED' : 'IN PROGRESS'),
       timestamp: new Date(raw.timestamp)
     };
   } catch {
@@ -333,6 +335,7 @@ export function recordConversationTurn(userText: string, assistantText: string):
     errors: [],
     conversationHistory: [] as ChatMessage[],
     userFacts: {} as Record<string, string>,
+    status: 'COMPLETED',
     timestamp: new Date()
   };
 
@@ -385,6 +388,8 @@ ${recentTurns.map(msg => `  ${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg
 `;
   }
 
+  const currentStatus = state.status || (state.completedSteps && state.completedSteps.length > 0 ? 'COMPLETED' : 'IN PROGRESS');
+
   return `
 AGENT STATE (from previous request):
 ====================================
@@ -398,7 +403,7 @@ ${state.generatedFiles.size > 0 ? Array.from(state.generatedFiles.keys()).map(f 
 Errors Encountered: ${state.errors.length}
 ${state.errors.length > 0 ? state.errors.map(e => '  ✗ ' + e).join('\n') : '  (None)'}
 ${factsStr}${historyStr}
-Current Status: IN PROGRESS
+Current Status: ${currentStatus}
 `;
 }
 
@@ -456,12 +461,13 @@ export async function handleSpecialCommand(command: string): Promise<string | nu
 /**
  * Preprocess user prompt with auto-loaded project context and persisted agent state.
  */
-export async function preprocessUserRequest(rawPrompt: string): Promise<{ enhancedPrompt: string; isCommand: boolean; commandResult?: string }> {
+export async function preprocessUserRequest(rawPrompt: string): Promise<{ enhancedPrompt: string; workspaceContext: string; isCommand: boolean; commandResult?: string }> {
   // Check if prompt is a special command
   const commandResult = await handleSpecialCommand(rawPrompt);
   if (commandResult !== null) {
     return {
       enhancedPrompt: rawPrompt,
+      workspaceContext: '',
       isCommand: true,
       commandResult
     };
@@ -473,16 +479,14 @@ export async function preprocessUserRequest(rawPrompt: string): Promise<{ enhanc
   // 2. Load agent state
   const agentState = memoryEnabled ? loadAgentState() : null;
   
-  // 3. Build enhanced prompt
-  let enhancedPrompt = formatContextForPrompt(projectContext);
-  
+  // 3. Build workspace context block separately
+  let workspaceContext = formatContextForPrompt(projectContext);
   if (agentState) {
-    enhancedPrompt += '\n\n' + formatStateForPrompt(agentState);
+    workspaceContext += '\n\n' + formatStateForPrompt(agentState);
   }
-  
-  enhancedPrompt += '\n\nUSER REQUEST:\n' + rawPrompt;
 
-  return { enhancedPrompt, isCommand: false };
+  // Preserve raw user prompt cleanly as enhancedPrompt
+  return { enhancedPrompt: rawPrompt, workspaceContext, isCommand: false };
 }
 
 // Self-run verification when executed directly via Node / ts-node

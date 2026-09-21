@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
 import { KaizenStateType } from './state';
-import { intentAgentNode } from './agents/intentAgent';
+import { intentAgentNode, extractGitActions } from './agents/intentAgent';
 import { contextRetrievalAgentNode } from './agents/contextRetrievalAgent';
 import { plannerAgentNode } from './agents/plannerAgent';
 import { codeGenAgentNode, isProtectedFile } from './agents/codeGenAgent';
@@ -38,9 +38,11 @@ async function executeAgentPipeline(userInput: string) {
     runId: `run_${Date.now()}`,
     createdAt,
     userInput,
+    originalUserRequest: userInput,
     targetFiles: [],
     extractedContext: "",
     plan: [],
+    planApprovalStatus: 'NONE',
     generatedPatch: "",
     choices: [],
     retryCount: 0,
@@ -49,7 +51,16 @@ async function executeAgentPipeline(userInput: string) {
     currentStage: "intent",
     completedStages: [],
     skippedStages: [],
-    generalAnswer: undefined
+    generalAnswer: undefined,
+    imagePayload: undefined,
+    extractedImageText: undefined,
+    permissionMode: 'deny_first',
+    riskScore: 10,
+    permissionStatus: 'APPROVED',
+    mcpActions: [],
+    dockerSandboxActive: false,
+    structuredFailures: [],
+    errorsEncountered: 0
   };
 
   persistenceEngine.saveCheckpoint(sessionId, 'INITIALIZED', state);
@@ -65,6 +76,28 @@ async function executeAgentPipeline(userInput: string) {
     status: intentOutput.status,
     targetFiles: intentOutput.targetFiles
   };
+
+  if (state.status === "ROUTED_MCP_GIT") {
+    console.log("\n-> Executing MCP Git operations...");
+    const { mcpInterface } = await import('./tools/mcpInterface');
+    const actions = extractGitActions(state.userInput);
+
+    for (const act of actions) {
+      const res = await mcpInterface.executeGitAction(act);
+      console.log(`\n--- Git ${act.toUpperCase()} Output ---`);
+      console.log(res.output || res.error || '(clean output)');
+    }
+    return;
+  }
+
+  if (state.status === "ROUTED_MCP_TERMINAL") {
+    console.log("\n-> Executing MCP Terminal operation...");
+    const { mcpInterface } = await import('./tools/mcpInterface');
+    const res = await mcpInterface.executeTerminalCommand(state.userInput);
+    console.log(`\n--- Terminal Execution Output ---`);
+    console.log(res.output || res.error || '(clean output)');
+    return;
+  }
 
   // 3. Run Context Retrieval Agent (Graphify Engine + ASTParser)
   console.log("\n-> Running Context Retrieval Agent (Graphify Engine)...");

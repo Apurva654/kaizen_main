@@ -2,7 +2,8 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { KaizenStateType } from './state';
-import { intentAgentNode } from './agents/intentAgent';
+import { intentAgentNode, extractTerminalCommand, extractGitActions, extractBrowserUrl } from './agents/intentAgent';
+import { parseBrowserInspectionResult, formatBrowserInspectionMarkdown, extractRequestedBrowserAction, resolveAccessibilityTarget } from './tools/browserSnapshotParser';
 import { contextRetrievalAgentNode } from './agents/contextRetrievalAgent';
 import { plannerAgentNode } from './agents/plannerAgent';
 import { codeGenAgentNode, isProtectedFile, GeneratedFilePatch } from './agents/codeGenAgent';
@@ -10,6 +11,7 @@ import { reviewerAgentNode } from './agents/reviewerAgent';
 import { debuggerAgentNode } from './agents/debuggerAgent';
 import { runWorkspaceTests, extractFailingFilesFromLogs } from './tools/testRunner';
 import { preprocessUserRequest, saveAgentState, loadAgentState, recordConversationTurn } from './tools/context-manager';
+import { ocrService } from './tools/ocrService';
 
 export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'kaizen.sidebarView';
@@ -44,7 +46,7 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
     webview.onDidReceiveMessage(async (message: any) => {
       switch (message.type) {
         case 'RUN_PIPELINE': {
-          this.runAgentPipeline(message.userInput);
+          this.runAgentPipeline(message.userInput || '', message.imagePayload);
           break;
         }
         case 'HITL_RESPOND': {
@@ -84,8 +86,19 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  public async runAgentPipeline(userInput: string) {
-    this.postMessageToWebview('PIPELINE_START', { userInput, timestamp: new Date().toISOString() });
+  public async runAgentPipeline(rawUserInput: string, imagePayload?: string) {
+    this.postMessageToWebview('PIPELINE_START', { userInput: rawUserInput, timestamp: new Date().toISOString() });
+
+    let extractedImageText = '';
+    if (imagePayload) {
+      this.postMessageToWebview('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '🔍 Vision OCR: Extracting text from screenshot...' });
+      extractedImageText = await ocrService.extractTextFromImage(imagePayload);
+    }
+
+    let userInput = rawUserInput;
+    if (extractedImageText) {
+      userInput = `[Extracted Text from Screenshot]:\n${extractedImageText}\n\n[User Instructions]:\n${rawUserInput || 'Analyze and process attached screenshot code/instructions.'}`;
+    }
 
     // Determine target file from active editor if open
     let initialTargets: string[] = [];
@@ -104,8 +117,8 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
       this.postMessageToWebview(type, { ...data, runId });
     };
 
-    const rawUserInput = userInput || '';
-    const processed = await preprocessUserRequest(rawUserInput);
+    const promptToPreprocess = userInput || '';
+    const processed = await preprocessUserRequest(promptToPreprocess);
     if (processed.isCommand && processed.commandResult) {
       this.postMessageToWebview('PIPELINE_COMPLETE', {
         status: 'GENERAL_COMPLETE',
@@ -114,16 +127,18 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const enhancedUserInput = processed.enhancedPrompt || rawUserInput;
+    const enhancedUserInput = processed.enhancedPrompt || promptToPreprocess;
 
     let state: KaizenStateType = {
       sessionId: `sess_${Date.now()}`,
       runId,
       createdAt,
-      userInput: enhancedUserInput,
+      userInput: promptToPreprocess,
+      originalUserRequest: promptToPreprocess,
       targetFiles: initialTargets,
-      extractedContext: "",
+      extractedContext: processed.workspaceContext || "",
       plan: [],
+      planApprovalStatus: 'NONE',
       generatedPatch: "",
       choices: [],
       retryCount: 0,
@@ -132,7 +147,16 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
       currentStage: "intent",
       completedStages: [],
       skippedStages: [],
-      generalAnswer: undefined
+      generalAnswer: undefined,
+      imagePayload,
+      extractedImageText: extractedImageText || undefined,
+      permissionMode: 'deny_first',
+      riskScore: 25,
+      permissionStatus: 'APPROVED',
+      mcpActions: [],
+      dockerSandboxActive: false,
+      structuredFailures: [],
+      errorsEncountered: 0
     };
 
     const completedStages: string[] = [];
@@ -143,12 +167,16 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
       state.completedStages = Array.from(new Set(completedStages));
       state.skippedStages = Array.from(new Set(skippedStages));
 
+      const isFailure = finalStatus === 'FAILED' || finalStatus === 'ABORTED';
+      const normalizedStatus = isFailure ? finalStatus : 'COMPLETED';
+
       saveAgentState({
         conversationId: state.sessionId || 'sess_default',
         currentTask: rawUserInput,
         completedSteps: completedStages,
         generatedFiles: new Map((state.targetFiles || []).map(f => [f, 'updated'])),
         errors: (state as any).reviewReport?.issues || [],
+        status: normalizedStatus,
         timestamp: new Date()
       });
 
@@ -181,6 +209,237 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
         result: { status: state.status, targetFiles: state.targetFiles } 
       });
 
+      // Routing Logic for MCP Git Operations
+      if (state.status === "ROUTED_MCP_GIT") {
+        skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
+        postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '⚡ Executing Git MCP operations...' });
+
+        const { permissionGate } = await import('./tools/permissionGate');
+        const { mcpInterface } = await import('./tools/mcpInterface');
+
+        const requestedActions = extractGitActions(rawUserInput);
+
+        let combinedOutput = '### 🐙 Git MCP Operation Results\n\n';
+        let hasBlockedAction = false;
+
+        for (const action of requestedActions) {
+          const evalResult = permissionGate.evaluate(`git_${action}`, { command: `git ${action}` });
+
+          let isApproved = true;
+
+          if (evalResult.requiresApproval && !evalResult.allowed) {
+            hasBlockedAction = true;
+            combinedOutput += `> [!WARNING]\n> **Git ${action.toUpperCase()} Permission Intercepted** (Risk Score: ${evalResult.riskScore}/100)\n> ${evalResult.reason}\n\n`;
+
+            postWebviewEvent('HITL_REQUEST', {
+              type: 'GIT_PERMISSION_APPROVAL',
+              title: `Permission Gate Intercept: Git ${action.toUpperCase()}`,
+              message: evalResult.reason,
+              action,
+              riskScore: evalResult.riskScore
+            });
+
+            const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
+              this._pendingHitlResolver = resolve;
+            });
+            isApproved = userHitlResponse.action === 'approve';
+          }
+
+          const mcpResult = await mcpInterface.executeGitAction(action, rawUserInput, {
+            dryRun: permissionGate.isDryRunMode(),
+            approved: isApproved
+          });
+
+          const actionLabel = action.toUpperCase();
+          if (mcpResult.success) {
+            combinedOutput += `#### ${actionLabel} Output (${mcpResult.isSimulated ? 'SIMULATED' : 'EXECUTED'})\n\`\`\`\n${mcpResult.output || '(No changes / clean output)'}\n\`\`\`\n\n`;
+          } else {
+            combinedOutput += `#### ${actionLabel} Result (${mcpResult.isSimulated ? 'SIMULATED' : 'BLOCKED'})\n\`\`\`\n${mcpResult.output || mcpResult.error}\n\`\`\`\n\n`;
+          }
+        }
+
+        completedStages.push('response');
+        await finalizeExecution(hasBlockedAction ? 'HITL_REQUIRED' : 'COMPLETED', {
+          route: 'MCP_GIT',
+          explanation: combinedOutput.trim()
+        });
+        return;
+      }
+
+      // Routing Logic for MCP Terminal Operations
+      if (state.status === "ROUTED_MCP_TERMINAL") {
+        skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
+        postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '⚡ Executing Terminal MCP operation...' });
+
+        const { permissionGate } = await import('./tools/permissionGate');
+        const { mcpInterface } = await import('./tools/mcpInterface');
+
+        const command = extractTerminalCommand(rawUserInput);
+        const evalResult = permissionGate.evaluate('terminal_exec', { command });
+        let isApproved = true;
+        let hasBlockedAction = false;
+
+        if (evalResult.requiresApproval && !evalResult.allowed) {
+          hasBlockedAction = true;
+
+          postWebviewEvent('HITL_REQUEST', {
+            type: 'TERMINAL_PERMISSION_APPROVAL',
+            title: `Permission Gate Intercept: Terminal Execution`,
+            message: evalResult.reason,
+            command: command,
+            riskScore: evalResult.riskScore
+          });
+
+          const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
+            this._pendingHitlResolver = resolve;
+          });
+          isApproved = userHitlResponse.action === 'approve';
+        }
+
+        const isSimulatedPrompt = /\b(simulat|dry-run|dry run|fake|mock|permission gate)\b/i.test(rawUserInput);
+        const isDryRun = permissionGate.isDryRunMode() || isSimulatedPrompt;
+
+        const mcpResult = await mcpInterface.executeTerminalCommand(command, process.cwd(), {
+          dryRun: isDryRun,
+          approved: isApproved
+        });
+
+        let combinedOutput = `### 💻 Terminal MCP Operation Results\n\n`;
+        if (mcpResult.success) {
+          combinedOutput += `#### Command Output (${mcpResult.isSimulated ? 'SIMULATED' : 'EXECUTED'})\n\`\`\`\n${mcpResult.output || '(Clean output)'}\n\`\`\`\n\n`;
+        } else {
+          combinedOutput += `#### Command Result (${mcpResult.isSimulated ? 'SIMULATED' : 'BLOCKED'})\n\`\`\`\n${mcpResult.output || mcpResult.error}\n\`\`\`\n\n`;
+        }
+
+        completedStages.push('response');
+        await finalizeExecution(hasBlockedAction ? 'HITL_REQUIRED' : 'COMPLETED', {
+          route: 'MCP_TERMINAL',
+          explanation: combinedOutput.trim()
+        });
+        return;
+      }
+
+      // Routing Logic for MCP Browser Operations
+      if (state.status === "ROUTED_MCP_BROWSER") {
+        skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
+        state.targetFiles = [];
+        postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '🌐 Connecting to External Playwright MCP Server Process...' });
+
+        const { permissionGate } = await import('./tools/permissionGate');
+        const { mcpInterface } = await import('./tools/mcpInterface');
+
+        const targetUrl = extractBrowserUrl(rawUserInput);
+
+        await mcpInterface.connectServer('playwright-mcp-stdio');
+
+        const evalNav = permissionGate.evaluate('browser_navigate', { url: targetUrl });
+        let isApproved = true;
+        let hasBlockedAction = false;
+
+        if (evalNav.requiresApproval && !evalNav.allowed) {
+          hasBlockedAction = true;
+          postWebviewEvent('HITL_REQUEST', {
+            type: 'BROWSER_PERMISSION_APPROVAL',
+            title: 'Permission Gate Intercept: Browser Navigation',
+            message: evalNav.reason,
+            url: targetUrl,
+            riskScore: evalNav.riskScore
+          });
+
+          const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
+            this._pendingHitlResolver = resolve;
+          });
+          isApproved = userHitlResponse.action === 'approve';
+        }
+
+        postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: `🌐 Navigating browser to ${targetUrl}...` });
+        const navRes = await mcpInterface.executeBrowserAction('navigate', { url: targetUrl }, { approved: isApproved });
+
+        postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '🌐 Inspecting page accessibility snapshot...' });
+        const snapRes = await mcpInterface.executeBrowserAction('snapshot', {}, { approved: isApproved });
+
+        const combinedBrowserOutput = [navRes.output, snapRes.output, navRes.error, snapRes.error].filter(Boolean).join('\n') || '(No DOM snapshot output returned)';
+        const executedToolsList = ['browser_navigate', 'browser_snapshot'];
+        let finalInspection = parseBrowserInspectionResult(combinedBrowserOutput, targetUrl, executedToolsList);
+
+        const requestedAction = extractRequestedBrowserAction(rawUserInput);
+        if (requestedAction) {
+          postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: `🔍 Resolving target "${requestedAction.target}" against accessibility tree...` });
+          const targetRes = resolveAccessibilityTarget(requestedAction.target, finalInspection);
+
+          if (!targetRes.found) {
+            finalInspection.actionExecuted = {
+              action: requestedAction.action,
+              target: requestedAction.target,
+              success: false,
+              error: targetRes.error
+            };
+          } else {
+            const evalAction = permissionGate.evaluate(`browser_${requestedAction.action}`, {
+              target: requestedAction.target,
+              ref: targetRes.elementRef,
+              action: requestedAction.action
+            });
+
+            let isActionApproved = true;
+            if (evalAction.requiresApproval && !evalAction.allowed) {
+              hasBlockedAction = true;
+              postWebviewEvent('HITL_REQUEST', {
+                type: 'BROWSER_PERMISSION_APPROVAL',
+                title: `Permission Gate Intercept: Browser ${requestedAction.action.toUpperCase()}`,
+                message: evalAction.reason,
+                url: targetUrl,
+                riskScore: evalAction.riskScore
+              });
+
+              const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
+                this._pendingHitlResolver = resolve;
+              });
+              isActionApproved = userHitlResponse.action === 'approve';
+            }
+
+            postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: `⚡ Executing browser_${requestedAction.action} on "${requestedAction.target}" (ref: ${targetRes.elementRef})...` });
+            executedToolsList.push(`browser_${requestedAction.action}`);
+
+            const actionRes = await mcpInterface.executeBrowserAction(
+              requestedAction.action,
+              { element: targetRes.elementRef, ref: targetRes.elementRef, name: targetRes.targetName, text: requestedAction.text },
+              { approved: isActionApproved }
+            );
+
+            postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '🌐 Inspecting post-action page snapshot...' });
+            executedToolsList.push('browser_snapshot');
+            const postSnapRes = await mcpInterface.executeBrowserAction('snapshot', {}, { approved: isActionApproved });
+
+            const postCombinedOutput = [actionRes.output, postSnapRes.output, actionRes.error, postSnapRes.error].filter(Boolean).join('\n') || combinedBrowserOutput;
+            finalInspection = parseBrowserInspectionResult(postCombinedOutput, targetUrl, executedToolsList);
+            finalInspection.actionExecuted = {
+              action: requestedAction.action,
+              target: requestedAction.target,
+              elementRef: targetRes.elementRef,
+              success: actionRes.success,
+              error: actionRes.error
+            };
+          }
+        }
+
+        const formattedMarkdown = formatBrowserInspectionMarkdown(finalInspection);
+
+        await mcpInterface.disconnectServer();
+        await mcpInterface.connectServer('default-inprocess');
+
+        state.targetFiles = [];
+
+        completedStages.push('response');
+        await finalizeExecution(hasBlockedAction ? 'HITL_REQUIRED' : 'COMPLETED', {
+          route: 'MCP_BROWSER',
+          targetFiles: [],
+          filePatches: [],
+          explanation: formattedMarkdown
+        });
+        return;
+      }
+
       // Routing Logic for General Knowledge & Greetings
       if (state.status === "ROUTED_GENERAL_QUERY") {
         skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
@@ -201,17 +460,18 @@ Directives:
 - If the user asks for their name, identity, or previous details (e.g. "my name?", "whats my name?", "Jannik"), state their name/identity directly from the KNOWN FACTS and CONVERSATION HISTORY above.
 - Provide concise, friendly, and direct answers without generating code unless explicitly requested.`;
 
-            const res = await model.invoke([
+            const res: any = await model.invoke([
               { role: 'system', content: systemContent },
               { role: 'user', content: rawUserInput }
             ]);
-            answer = typeof res.content === 'string' ? res.content : String(res.content);
+            answer = typeof res.content === 'string' ? res.content : String(res.content ?? '');
           } catch (err) {
             console.warn('General query LLM invocation failed:', err);
           }
         }
 
-        await finalizeExecution('GENERAL_COMPLETE', {
+        completedStages.push('response');
+        await finalizeExecution('COMPLETED', {
           route: 'GENERAL_QUERY',
           explanation: answer
         });
@@ -233,7 +493,8 @@ Directives:
 
       if (state.status === "ROUTED_EXPLAIN_CODE") {
         skippedStages.push('planner', 'coder', 'testrunner', 'debugger', 'reviewer');
-        await finalizeExecution('EXPLAIN_COMPLETE', {
+        completedStages.push('response');
+        await finalizeExecution('COMPLETED', {
           route: 'EXPLAIN_CODE',
           explanation: state.extractedContext || "No code context to explain."
         });
@@ -258,6 +519,11 @@ Directives:
 
         const MAX_SELF_HEAL_RETRIES = 3;
         if (!testResult.passed) {
+          state.errorsEncountered = (state.errorsEncountered || 0) + 1;
+          if (testResult.structuredFailure) {
+            state.structuredFailures = [...(state.structuredFailures || []), testResult.structuredFailure];
+          }
+
           while (!testResult.passed && state.retryCount < MAX_SELF_HEAL_RETRIES) {
             state.retryCount += 1;
 
@@ -277,15 +543,23 @@ Directives:
             const debugResult = await debuggerAgentNode(state);
             completedStages.push('debugger');
 
-            if (debugResult.filePatches && debugResult.filePatches.length > 0) {
-              for (const patch of debugResult.filePatches) {
+            const isTestFile = (filePath: string) => {
+              const norm = filePath.replace(/\\/g, '/');
+              const baseName = path.basename(norm);
+              return norm.includes('/tests/') || baseName.startsWith('test_') || baseName.endsWith('_test.py') || baseName.endsWith('.test.ts');
+            };
+
+            const validPatches = (debugResult.filePatches || []).filter(p => !isTestFile(p.filePath));
+
+            if (validPatches.length > 0) {
+              for (const patch of validPatches) {
                 await this.applyPatchToVSCodeDocument(patch.filePath, patch.code);
               }
               completedStages.push('coder');
               postWebviewEvent('AGENT_STEP', { 
                 agent: 'CoderAgent', 
                 status: 'completed', 
-                result: { filePatches: debugResult.filePatches, diffCards: await this.prepareDiffCards(debugResult.filePatches) } 
+                result: { filePatches: validPatches, diffCards: await this.prepareDiffCards(validPatches) } 
               });
             }
 
@@ -297,6 +571,14 @@ Directives:
 
             postWebviewEvent('AGENT_STEP', { agent: 'TestRunnerAgent', status: 'running', message: `Re-running unit tests after bug fix (Attempt #${state.retryCount})...` });
             testResult = await runWorkspaceTests(state.targetFiles);
+
+            if (!testResult.passed) {
+              state.errorsEncountered = (state.errorsEncountered || 0) + 1;
+              if (testResult.structuredFailure) {
+                state.structuredFailures = [...(state.structuredFailures || []), testResult.structuredFailure];
+              }
+            }
+
             postWebviewEvent('AGENT_STEP', { agent: 'TestRunnerAgent', status: 'completed', result: { summary: testResult.summary, passed: testResult.passed } });
           }
         } else {
@@ -349,37 +631,32 @@ Directives:
           result: { plan: state.plan, status: state.status } 
         });
 
+        state.planApprovalStatus = 'PENDING_APPROVAL';
+
         // 4. HITL Plan Approval Card
         postWebviewEvent('HITL_REQUEST', {
           type: 'PLAN_APPROVAL',
           title: 'Plan Approval Required',
           message: 'Please review the generated plan before proceeding to code generation.',
           plan: state.plan,
-          targetFiles: state.targetFiles
+          targetFiles: state.targetFiles,
+          planApprovalStatus: 'PENDING_APPROVAL'
         });
 
-        const hitlPromise = new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
+        const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
           this._pendingHitlResolver = resolve;
         });
-        const timeoutPromise = new Promise<{ action: 'approve'; message?: string }>((resolve) => {
-          setTimeout(() => {
-            if (this._pendingHitlResolver) {
-              this._pendingHitlResolver = null;
-              resolve({ action: 'approve', message: 'Auto-approved via non-interactive timeout guard.' });
-            }
-          }, 30000);
-        });
-
-        const userHitlResponse = await Promise.race([hitlPromise, timeoutPromise]);
 
         if (userHitlResponse.action === 'reject') {
+          state.planApprovalStatus = 'REJECTED';
           skippedStages.push('coder', 'testrunner', 'debugger', 'reviewer');
-          await finalizeExecution('ABORTED', { message: 'Plan rejected by user.' });
+          await finalizeExecution('ABORTED', { message: 'Plan rejected by user.', planApprovalStatus: 'REJECTED' });
           return;
         }
 
         if (userHitlResponse.action === 'feedback' && userHitlResponse.message) {
-          state.userInput = `${state.userInput} (User plan feedback: ${userHitlResponse.message})`;
+          state.planApprovalStatus = 'FEEDBACK_SUBMITTED';
+          state.userInput = `${state.originalUserRequest || state.userInput} (User plan feedback: ${userHitlResponse.message})`;
           const updatedPlannerOutput = await plannerAgentNode(state);
           state.plan = updatedPlannerOutput.plan || state.plan;
 
@@ -389,6 +666,8 @@ Directives:
             result: { plan: state.plan, status: state.status } 
           });
         }
+
+        state.planApprovalStatus = 'APPROVED';
 
         // 5. Coder Agent
         postWebviewEvent('AGENT_STEP', { agent: 'CoderAgent', status: 'running', message: 'Generating code patches...' });

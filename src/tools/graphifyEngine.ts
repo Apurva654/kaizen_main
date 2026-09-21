@@ -34,6 +34,47 @@ export interface DependencyEdge {
   type: 'internal' | 'external' | 'unresolved';
 }
 
+export interface GraphifyNode {
+  id: string;
+  label: string;
+  type: 'file' | 'symbol' | 'external' | 'unresolved';
+  path?: string;
+  language?: string;
+  status?: 'generated' | 'modified' | 'test' | 'dependency' | 'active' | 'normal';
+  symbolsCount?: number;
+  symbolType?: string;
+  declaredIn?: string;
+  isExported?: boolean;
+  importedBy?: string[];
+  importsCount?: number;
+  contentSnippet?: string;
+}
+
+export interface GraphifyEdge {
+  id: string;
+  source: string;
+  target: string;
+  type: 'IMPORTS' | 'IMPORTED_BY' | 'DEFINES' | 'EXPORTS' | 'DEPENDS_ON';
+  label?: string;
+  symbols?: string[];
+}
+
+export interface GraphifyGraphPayload {
+  nodes: GraphifyNode[];
+  edges: GraphifyEdge[];
+  metadata: {
+    files: number;
+    symbols: number;
+    dependencies: number;
+    edges: number;
+    externalDependencies: number;
+    unresolved: number;
+    generatedFiles: number;
+    activeFile?: string;
+    scope: string;
+  };
+}
+
 const IGNORED_DIRS = new Set([
   'node_modules',
   'dist',
@@ -565,5 +606,228 @@ export class GraphifyEngine {
 
     console.log(`[CONTEXT] Context assembly completed`);
     return factsList.join('\n');
+  }
+
+  public exportGraphData(options?: {
+    scope?: string;
+    targetFiles?: string[];
+    generatedFiles?: string[];
+    activeFile?: string;
+  }): GraphifyGraphPayload {
+    const scope = options?.scope || 'current-task';
+    const rawTargets = options?.targetFiles || [];
+    const generatedFiles = (options?.generatedFiles || []).map(f => this.normalizePath(f));
+    const activeFile = options?.activeFile ? this.normalizePath(options.activeFile) : undefined;
+
+    const expandedTargets = this.expandTargetFiles(rawTargets).map(f => this.normalizePath(f));
+
+    const nodes: GraphifyNode[] = [];
+    const edges: GraphifyEdge[] = [];
+    const addedNodeIds = new Set<string>();
+
+    let totalSymbolsCount = 0;
+    let totalDepsCount = 0;
+    let externalDepsCount = 0;
+    let unresolvedCount = 0;
+
+    const getFileStatus = (filePath: string): 'generated' | 'modified' | 'test' | 'dependency' | 'active' | 'normal' => {
+      const norm = this.normalizePath(filePath);
+      if (activeFile && norm === activeFile) return 'active';
+      if (generatedFiles.includes(norm)) return 'generated';
+      const baseName = path.basename(norm).toLowerCase();
+      if (baseName.includes('test') || baseName.startsWith('test_')) return 'test';
+      if (expandedTargets.includes(norm)) return 'modified';
+      return 'normal';
+    };
+
+    const relevantFilePaths = new Set<string>();
+
+    const addPathToSet = (p?: string) => {
+      if (!p) return;
+      const matched = this.findMatchingKey(p);
+      if (matched) relevantFilePaths.add(matched);
+      else {
+        const norm = this.normalizePath(p);
+        if (this.fileFactsMap.has(norm)) relevantFilePaths.add(norm);
+      }
+    };
+
+    if (scope === 'full') {
+      for (const f of this.fileFactsMap.keys()) relevantFilePaths.add(f);
+    } else if (scope === 'generated') {
+      for (const g of generatedFiles) addPathToSet(g);
+      for (const t of expandedTargets) addPathToSet(t);
+    } else if (scope === 'dependencies') {
+      for (const [filePath, node] of this.fileFactsMap.entries()) {
+        if (node.imports.length > 0) relevantFilePaths.add(filePath);
+        for (const imp of node.imports) {
+          if (imp.resolvedPath) relevantFilePaths.add(imp.resolvedPath);
+        }
+      }
+    } else {
+      for (const t of expandedTargets) addPathToSet(t);
+      for (const g of generatedFiles) addPathToSet(g);
+      if (activeFile) addPathToSet(activeFile);
+
+      const initialPaths = Array.from(relevantFilePaths);
+      for (const filePath of initialPaths) {
+        const node = this.fileFactsMap.get(filePath);
+        if (node) {
+          for (const imp of node.imports) {
+            if (imp.resolvedPath) relevantFilePaths.add(imp.resolvedPath);
+          }
+        }
+      }
+      for (const [filePath, node] of this.fileFactsMap.entries()) {
+        for (const imp of node.imports) {
+          if (imp.resolvedPath && relevantFilePaths.has(imp.resolvedPath)) {
+            relevantFilePaths.add(filePath);
+          }
+        }
+      }
+    }
+
+    if (relevantFilePaths.size === 0) {
+      for (const f of this.fileFactsMap.keys()) relevantFilePaths.add(f);
+    }
+
+    for (const filePath of relevantFilePaths) {
+      const node = this.fileFactsMap.get(filePath);
+      if (!node) continue;
+
+      const fileNodeId = filePath;
+      if (!addedNodeIds.has(fileNodeId)) {
+        addedNodeIds.add(fileNodeId);
+        nodes.push({
+          id: fileNodeId,
+          label: path.basename(filePath),
+          type: 'file',
+          path: filePath,
+          language: node.language,
+          status: getFileStatus(filePath),
+          symbolsCount: node.symbols.length,
+          importsCount: node.imports.length,
+          contentSnippet: node.content.slice(0, 300)
+        });
+      }
+
+      for (const sym of node.symbols) {
+        totalSymbolsCount++;
+        const symNodeId = `symbol:${filePath}:${sym.name}`;
+        if (!addedNodeIds.has(symNodeId)) {
+          addedNodeIds.add(symNodeId);
+          nodes.push({
+            id: symNodeId,
+            label: `${sym.name}()`,
+            type: 'symbol',
+            symbolType: sym.type,
+            declaredIn: filePath,
+            isExported: sym.isExported,
+            status: 'normal'
+          });
+        }
+
+        edges.push({
+          id: `edge:${fileNodeId}:defines:${symNodeId}`,
+          source: fileNodeId,
+          target: symNodeId,
+          type: sym.isExported ? 'EXPORTS' : 'DEFINES',
+          label: sym.isExported ? 'EXPORTS' : 'DEFINES'
+        });
+      }
+
+      for (const imp of node.imports) {
+        if (imp.type === 'internal' && imp.resolvedPath) {
+          totalDepsCount++;
+          const targetFile = imp.resolvedPath;
+
+          if (!addedNodeIds.has(targetFile)) {
+            addedNodeIds.add(targetFile);
+            nodes.push({
+              id: targetFile,
+              label: path.basename(targetFile),
+              type: 'file',
+              path: targetFile,
+              language: this.astParser.getLanguageFromPath(targetFile),
+              status: getFileStatus(targetFile),
+              symbolsCount: 0,
+              importsCount: 0
+            });
+          }
+
+          edges.push({
+            id: `edge:${fileNodeId}:imports:${targetFile}`,
+            source: fileNodeId,
+            target: targetFile,
+            type: 'IMPORTS',
+            label: 'IMPORTS',
+            symbols: imp.importedSymbols
+          });
+        } else if (imp.type === 'external') {
+          externalDepsCount++;
+          const extNodeId = `ext:${imp.moduleSpecifier}`;
+          if (!addedNodeIds.has(extNodeId)) {
+            addedNodeIds.add(extNodeId);
+            nodes.push({
+              id: extNodeId,
+              label: imp.moduleSpecifier,
+              type: 'external',
+              status: 'normal'
+            });
+          }
+          edges.push({
+            id: `edge:${fileNodeId}:ext:${extNodeId}`,
+            source: fileNodeId,
+            target: extNodeId,
+            type: 'DEPENDS_ON',
+            label: 'DEPENDS_ON',
+            symbols: imp.importedSymbols
+          });
+        } else if (imp.type === 'unresolved') {
+          unresolvedCount++;
+          const unresNodeId = `unres:${imp.moduleSpecifier}`;
+          if (!addedNodeIds.has(unresNodeId)) {
+            addedNodeIds.add(unresNodeId);
+            nodes.push({
+              id: unresNodeId,
+              label: `${imp.moduleSpecifier} (?)`,
+              type: 'unresolved',
+              status: 'normal'
+            });
+          }
+          edges.push({
+            id: `edge:${fileNodeId}:unres:${unresNodeId}`,
+            source: fileNodeId,
+            target: unresNodeId,
+            type: 'DEPENDS_ON',
+            label: 'UNRESOLVED',
+            symbols: imp.importedSymbols
+          });
+        }
+      }
+    }
+
+    const fileNodesCount = nodes.filter(n => n.type === 'file').length;
+    const symbolNodesCount = nodes.filter(n => n.type === 'symbol').length;
+
+    // Node-edge integrity: filter out any edge referencing a non-existent node
+    const validNodeIds = new Set(nodes.map(n => n.id));
+    const validEdges = edges.filter(e => validNodeIds.has(e.source) && validNodeIds.has(e.target));
+
+    return {
+      nodes,
+      edges: validEdges,
+      metadata: {
+        files: fileNodesCount,
+        symbols: symbolNodesCount,
+        dependencies: totalDepsCount,
+        edges: validEdges.length,
+        externalDependencies: externalDepsCount,
+        unresolved: unresolvedCount,
+        generatedFiles: generatedFiles.length,
+        activeFile,
+        scope
+      }
+    };
   }
 }

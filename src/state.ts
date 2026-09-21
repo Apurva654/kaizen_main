@@ -4,6 +4,10 @@ export interface PlanStep {
   id: number;
   description: string;
   status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  targetFile?: string;
+  action?: string;
+  isNewFile?: boolean;
+  dependencies?: string[];
 }
 
 export const KaizenState = Annotation.Root({
@@ -94,6 +98,61 @@ export const KaizenState = Annotation.Root({
   generalAnswer: Annotation<string | undefined>({
     reducer: (_, y) => y,
     default: () => undefined
+  }),
+
+  imagePayload: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
+
+  extractedImageText: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
+
+  permissionMode: Annotation<'deny_first' | 'auto_mode'>({
+    reducer: (_, y) => y,
+    default: () => 'deny_first'
+  }),
+
+  riskScore: Annotation<number>({
+    reducer: (_, y) => y,
+    default: () => 0
+  }),
+
+  permissionStatus: Annotation<'APPROVED' | 'REJECTED' | 'PENDING_APPROVAL' | 'AUTO_APPROVED'>({
+    reducer: (_, y) => y,
+    default: () => 'AUTO_APPROVED'
+  }),
+
+  mcpActions: Annotation<Array<{ tool: string; action: string; status: string; output?: string }>>({
+    reducer: (x, y) => [...(x || []), ...(y || [])],
+    default: () => []
+  }),
+
+  dockerSandboxActive: Annotation<boolean>({
+    reducer: (_, y) => y,
+    default: () => false
+  }),
+
+  structuredFailures: Annotation<Array<any>>({
+    reducer: (x, y) => [...(x || []), ...(y || [])],
+    default: () => []
+  }),
+
+  planApprovalStatus: Annotation<'NONE' | 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED' | 'FEEDBACK_SUBMITTED'>({
+    reducer: (_, y) => y,
+    default: () => 'NONE'
+  }),
+
+  originalUserRequest: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
+
+  errorsEncountered: Annotation<number>({
+    reducer: (x, y) => (y !== undefined ? (x || 0) + y : (x || 0)),
+    default: () => 0
   })
 });
 

@@ -16,11 +16,17 @@ export function getLanguageFromPath(filePath: string): string {
     case 'jsx':
     case 'mjs':
     case 'cjs': return 'JavaScript';
-    case 'json': return 'JSON';
+    case 'go': return 'Go';
+    case 'rs': return 'Rust';
+    case 'java': return 'Java';
+    case 'cs': return 'C#';
     case 'cpp':
     case 'cc':
     case 'h':
     case 'hpp': return 'C++';
+    case 'c': return 'C';
+    case 'php': return 'PHP';
+    case 'json': return 'JSON';
     case 'html': return 'HTML';
     case 'css': return 'CSS';
     default: return 'Source Code';
@@ -69,7 +75,16 @@ export interface GeneratedFilePatch {
 }
 
 export async function codeGenAgentNode(state: typeof KaizenState.State) {
-  const targetFiles = state.targetFiles.length > 0 ? state.targetFiles : ['src/sandbox/main.ts'];
+  const planTargetFiles = (state.plan || [])
+    .map(s => s.targetFile)
+    .filter((f): f is string => typeof f === 'string' && f.trim().length > 0);
+
+  const targetFiles = Array.from(new Set([...state.targetFiles, ...planTargetFiles]))
+    .map(f => f.replace(/\\/g, '/'));
+
+  if (targetFiles.length === 0) {
+    targetFiles.push('src/sandbox/main.ts');
+  }
 
   // Check pre-flight security for all target files
   for (const targetFile of targetFiles) {
@@ -96,17 +111,17 @@ export async function codeGenAgentNode(state: typeof KaizenState.State) {
     .join('\n');
 
   const planSummary = state.plan && state.plan.length > 0
-    ? state.plan.map(s => `- Step ${s.id} [${s.status}]: ${s.description}`).join('\n')
+    ? state.plan.map(s => `- Step ${s.id} [${s.status}] (Target: ${s.targetFile || targetFiles[0]}): ${s.description}`).join('\n')
     : "No explicit plan steps provided.";
 
   let generatedPatches: GeneratedFilePatch[] = [];
   let explanations = '';
 
   const modelCandidates = [
-    'openai/gpt-oss-120b',
-    'groq/compound-mini',
-    'qwen/qwen3.8-27b',
-    'openai/gpt-oss-20b'
+    'llama-3.3-70b-versatile',
+    'llama-3.1-8b-instant',
+    'mixtral-8x7b-32768',
+    'gemma2-9b-it'
   ];
 
   if (apiKey && apiKey !== 'your_groq_api_key_here') {
@@ -170,7 +185,10 @@ ${truncatedContext || "No context provided."}`;
         if (result && result.files && result.files.length > 0) {
           generatedPatches = result.files.map((f: z.infer<typeof FilePatchSchema>) => {
             const rawPath = f.filePath || f.path || targetFiles[0];
-            const rawCode = f.code || f.content || '';
+            let rawCode = f.code || f.content || '';
+            if (rawCode.includes('\\n')) {
+              rawCode = rawCode.replace(/\\n/g, '\n').replace(/\\"/g, '"');
+            }
             return {
               filePath: rawPath.replace(/\\/g, '/'),
               code: rawCode,

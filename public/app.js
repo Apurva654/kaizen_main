@@ -17,6 +17,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const telemetryBody = document.getElementById('telemetry-body');
 
   let activeFilePath = 'src/sandbox/main.ts';
+  let isReadOnlyBrowserSession = false;
   let sseSource = null;
   let pastedImagePayload = null;
 
@@ -38,6 +39,43 @@ document.addEventListener('DOMContentLoaded', () => {
     stepperHeaderToggle.addEventListener('click', () => {
       stepperContainer.classList.toggle('collapsed');
     });
+  }
+
+  // Permission Gate Mode Toggle Control
+  const permissionModeBtn = document.getElementById('permission-mode-btn');
+  const permissionModeText = document.getElementById('permission-mode-text');
+  let currentPermissionMode = 'deny_first';
+
+  if (permissionModeBtn && permissionModeText) {
+    permissionModeBtn.addEventListener('click', async () => {
+      const nextMode = currentPermissionMode === 'deny_first' ? 'auto_mode' : 'deny_first';
+      try {
+        const res = await fetch('/api/permission/mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: nextMode })
+        });
+        const data = await res.json();
+        if (data.success) {
+          currentPermissionMode = data.mode;
+          updatePermissionGateUI(data.mode);
+          showToast(`Permission Gate: Switched to ${data.mode === 'auto_mode' ? 'Auto-Mode Active' : 'Deny-First Mode'}`, 'info');
+        }
+      } catch (e) {
+        showToast('Failed to update Permission Gate mode', 'error');
+      }
+    });
+  }
+
+  function updatePermissionGateUI(mode) {
+    if (!permissionModeBtn || !permissionModeText) return;
+    if (mode === 'auto_mode') {
+      permissionModeBtn.className = 'permission-gate-pill auto-mode';
+      permissionModeText.textContent = 'Auto-Mode Active';
+    } else {
+      permissionModeBtn.className = 'permission-gate-pill deny-first';
+      permissionModeText.textContent = 'Deny-First Mode';
+    }
   }
 
   // Toast Notification System
@@ -206,6 +244,79 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // Voice Input Speech Recognition Engine (Web Speech API)
+  const voiceInputBtn = document.getElementById('voice-input-btn');
+  let recognition = null;
+  let isRecordingVoice = false;
+
+  if (voiceInputBtn && chatInput) {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      voiceInputBtn.addEventListener('click', () => {
+        showToast('Web Speech API is not supported in this browser environment', 'error');
+      });
+    } else {
+      recognition = new SpeechRecognition();
+      recognition.continuous = false;
+      recognition.interimResults = true;
+      recognition.lang = 'en-US';
+
+      recognition.onstart = () => {
+        isRecordingVoice = true;
+        voiceInputBtn.classList.add('recording');
+        voiceInputBtn.title = 'Stop Recording Voice';
+        showToast('🎙️ Listening... Speak your prompt clearly', 'info');
+      };
+
+      recognition.onresult = (event) => {
+        let transcript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          transcript += event.results[i][0].transcript;
+        }
+
+        if (transcript) {
+          const currentText = chatInput.value || '';
+          // Avoid duplicating interim transcripts
+          chatInput.value = transcript;
+          chatInput.style.height = 'auto';
+          chatInput.style.height = `${Math.max(60, Math.min(650, chatInput.scrollHeight))}px`;
+        }
+      };
+
+      recognition.onerror = (event) => {
+        console.warn('[VoiceInput] Speech recognition error:', event.error);
+        isRecordingVoice = false;
+        voiceInputBtn.classList.remove('recording');
+        voiceInputBtn.title = 'Click to speak (Voice Input)';
+        if (event.error !== 'no-speech') {
+          showToast(`Voice input notice: ${event.error}`, 'info');
+        }
+      };
+
+      recognition.onend = () => {
+        isRecordingVoice = false;
+        voiceInputBtn.classList.remove('recording');
+        voiceInputBtn.title = 'Click to speak (Voice Input)';
+        if (chatInput.value.trim()) {
+          showToast('✓ Voice transcript captured', 'success');
+        }
+      };
+
+      voiceInputBtn.addEventListener('click', () => {
+        if (isRecordingVoice) {
+          recognition.stop();
+        } else {
+          try {
+            recognition.start();
+          } catch (e) {
+            console.warn('[VoiceInput] Failed to start recognition:', e);
+          }
+        }
+      });
+    }
+  }
+
   // 1. Initialize File Explorer
   async function loadSandboxFiles() {
     if (isVsCodeEnv) {
@@ -287,6 +398,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
         fileTree.appendChild(item);
       });
+
+      // Auto-open first file if none selected or if active path is invalid
+      if (visibleFiles.length > 0 && (!activeFilePath || !visibleFiles.some(f => f.path === activeFilePath))) {
+        openFileInEditor(visibleFiles[0].path);
+      }
     } catch (err) {
       fileTree.innerHTML = `<div class="tree-placeholder">Workspace files managed via VS Code.</div>`;
     }
@@ -330,8 +446,23 @@ document.addEventListener('DOMContentLoaded', () => {
   if (saveFileBtn) saveFileBtn.addEventListener('click', saveActiveFile);
   if (refreshFilesBtn) refreshFilesBtn.addEventListener('click', loadSandboxFiles);
 
+  function exitReadOnlyBrowserMode() {
+    isReadOnlyBrowserSession = false;
+    const browserSessionSec = document.getElementById('browser-session-section');
+    if (browserSessionSec) {
+      browserSessionSec.classList.add('hidden');
+    }
+    if (saveFileBtn) {
+      saveFileBtn.disabled = false;
+      saveFileBtn.classList.remove('disabled-readonly');
+      saveFileBtn.title = 'Save File';
+      saveFileBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> Save File`;
+    }
+  }
+
   // 2. Open File in Editor
   async function openFileInEditor(relPath) {
+    exitReadOnlyBrowserMode();
     activeFilePath = relPath;
     if (editorFilePath) editorFilePath.textContent = relPath;
 
@@ -358,6 +489,18 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
       const data = await res.json();
+      if (data.path && data.path !== relPath) {
+        activeFilePath = data.path;
+        if (editorFilePath) editorFilePath.textContent = data.path;
+        if (editorTabs) {
+          editorTabs.innerHTML = `
+            <div class="tab active" data-path="${data.path}">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              <span>${data.path.split('/').pop()}</span>
+            </div>
+          `;
+        }
+      }
       if (codeEditor) codeEditor.value = data.content;
       updateLineNumbers();
     } catch (err) {
@@ -368,7 +511,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 3. Save File Content
   async function saveActiveFile() {
-    if (!saveFileBtn || !codeEditor) return;
+    if (isReadOnlyBrowserSession) {
+      showToast('Read-Only Browser Inspection — File saving is disabled', 'info');
+      return;
+    }
+    if (!saveFileBtn || !codeEditor || !activeFilePath) return;
     try {
       saveFileBtn.disabled = true;
       saveFileBtn.textContent = 'Saving...';
@@ -432,12 +579,64 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  function updateRiskScoreBadge(score) {
+    const riskBadge = document.getElementById('risk-score-badge');
+    const riskVal = document.getElementById('risk-score-val');
+    if (!riskVal || score === undefined || score === null) return;
+
+    const numScore = Number(score);
+    riskVal.textContent = numScore;
+
+    if (riskBadge) {
+      riskBadge.classList.remove('low-risk', 'med-risk', 'medium-risk', 'high-risk');
+      if (numScore >= 70) {
+        riskBadge.classList.add('high-risk');
+        riskBadge.title = `Current Task Risk Score: ${numScore}/100 (HIGH RISK — Intercept Active)`;
+      } else if (numScore >= 30) {
+        riskBadge.classList.add('med-risk');
+        riskBadge.title = `Current Task Risk Score: ${numScore}/100 (MEDIUM RISK)`;
+      } else {
+        riskBadge.classList.add('low-risk');
+        riskBadge.title = `Current Task Risk Score: ${numScore}/100 (LOW RISK — Safe Execution)`;
+      }
+    }
+  }
+
+  function calculatePromptRisk(prompt) {
+    const p = (prompt || '').toLowerCase();
+    if (/\b(delete|remove|rm\s|rm -rf|del\s|git push|sudo|chmod|npm publish)\b/i.test(p)) {
+      return 90;
+    }
+    if (/\b(terminal|command|exec|shell)\b/i.test(p)) {
+      return 75;
+    }
+    if (/\b(commit|git commit)\b/i.test(p)) {
+      return 50;
+    }
+    if (/\b(write|create|make|add|modify|update)\b/i.test(p)) {
+      return 45;
+    }
+    if (/\b(test|run test|unittest)\b/i.test(p)) {
+      return 35;
+    }
+    return 10;
+  }
+
   function handleIncomingEvent(type, data) {
     if (!data) return;
+
+    if (data.riskScore !== undefined && data.riskScore !== null) {
+      updateRiskScoreBadge(data.riskScore);
+    } else if (data.result && data.result.riskScore !== undefined) {
+      updateRiskScoreBadge(data.result.riskScore);
+    }
 
     // Run ID guard to ignore stale events from old runs
     if (type === 'PIPELINE_START') {
       currentRunId = data.runId || `run_${Date.now()}`;
+      if (data.route !== 'MCP_BROWSER' && data.route !== 'ROUTED_MCP_BROWSER') {
+        exitReadOnlyBrowserMode();
+      }
       resetStepper();
     } else if (data.runId && currentRunId && data.runId !== currentRunId) {
       console.log(`[KAIZEN][UI] Stale event ignored for runId: ${data.runId} (active: ${currentRunId})`);
@@ -460,16 +659,20 @@ document.addEventListener('DOMContentLoaded', () => {
         break;
 
       case 'PIPELINE_COMPLETE':
-        finalizeStepper(data);
-        if (data.status === 'SUCCESS' || data.status === 'DEBUG_COMPLETE' || data.status === 'TESTS_PASSED') {
-          loadSandboxFiles();
-          if (data.targetFiles && data.targetFiles[0]) {
-            openFileInEditor(data.targetFiles[0]);
+        if (data.route === 'MCP_BROWSER' || data.route === 'ROUTED_MCP_BROWSER') {
+          renderBrowserInspectionUI(data);
+        } else {
+          finalizeStepper(data);
+          if (data.status === 'SUCCESS' || data.status === 'DEBUG_COMPLETE' || data.status === 'TESTS_PASSED') {
+            loadSandboxFiles();
+            if (data.targetFiles && data.targetFiles[0]) {
+              openFileInEditor(data.targetFiles[0]);
+            }
+          } else if (data.route === 'EXPLAIN_CODE' || data.status === 'EXPLAIN_COMPLETE' || data.explanation) {
+            renderExplanationCard(data);
+          } else if (data.status === 'FAILED' || data.status === 'ABORTED') {
+            renderErrorCard(data.message || data.error || 'Pipeline execution ended with failures.');
           }
-        } else if (data.route === 'EXPLAIN_CODE' || data.status === 'EXPLAIN_COMPLETE' || data.explanation) {
-          renderExplanationCard(data);
-        } else if (data.status === 'FAILED' || data.status === 'ABORTED') {
-          renderErrorCard(data.message || data.error || 'Pipeline execution ended with failures.');
         }
         break;
 
@@ -488,8 +691,229 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  // Render dedicated Browser Inspection Result Mode
+  function renderBrowserInspectionUI(data) {
+    isReadOnlyBrowserSession = true;
+    activeFilePath = '';
+
+    if (saveFileBtn) {
+      saveFileBtn.disabled = true;
+      saveFileBtn.classList.add('disabled-readonly');
+      saveFileBtn.title = 'Read-Only Browser Inspection — File saving disabled';
+      saveFileBtn.innerHTML = `🌐 Read-Only Browser Inspection`;
+    }
+
+    if (editorFilePath) editorFilePath.textContent = '🌐 Read-Only Browser Inspection';
+    if (editorTabs) {
+      editorTabs.innerHTML = `
+        <div class="tab active" data-path="browser-inspection">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10z"/></svg>
+          <span>Browser Inspection (Read-Only)</span>
+        </div>
+      `;
+    }
+    if (codeEditor) {
+      codeEditor.value = `// 🌐 Browser Inspection Active (Read-Only Mode)\n// No workspace files created or modified.\n// Inspect structured Playwright browser output in the panel.`;
+      updateLineNumbers();
+    }
+
+    // Display Browser Session section separately from workspace target files
+    const browserSessionSec = document.getElementById('browser-session-section');
+    const browserSessionUrl = document.getElementById('browser-session-url');
+    if (browserSessionSec) {
+      browserSessionSec.classList.remove('hidden');
+      if (browserSessionUrl) {
+        const urlMatch = data.explanation && data.explanation.match(/\*\*URL\*\*: `(.*?)`/);
+        browserSessionUrl.textContent = urlMatch ? urlMatch[1] : 'http://localhost:3000/';
+      }
+    }
+
+    // ACTIVE TARGET FILES must show "None — browser inspection has no workspace targets."
+    if (targetFilesList) {
+      targetFilesList.innerHTML = `<span class="target-badge empty">None — browser inspection has no workspace targets.</span>`;
+    }
+
+    const hasAction = Boolean(data.explanation && data.explanation.includes('Browser Action Executed'));
+    renderBrowserStepperTimeline(hasAction);
+
+    if (data.explanation) {
+      renderExplanationCard(data);
+    }
+  }
+
+  function renderBrowserStepperTimeline(hasAction = false) {
+    const timelineBody = document.getElementById('stepper-timeline-body');
+    if (!timelineBody) return;
+
+    if (hasAction) {
+      timelineBody.innerHTML = `
+        <div class="step-item completed" title="1. Browser Request: User query received">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Browser Request</div><div class="step-detail">Query received</div></div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item completed" title="2. Intent Classification: ROUTED_MCP_BROWSER">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Intent</div><div class="step-detail">MCP Browser</div></div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item completed" title="3. Permission Gate: Navigation risk evaluated">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Permission Gate</div><div class="step-detail">Nav Gate</div></div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item completed" title="4. Playwright MCP: Connected over stdio transport">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Playwright MCP</div><div class="step-detail">Stdio transport</div></div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item completed" title="5. Navigate: browser_navigate executed">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Navigate</div><div class="step-detail">Target URL</div></div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item completed" title="6. Initial Snapshot: Accessibility tree parsed">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Initial Snapshot</div><div class="step-detail">Initial DOM</div></div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item completed" title="7. Target Resolution: Resolved target in snapshot">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Target Resolution</div><div class="step-detail">Ref resolved</div></div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item completed" title="8. Permission Gate: Action risk evaluated">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Permission Gate</div><div class="step-detail">Action Gate</div></div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item completed" title="9. Browser Action: MCP tool executed">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Browser Action</div><div class="step-detail">Action executed</div></div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item completed" title="10. Post-Action Snapshot: DOM snapshot after action">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Post Snapshot</div><div class="step-detail">Post-click DOM</div></div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item completed" title="11. Browser Result: Final Generative UI rendered">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Browser Result</div><div class="step-detail">Structured UI</div></div>
+        </div>
+      `;
+    } else {
+      timelineBody.innerHTML = `
+        <div class="step-item completed" title="1. Browser Request: User query received">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Browser Request</div><div class="step-detail">Query received</div></div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item completed" title="2. Intent Classification: ROUTED_MCP_BROWSER">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Intent</div><div class="step-detail">MCP Browser</div></div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item completed" title="3. Permission Gate: Evaluated risk score">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Permission Gate</div><div class="step-detail">Risk evaluated</div></div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item completed" title="4. Playwright MCP: Connected over stdio transport">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Playwright MCP</div><div class="step-detail">Stdio transport</div></div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item completed" title="5. Navigate: browser_navigate executed">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Navigate</div><div class="step-detail">Target URL</div></div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item completed" title="6. Snapshot: browser_snapshot extracted DOM">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Snapshot</div><div class="step-detail">DOM snapshot</div></div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item completed" title="7. Browser Result: Structured Generative UI rendered">
+          <div class="step-icon">✓</div>
+          <div class="step-content"><div class="step-name">Browser Result</div><div class="step-detail">Structured UI</div></div>
+        </div>
+      `;
+    }
+
+    if (stepperInlineStatus) {
+      stepperInlineStatus.textContent = '✔ Browser Inspection Completed';
+    }
+  }
+
+  function restoreDefaultCodingStepperTimeline() {
+    const timelineBody = document.getElementById('stepper-timeline-body');
+    if (!timelineBody) return;
+
+    if (!document.getElementById('step-intent')) {
+      timelineBody.innerHTML = `
+        <div class="step-item" id="step-intent" title="1. Intent Classification: Routing query to agent nodes">
+          <div class="step-icon">1</div>
+          <div class="step-content">
+            <div class="step-name">Intent</div>
+            <div class="step-detail">Routing query</div>
+          </div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item" id="step-context" title="2. Context Retrieval: Graphify AST & symbol extraction">
+          <div class="step-icon">2</div>
+          <div class="step-content">
+            <div class="step-name">Context</div>
+            <div class="step-detail">Symbol extraction</div>
+          </div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item" id="step-planner" title="3. Planner Agent: Grounded task step generation">
+          <div class="step-icon">3</div>
+          <div class="step-content">
+            <div class="step-name">Planner</div>
+            <div class="step-detail">Task generation</div>
+          </div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item" id="step-coder" title="4. Coder Agent: Multi-file patch generation">
+          <div class="step-icon">4</div>
+          <div class="step-content">
+            <div class="step-name">Coder</div>
+            <div class="step-detail">Patch generation</div>
+          </div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item" id="step-testrunner" title="5. Test Suite Execution: Workspace unit test verification">
+          <div class="step-icon">5</div>
+          <div class="step-content">
+            <div class="step-name">Test Suite</div>
+            <div class="step-detail">Workspace tests</div>
+          </div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item" id="step-debugger" title="6. Debugger Agent: Diagnosing failure & applying fix">
+          <div class="step-icon">6</div>
+          <div class="step-content">
+            <div class="step-name">Debugger</div>
+            <div class="step-detail">Self-healing fix</div>
+          </div>
+        </div>
+        <div class="step-arrow">›</div>
+        <div class="step-item" id="step-reviewer" title="7. Reviewer Agent: Quality audit & approval">
+          <div class="step-icon">7</div>
+          <div class="step-content">
+            <div class="step-name">Reviewer</div>
+            <div class="step-detail">Quality audit</div>
+          </div>
+        </div>
+      `;
+    }
+  }
+
   // 5. Update Agent Stepper Visuals
   function resetStepper() {
+    restoreDefaultCodingStepperTimeline();
     const defaults = {
       'intent': 'Routing query to agent nodes',
       'context': 'Graphify AST & symbol extraction',
@@ -589,6 +1013,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function renderTargetBadges(targetFiles) {
+    if (isReadOnlyBrowserSession) return;
     if (!targetFilesList) return;
     targetFilesList.innerHTML = '';
     if (!targetFiles || targetFiles.length === 0) {
@@ -608,13 +1033,93 @@ document.addEventListener('DOMContentLoaded', () => {
     const card = document.createElement('div');
     card.className = 'gen-card choice-card';
 
+    if (data.type === 'GIT_PERMISSION_APPROVAL') {
+      const riskBadge = `<span style="background: rgba(255,165,0,0.2); color: #ffa500; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 11px;">Risk Score: ${data.riskScore}/100</span>`;
+      card.innerHTML = `
+        <div class="choice-card-header" style="color: var(--warning, #e6a23c);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span>${data.title}</span> ${riskBadge}
+        </div>
+        <p style="font-size: 12px; color: var(--text-main); margin-top: 8px;">${data.message}</p>
+        <div class="choice-actions" style="margin-top: 12px;">
+          <button class="btn-reject" style="background: rgba(245,108,108,0.2); color: #f56c6c; border: 1px solid #f56c6c; padding: 6px 12px; border-radius: 4px; cursor: pointer;">Deny Action</button>
+          <button class="btn-approve" style="background: #409eff; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold;">Approve Git Action</button>
+        </div>
+      `;
+
+      const approveBtn = card.querySelector('.btn-approve');
+      const rejectBtn = card.querySelector('.btn-reject');
+
+      approveBtn.addEventListener('click', async () => {
+        await sendHitlResponse('approve');
+        card.innerHTML = `<div class="choice-card-header" style="color: var(--success, #67c23a)">✔ Git Action Approved by Developer</div>`;
+      });
+
+      rejectBtn.addEventListener('click', async () => {
+        await sendHitlResponse('reject');
+        card.innerHTML = `<div class="choice-card-header" style="color: var(--danger, #f56c6c)">✖ Git Action Denied by Developer</div>`;
+      });
+
+      widgetsContainer.appendChild(card);
+      card.scrollIntoView({ behavior: 'smooth' });
+      return;
+    }
+
+    if (data.type === 'TERMINAL_PERMISSION_APPROVAL') {
+      const riskBadge = `<span style="background: rgba(255,165,0,0.2); color: #ffa500; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 11px;">Risk Score: ${data.riskScore}/100</span>`;
+      const cmdSnippet = data.command ? `<pre style="background: rgba(0,0,0,0.2); padding: 6px; border-radius: 4px; font-family: monospace; font-size: 11px; margin-top: 6px; overflow-x: auto;"><code>${data.command}</code></pre>` : '';
+      card.innerHTML = `
+        <div class="choice-card-header" style="color: var(--warning, #e6a23c);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg>
+          <span>${data.title}</span> ${riskBadge}
+        </div>
+        <p style="font-size: 12px; color: var(--text-main); margin-top: 8px;">${data.message}</p>
+        ${cmdSnippet}
+        <div class="choice-actions" style="margin-top: 12px;">
+          <button class="btn-reject" style="background: rgba(245,108,108,0.2); color: #f56c6c; border: 1px solid #f56c6c; padding: 6px 12px; border-radius: 4px; cursor: pointer;">Deny Action</button>
+          <button class="btn-approve" style="background: #409eff; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold;">Approve Terminal Action</button>
+        </div>
+      `;
+
+      const approveBtn = card.querySelector('.btn-approve');
+      const rejectBtn = card.querySelector('.btn-reject');
+
+      approveBtn.addEventListener('click', async () => {
+        await sendHitlResponse('approve');
+        card.innerHTML = `<div class="choice-card-header" style="color: var(--success, #67c23a)">✔ Terminal Action Approved by Developer</div>`;
+      });
+
+      rejectBtn.addEventListener('click', async () => {
+        await sendHitlResponse('reject');
+        card.innerHTML = `<div class="choice-card-header" style="color: var(--danger, #f56c6c)">✖ Terminal Action Denied by Developer</div>`;
+      });
+
+      widgetsContainer.appendChild(card);
+      card.scrollIntoView({ behavior: 'smooth' });
+      return;
+    }
+
+    if (data.type === 'PLAN_APPROVAL') {
+      const coderStepEl = document.getElementById('step-coder');
+      if (coderStepEl) {
+        coderStepEl.className = 'step-item waiting';
+        const d = coderStepEl.querySelector('.step-detail');
+        if (d) d.textContent = 'Waiting for Approval';
+      }
+      if (stepperInlineStatus) {
+        stepperInlineStatus.textContent = '⏸ Waiting for Plan Approval';
+      }
+    }
+
     let stepsHtml = '';
     if (data.plan && data.plan.length > 0) {
       stepsHtml = `<div class="plan-steps-list">` +
         data.plan.map((s, idx) => {
           const rawDesc = typeof s === 'string' ? s : (s.description || s.task || `Step ${s.id || idx + 1}`);
           const cleanDesc = rawDesc.replace(new RegExp(`^Step\\s*${s.id || idx + 1}[:\\s-]*`, 'i'), '').trim() || rawDesc;
-          return `<div class="plan-step-row"><strong>Step ${s.id || idx + 1}:</strong> ${cleanDesc}</div>`;
+          const tf = (typeof s === 'object' && s.targetFile) ? s.targetFile : null;
+          const targetBadge = tf ? `<span style="background: rgba(99,102,241,0.2); color: #a5b4fc; border: 1px solid rgba(99,102,241,0.35); padding: 1px 6px; border-radius: 4px; font-family: monospace; font-size: 10px; margin-left: 6px;">${tf}</span>` : '';
+          return `<div class="plan-step-row"><strong>Step ${s.id || idx + 1}:</strong> ${cleanDesc} ${targetBadge}</div>`;
         }).join('') +
         `</div>`;
     }
@@ -642,11 +1147,13 @@ document.addEventListener('DOMContentLoaded', () => {
       const action = feedback ? 'feedback' : 'approve';
       await sendHitlResponse(action, feedback);
       card.innerHTML = `<div class="choice-card-header" style="color: var(--success)">✔ Plan Approved by Developer</div>`;
+      if (stepperInlineStatus) stepperInlineStatus.textContent = '⚡ Plan approved. Starting Coder...';
     });
 
     rejectBtn.addEventListener('click', async () => {
       await sendHitlResponse('reject');
       card.innerHTML = `<div class="choice-card-header" style="color: var(--danger)">✖ Plan Rejected by Developer</div>`;
+      if (stepperInlineStatus) stepperInlineStatus.textContent = '✖ Plan rejected by user.';
     });
 
     widgetsContainer.appendChild(card);
@@ -766,9 +1273,99 @@ document.addEventListener('DOMContentLoaded', () => {
     
     const text = data.explanation || (data.state && data.state.extractedContext) || 'Task completed.';
     
-    card.innerHTML = `${escapeHtml(text)}`;
+    card.innerHTML = parseMarkdownToHtml(text);
     widgetsContainer.appendChild(card);
     card.scrollIntoView({ behavior: 'smooth' });
+  }
+
+  function parseMarkdownToHtml(md) {
+    if (!md) return '';
+    
+    let html = md;
+    
+    // 1. Code blocks
+    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (match, lang, code) => {
+      return `<pre class="code-block-container"><code>${escapeHtml(code.trim())}</code></pre>`;
+    });
+
+    // 2. Inline code
+    html = html.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
+
+    // 3. Tables
+    const lines = html.split('\n');
+    let inTable = false;
+    let tableRows = [];
+    let resultLines = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (line.startsWith('|') && line.endsWith('|')) {
+        if (line.replace(/\|/g, '').replace(/[\s-]/g, '') === '') {
+          continue;
+        }
+        inTable = true;
+        const cells = line.split('|').slice(1, -1).map(c => c.trim());
+        tableRows.push(cells);
+      } else {
+        if (inTable) {
+          resultLines.push(buildHtmlTable(tableRows));
+          tableRows = [];
+          inTable = false;
+        }
+        resultLines.push(line);
+      }
+    }
+    if (inTable && tableRows.length > 0) {
+      resultLines.push(buildHtmlTable(tableRows));
+    }
+
+    html = resultLines.join('\n');
+
+    // 4. Headings
+    html = html.replace(/^### (.*$)/gim, '<h4 class="md-h4">$1</h4>');
+    html = html.replace(/^## (.*$)/gim, '<h3 class="md-h3">$1</h3>');
+    html = html.replace(/^# (.*$)/gim, '<h2 class="md-h2">$1</h2>');
+
+    // 5. Bold & Italics
+    html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
+
+    // 6. Bullet lists
+    html = html.replace(/^\s*[\-\*]\s+(.*$)/gim, '<li class="md-li">$1</li>');
+    html = html.replace(/(<li class="md-li">.*<\/li>\n?)+/g, '<ul class="md-ul">$&</ul>');
+
+    // 7. Paragraphs
+    html = html.split('\n\n').map(p => {
+      if (p.startsWith('<h') || p.startsWith('<div') || p.startsWith('<ul') || p.startsWith('<pre')) {
+        return p;
+      }
+      return `<p class="md-p">${p.replace(/\n/g, '<br/>')}</p>`;
+    }).join('');
+
+    return html;
+  }
+
+  function buildHtmlTable(rows) {
+    if (!rows || rows.length === 0) return '';
+    const header = rows[0];
+    const body = rows.slice(1);
+
+    let tableHtml = `<div class="table-responsive"><table class="styled-table"><thead><tr>`;
+    header.forEach(cell => {
+      tableHtml += `<th>${cell}</th>`;
+    });
+    tableHtml += `</tr></thead><tbody>`;
+
+    body.forEach(row => {
+      tableHtml += `<tr>`;
+      row.forEach(cell => {
+        tableHtml += `<td>${cell}</td>`;
+      });
+      tableHtml += `</tr>`;
+    });
+
+    tableHtml += `</tbody></table></div>`;
+    return tableHtml;
   }
 
   function renderErrorCard(errorMsg) {
@@ -844,6 +1441,9 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    const estimatedRisk = calculatePromptRisk(query);
+    updateRiskScoreBadge(estimatedRisk);
+
     showToast('→ Submitting prompt to pipeline...', 'info');
 
     if (isVsCodeEnv) {
@@ -867,20 +1467,31 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderVerificationReportCard(results) {
     if (!results) return;
     const card = document.createElement('div');
-    card.className = 'gen-card';
-    card.style.borderColor = 'var(--primary)';
+    card.className = 'gen-card verification-report-card';
     
     let rowsHtml = results.map(r => {
-      const color = r.status === 'PASS' ? 'var(--success)' : (r.status === 'WARN' ? 'var(--warning)' : 'var(--danger)');
-      return `<div style="display: flex; justify-content: space-between; font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--border-color);">
-        <span>${escapeHtml(r.feature)}</span>
-        <span style="color: ${color}; font-weight: 600;">${r.status}: ${escapeHtml(r.details)}</span>
-      </div>`;
+      const isPass = r.status === 'PASS';
+      const isWarn = r.status === 'WARN';
+      const badgeClass = isPass ? 'badge-pass' : (isWarn ? 'badge-warn' : 'badge-fail');
+      const badgeText = isPass ? '✔ PASS' : (isWarn ? '⚠ WARN' : '✖ FAIL');
+      
+      return `
+        <div class="verification-row">
+          <div class="verification-header-row">
+            <span class="verification-feature-name">${escapeHtml(r.feature)}</span>
+            <span class="verification-badge ${badgeClass}">${badgeText}</span>
+          </div>
+          <div class="verification-detail-text">${escapeHtml(r.details)}</div>
+        </div>
+      `;
     }).join('');
 
     card.innerHTML = `
-      <div style="font-weight: 600; font-size: 13px; color: #a5b4fc; margin-bottom: 8px;">📊 COMPREHENSIVE VERIFICATION REPORT</div>
-      <div style="display: flex; flex-direction: column; gap: 4px;">${rowsHtml}</div>
+      <div class="verification-card-title">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        <span>COMPREHENSIVE VERIFICATION REPORT</span>
+      </div>
+      <div class="verification-rows-container">${rowsHtml}</div>
     `;
     widgetsContainer.appendChild(card);
     card.scrollIntoView({ behavior: 'smooth' });
@@ -982,6 +1593,297 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (closeModalBtn) {
     closeModalBtn.addEventListener('click', () => telemetryModal.classList.add('hidden'));
+  }
+
+  // --- GRAPHIFY EXPLORER CONTROLLER ---
+  const viewTabEditor = document.getElementById('view-tab-editor');
+  const viewTabGraphify = document.getElementById('view-tab-graphify');
+  const btnToggleGraphify = document.getElementById('btn-toggle-graphify');
+  const editorViewContainer = document.getElementById('editor-view-container');
+  const graphifyViewContainer = document.getElementById('graphify-view-container');
+
+  const graphifySearchInput = document.getElementById('graphify-search-input');
+  const graphifyBtnFit = document.getElementById('graphify-btn-fit');
+  const graphifyBtnRefresh = document.getElementById('graphify-btn-refresh');
+  const graphifyNodeDrawer = document.getElementById('graphify-node-drawer');
+  const closeDrawerBtn = document.getElementById('close-drawer-btn');
+
+  let currentGraphScope = 'current-task';
+  let visNetworkInstance = null;
+  let currentGraphData = null;
+
+  function switchCenterView(viewName) {
+    if (viewName === 'graphify') {
+      if (viewTabEditor) viewTabEditor.classList.remove('active');
+      if (viewTabGraphify) viewTabGraphify.classList.add('active');
+      if (editorViewContainer) editorViewContainer.classList.add('hidden');
+      if (graphifyViewContainer) graphifyViewContainer.classList.remove('hidden');
+      loadGraphifyGraph();
+    } else {
+      if (viewTabGraphify) viewTabGraphify.classList.remove('active');
+      if (viewTabEditor) viewTabEditor.classList.add('active');
+      if (graphifyViewContainer) graphifyViewContainer.classList.add('hidden');
+      if (editorViewContainer) editorViewContainer.classList.remove('hidden');
+    }
+  }
+
+  if (viewTabEditor) viewTabEditor.addEventListener('click', () => switchCenterView('editor'));
+  if (viewTabGraphify) viewTabGraphify.addEventListener('click', () => switchCenterView('graphify'));
+  if (btnToggleGraphify) btnToggleGraphify.addEventListener('click', () => switchCenterView('graphify'));
+  if (closeDrawerBtn) closeDrawerBtn.addEventListener('click', () => {
+    if (graphifyNodeDrawer) graphifyNodeDrawer.classList.add('hidden');
+  });
+
+  const modeButtons = document.querySelectorAll('.graph-mode-btn');
+  modeButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      modeButtons.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentGraphScope = btn.dataset.mode || 'current-task';
+      loadGraphifyGraph();
+    });
+  });
+
+  if (graphifyBtnRefresh) graphifyBtnRefresh.addEventListener('click', () => loadGraphifyGraph());
+  if (graphifyBtnFit) {
+    graphifyBtnFit.addEventListener('click', () => {
+      if (visNetworkInstance) visNetworkInstance.fit({ animation: true });
+    });
+  }
+
+  if (graphifySearchInput) {
+    graphifySearchInput.addEventListener('input', (e) => {
+      const q = e.target.value.toLowerCase().trim();
+      if (!q || !currentGraphData || !visNetworkInstance) return;
+      const matchedNode = currentGraphData.nodes.find(n => 
+        n.label.toLowerCase().includes(q) || (n.path && n.path.toLowerCase().includes(q))
+      );
+      if (matchedNode) {
+        visNetworkInstance.selectNodes([matchedNode.id]);
+        visNetworkInstance.focus(matchedNode.id, { scale: 1.2, animation: true });
+        renderNodeDrawer(matchedNode);
+      }
+    });
+  }
+
+  async function loadGraphifyGraph() {
+    try {
+      const url = `/api/graphify/current?scope=${encodeURIComponent(currentGraphScope)}&activeFile=${encodeURIComponent(activeFilePath)}`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      if (!data || !Array.isArray(data.nodes) || !Array.isArray(data.edges)) {
+        throw new Error('Invalid graph data payload structure');
+      }
+
+      currentGraphData = data;
+      updateGraphifyStats(data.metadata || {});
+      renderVisNetwork(data);
+    } catch (err) {
+      console.warn('[GraphifyExplorer] Failed to load graph data:', err);
+      showToast('Failed to load Graphify graph data', 'error');
+    }
+  }
+
+  function updateGraphifyStats(meta) {
+    if (!meta) return;
+    const f = document.getElementById('stat-files');
+    const s = document.getElementById('stat-symbols');
+    const d = document.getElementById('stat-deps');
+    const e = document.getElementById('stat-edges');
+    const x = document.getElementById('stat-ext');
+    const u = document.getElementById('stat-unresolved');
+
+    if (f) f.textContent = meta.files || 0;
+    if (s) s.textContent = meta.symbols || 0;
+    if (d) d.textContent = meta.dependencies || 0;
+    if (e) e.textContent = meta.edges || 0;
+    if (x) x.textContent = meta.externalDependencies || 0;
+    if (u) u.textContent = meta.unresolved || 0;
+  }
+
+  function renderVisNetwork(data) {
+    const container = document.getElementById('graphify-network-canvas');
+    if (!container || !data || !Array.isArray(data.nodes)) return;
+
+    if (typeof vis === 'undefined') {
+      container.innerHTML = `<div style="padding: 20px; color: var(--text-muted); text-align: center;">
+        <p style="margin-bottom: 8px;">Vis.js network engine is loading...</p>
+        <button id="retry-vis-btn" style="background: #4f46e5; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer;">Refresh Network Graph</button>
+      </div>`;
+      const btn = document.getElementById('retry-vis-btn');
+      if (btn) btn.addEventListener('click', () => loadGraphifyGraph());
+      return;
+    }
+
+    const visNodes = data.nodes.map(n => {
+      let color = { background: '#1e293b', border: '#475569', highlight: { background: '#334155', border: '#818cf8' } };
+      let shape = 'box';
+      let font = { color: '#f8fafc', face: 'Inter, sans-serif' };
+
+      if (n.type === 'file') {
+        shape = 'box';
+        if (n.status === 'active') {
+          color = { background: '#312e81', border: '#818cf8', highlight: { background: '#4338ca', border: '#a5b4fc' } };
+        } else if (n.status === 'generated') {
+          color = { background: '#064e3b', border: '#10b981', highlight: { background: '#047857', border: '#34d399' } };
+        } else if (n.status === 'modified') {
+          color = { background: '#78350f', border: '#f59e0b', highlight: { background: '#92400e', border: '#fbbf24' } };
+        } else if (n.status === 'test') {
+          color = { background: '#581c87', border: '#c084fc', highlight: { background: '#6b21a8', border: '#e879f9' } };
+        }
+      } else if (n.type === 'symbol') {
+        shape = 'ellipse';
+        color = { background: '#0f172a', border: '#38bdf8', highlight: { background: '#1e293b', border: '#7dd3fc' } };
+        font.color = '#7dd3fc';
+      } else if (n.type === 'external') {
+        shape = 'hexagon';
+        color = { background: '#27272a', border: '#a1a1aa', highlight: { background: '#3f3f46', border: '#e4e4e7' } };
+        font.color = '#a1a1aa';
+      } else if (n.type === 'unresolved') {
+        shape = 'diamond';
+        color = { background: '#450a0a', border: '#ef4444', highlight: { background: '#7f1d1d', border: '#f87171' } };
+        font.color = '#fca5a5';
+      }
+
+      return {
+        id: n.id,
+        label: n.label,
+        shape,
+        color,
+        font,
+        margin: 10,
+        rawNode: n
+      };
+    });
+
+    const visEdges = data.edges.map(e => {
+      let color = '#475569';
+      let dashes = false;
+      if (e.type === 'IMPORTS') color = '#818cf8';
+      else if (e.type === 'EXPORTS' || e.type === 'DEFINES') { color = '#38bdf8'; dashes = true; }
+      else if (e.type === 'DEPENDS_ON') color = '#a1a1aa';
+
+      return {
+        id: e.id,
+        from: e.source,
+        to: e.target,
+        arrows: 'to',
+        label: e.symbols && e.symbols.length > 0 ? e.symbols.join(', ') : e.label,
+        color: { color, highlight: '#c084fc' },
+        font: { color: '#94a3b8', size: 10, align: 'top' },
+        dashes
+      };
+    });
+
+    const networkData = {
+      nodes: new vis.DataSet(visNodes),
+      edges: new vis.DataSet(visEdges)
+    };
+
+    const options = {
+      physics: {
+        solver: 'forceAtlas2Based',
+        forceAtlas2Based: {
+          gravitationalConstant: -50,
+          centralGravity: 0.01,
+          springLength: 100,
+          springConstant: 0.08
+        },
+        maxVelocity: 50,
+        timestep: 0.35,
+        stabilization: { iterations: 150 }
+      },
+      interaction: {
+        hover: true,
+        tooltipDelay: 200,
+        zoomView: true,
+        dragNodes: true,
+        dragView: true
+      }
+    };
+
+    if (visNetworkInstance) visNetworkInstance.destroy();
+    visNetworkInstance = new vis.Network(container, networkData, options);
+
+    visNetworkInstance.on('selectNode', (params) => {
+      if (params.nodes.length > 0) {
+        const selectedId = params.nodes[0];
+        const raw = data.nodes.find(n => n.id === selectedId);
+        if (raw) renderNodeDrawer(raw);
+      }
+    });
+
+    if (data.metadata.activeFile) {
+      const activeNode = data.nodes.find(n => n.id === data.metadata.activeFile);
+      if (activeNode) {
+        visNetworkInstance.selectNodes([activeNode.id]);
+      }
+    }
+  }
+
+  function renderNodeDrawer(node) {
+    if (!graphifyNodeDrawer) return;
+    graphifyNodeDrawer.classList.remove('hidden');
+
+    const typeBadge = document.getElementById('drawer-node-type-badge');
+    const title = document.getElementById('drawer-node-label');
+    const body = document.getElementById('drawer-node-body');
+
+    if (typeBadge) {
+      typeBadge.textContent = (node.type || 'FILE').toUpperCase();
+      typeBadge.className = `badge-pill ${node.status || ''}`;
+    }
+
+    if (title) title.textContent = node.label;
+
+    let content = `
+      <div class="drawer-section">
+        <div class="drawer-section-label">Node Metadata</div>
+        <div class="drawer-fact-row"><span class="drawer-fact-key">ID:</span> <span>${node.id}</span></div>
+        <div class="drawer-fact-row"><span class="drawer-fact-key">Type:</span> <span>${node.type}</span></div>
+        ${node.path ? `<div class="drawer-fact-row"><span class="drawer-fact-key">Path:</span> <span>${node.path}</span></div>` : ''}
+        ${node.language ? `<div class="drawer-fact-row"><span class="drawer-fact-key">Language:</span> <span>${node.language}</span></div>` : ''}
+        ${node.status ? `<div class="drawer-fact-row"><span class="drawer-fact-key">Status:</span> <span>${node.status.toUpperCase()}</span></div>` : ''}
+      </div>
+    `;
+
+    if (node.type === 'file') {
+      content += `
+        <div class="drawer-section">
+          <div class="drawer-section-label">Facts</div>
+          <div class="drawer-fact-row"><span class="drawer-fact-key">Declared Symbols:</span> <span>${node.symbolsCount || 0}</span></div>
+          <div class="drawer-fact-row"><span class="drawer-fact-key">Imports:</span> <span>${node.importsCount || 0}</span></div>
+        </div>
+      `;
+      if (node.contentSnippet) {
+        content += `
+          <div class="drawer-section">
+            <div class="drawer-section-label">Content Snippet</div>
+            <pre class="node-code-snippet">${escapeHtml(node.contentSnippet)}</pre>
+          </div>
+        `;
+      }
+    } else if (node.type === 'symbol') {
+      content += `
+        <div class="drawer-section">
+          <div class="drawer-section-label">Symbol Details</div>
+          <div class="drawer-fact-row"><span class="drawer-fact-key">Symbol Type:</span> <span>${node.symbolType || 'symbol'}</span></div>
+          <div class="drawer-fact-row"><span class="drawer-fact-key">Declared In:</span> <span>${node.declaredIn || 'N/A'}</span></div>
+          <div class="drawer-fact-row"><span class="drawer-fact-key">Exported:</span> <span>${node.isExported ? 'Yes' : 'No'}</span></div>
+        </div>
+      `;
+    }
+
+    if (body) body.innerHTML = content;
+  }
+
+  function escapeHtml(str) {
+    if (!str) return '';
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   // Init
