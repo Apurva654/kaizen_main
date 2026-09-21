@@ -15,7 +15,7 @@ import { runWorkspaceTests, extractFailingFilesFromLogs } from './tools/testRunn
 import { preprocessUserRequest, saveAgentState, loadAgentState, recordConversationTurn } from './tools/context-manager';
 import { ocrService } from './tools/ocrService';
 import { permissionGate, PermissionMode } from './tools/permissionGate';
-import { mcpInterface } from './tools/mcpInterface';
+import { mcpInterface } from './mcp/mcpInterface';
 import { dockerSandbox } from './tools/dockerSandbox';
 import { parseBrowserInspectionResult, formatBrowserInspectionMarkdown, extractRequestedBrowserAction, resolveAccessibilityTarget } from './tools/browserSnapshotParser';
 
@@ -117,21 +117,20 @@ app.post('/api/hitl/respond', (req: Request, res: Response) => {
   }
 });
 
-// Graphify Explorer REST API Endpoint
+// Graphify Explorer REST API Endpoints
 app.get('/api/graphify/current', async (req: Request, res: Response) => {
   try {
     const scope = (req.query.scope as string) || 'current-task';
     const activeFile = (req.query.activeFile as string) || undefined;
+    const reqWorkspace = (req.query.workspaceRoot as string) || undefined;
     const { GraphifyEngine } = await import('./tools/graphifyEngine');
 
-    let workspaceRoot = 'src/sandbox';
-    if (!fs.existsSync(workspaceRoot)) workspaceRoot = '.';
+    let workspaceRoot = reqWorkspace || (scope === 'full' ? '.' : (fs.existsSync('src') ? '.' : 'src/sandbox'));
 
     const engine = new GraphifyEngine();
     await engine.scanDirectory(workspaceRoot);
 
-    // Read target files from latest session or cached state if available
-    let targetFiles: string[] = ['src/sandbox/main.ts'];
+    let targetFiles: string[] = activeFile ? [activeFile] : ['src/sandbox/main.ts', 'src/index.ts', 'src/server.ts'];
     let generatedFiles: string[] = [];
 
     const cachedGraph = persistenceEngine.getWorkspaceGraphCache(workspaceRoot);
@@ -153,6 +152,26 @@ app.get('/api/graphify/current', async (req: Request, res: Response) => {
     res.json(payload);
   } catch (err: any) {
     console.error('[GraphifyAPI] Error generating graph payload:', err);
+    res.status(500).json({ error: err?.message || String(err) });
+  }
+});
+
+app.get('/api/graphify/node', async (req: Request, res: Response) => {
+  try {
+    const nodeId = (req.query.id as string) || '';
+    if (!nodeId) {
+      res.status(400).json({ error: 'Node ID parameter is required' });
+      return;
+    }
+    const { GraphifyEngine } = await import('./tools/graphifyEngine');
+    const engine = new GraphifyEngine();
+    await engine.scanDirectory('.');
+    const payload = engine.exportGraphData({ scope: 'full' });
+    const targetNode = payload.nodes.find(n => n.id === nodeId || n.path === nodeId);
+    const relatedEdges = payload.edges.filter(e => e.source === nodeId || e.target === nodeId);
+    res.json({ node: targetNode || null, edges: relatedEdges });
+  } catch (err: any) {
+    console.error('[GraphifyAPI] Error fetching node details:', err);
     res.status(500).json({ error: err?.message || String(err) });
   }
 });

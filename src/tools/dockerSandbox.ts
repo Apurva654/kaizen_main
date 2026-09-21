@@ -49,8 +49,12 @@ export class DockerSandboxEngine {
         image = 'node:alpine';
       }
 
-      const dockerCmd = `docker run --rm -v "${sandboxDir}:/app" -w /app ${image} sh -c "${command.replace(/"/g, '\\"')}"`;
-      return new Promise((resolve) => {
+      // Convert Windows backslashes to POSIX slashes for Docker volume mounting
+      const posixSandboxDir = sandboxDir.replace(/\\/g, '/');
+      const escapedCmd = command.replace(/"/g, '\\"');
+      const dockerCmd = `docker run --rm -v "${posixSandboxDir}:/app" -w /app ${image} sh -c "${escapedCmd}"`;
+
+      const dockerResult = await new Promise<DockerExecutionResult>((resolve) => {
         exec(dockerCmd, { timeout: 20000 }, (error, stdout, stderr) => {
           const combined = (stdout + '\n' + stderr).trim();
           const exitCode = error ? (error.code || 1) : 0;
@@ -62,6 +66,12 @@ export class DockerSandboxEngine {
           });
         });
       });
+
+      // If docker run succeeds or container returns result, return it
+      if (dockerResult.success || dockerResult.exitCode === 0) {
+        return dockerResult;
+      }
+      console.warn(`[DockerSandbox] Container execution failed (${dockerResult.output}), attempting Process Sandbox fallback...`);
     }
 
     // Local Process Sandbox Fallback (Isolated CWD: src/sandbox/)

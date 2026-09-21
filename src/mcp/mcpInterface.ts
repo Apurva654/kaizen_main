@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { permissionGate } from './permissionGate';
+import { permissionGate } from '../tools/permissionGate';
 import { kaizenMCPServer } from './mcpServer';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -51,7 +51,7 @@ export class MCPUnifiedInterface {
       transportType: 'in_process'
     });
 
-    const cliPath = path.resolve(process.cwd(), 'dist/tools/mcpServerCli.js');
+    const cliPath = path.resolve(process.cwd(), 'dist/mcp/mcpServerCli.js');
     this.registerServerConfig({
       id: 'default-stdio',
       name: 'Kaizen External Stdio Process MCP Server',
@@ -341,8 +341,13 @@ export class MCPUnifiedInterface {
     }
 
     // Connect to external Playwright MCP server if not already on a browser-capable server
-    if (!this.isConnected || (this.activeConfig?.id !== 'playwright-mcp-stdio' && !this.discoveredTools.has('browser_navigate') && !this.discoveredTools.has('browser_snapshot') && !this.discoveredTools.has('navigate'))) {
-      await this.connectServer('playwright-mcp-stdio');
+    try {
+      if (!this.isConnected || (this.activeConfig?.id !== 'playwright-mcp-stdio' && !this.discoveredTools.has('browser_navigate') && !this.discoveredTools.has('browser_snapshot') && !this.discoveredTools.has('navigate'))) {
+        await this.connectServer('playwright-mcp-stdio');
+      }
+    } catch (err) {
+      console.warn('[MCPClient] Playwright MCP server failed to connect, falling back to in-process browser simulation:', err);
+      await this.connectServer('default-inprocess');
     }
 
     // Find actual tool name in discovered tools matching the action
@@ -351,7 +356,6 @@ export class MCPUnifiedInterface {
       if (this.discoveredTools.has(action)) {
         targetToolName = action;
       } else {
-        // Try fallback tool names matching Playwright MCP schema
         for (const [tName] of this.discoveredTools.entries()) {
           if (tName.toLowerCase().includes(action)) {
             targetToolName = tName;
@@ -361,7 +365,6 @@ export class MCPUnifiedInterface {
       }
     }
 
-    // Map arguments cleanly according to Playwright MCP tool schema
     let toolArgs: Record<string, any> = {};
     if (action === 'navigate') {
       toolArgs = { url: params.url || 'http://localhost:3000' };

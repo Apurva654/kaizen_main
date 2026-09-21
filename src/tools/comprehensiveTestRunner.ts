@@ -214,7 +214,7 @@ export async function runComprehensiveTests(): Promise<VerificationResult[]> {
   // Test 6: Tier 4 Execution & Safety Sandbox (Permission Gate, MCP, Docker Sandbox)
   try {
     const { permissionGate } = await import('./permissionGate');
-    const { mcpInterface } = await import('./mcpInterface');
+    const { mcpInterface } = await import('../mcp/mcpInterface');
     const { dockerSandbox } = await import('./dockerSandbox');
 
     const highRiskScore = permissionGate.calculateRiskScore('delete_file', { path: 'src/sandbox/test.ts' });
@@ -249,7 +249,7 @@ export async function runComprehensiveTests(): Promise<VerificationResult[]> {
 
   // Tier 4 MCP Git Router & Permission Gate Verification Suite (Tests 1-5)
   try {
-    const { mcpInterface } = await import('./mcpInterface');
+    const { mcpInterface } = await import('../mcp/mcpInterface');
     const { permissionGate } = await import('./permissionGate');
     const { intentAgentNode, isGitQuery } = await import('../agents/intentAgent');
 
@@ -803,7 +803,7 @@ export async function runComprehensiveTests(): Promise<VerificationResult[]> {
     });
     // TEST K: Real MCP Protocol Server/Client Handshake & Dynamic Tool Discovery
     try {
-      const { mcpInterface } = await import('./mcpInterface');
+      const { mcpInterface } = await import('../mcp/mcpInterface');
       await mcpInterface.ensureConnected();
       const tools = await mcpInterface.discoverTools();
       const hasFsRead = tools.some(t => t.name === 'filesystem_read');

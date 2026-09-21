@@ -215,7 +215,7 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
         postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '⚡ Executing Git MCP operations...' });
 
         const { permissionGate } = await import('./tools/permissionGate');
-        const { mcpInterface } = await import('./tools/mcpInterface');
+        const { mcpInterface } = await import('./mcp/mcpInterface');
 
         const requestedActions = extractGitActions(rawUserInput);
 
@@ -272,7 +272,7 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
         postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '⚡ Executing Terminal MCP operation...' });
 
         const { permissionGate } = await import('./tools/permissionGate');
-        const { mcpInterface } = await import('./tools/mcpInterface');
+        const { mcpInterface } = await import('./mcp/mcpInterface');
 
         const command = extractTerminalCommand(rawUserInput);
         const evalResult = permissionGate.evaluate('terminal_exec', { command });
@@ -326,7 +326,7 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
         postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '🌐 Connecting to External Playwright MCP Server Process...' });
 
         const { permissionGate } = await import('./tools/permissionGate');
-        const { mcpInterface } = await import('./tools/mcpInterface');
+        const { mcpInterface } = await import('./mcp/mcpInterface');
 
         const targetUrl = extractBrowserUrl(rawUserInput);
 

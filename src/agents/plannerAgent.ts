@@ -192,7 +192,7 @@ ${(state.extractedContext || "No context provided.").slice(-4000)}
             const step = rawSteps[idx];
             let desc = typeof step === 'string'
               ? step
-              : (step.description || step.task || step.details || step.action || step.text || step.summary);
+              : (step.description || step.task || (step as any).details || step.action || (step as any).text || (step as any).summary);
 
             if (desc && (desc.includes('ASTParserTool') || desc.includes('GraphifyEngine') || desc.includes('AST Context Verified'))) {
               desc = idx === 0 ? `Inspect workspace structure and models in ${targetFiles[0]}` : `Implement module logic for query: "${cleanUserQuery.slice(0, 50)}"`;
@@ -218,8 +218,10 @@ ${(state.extractedContext || "No context provided.").slice(-4000)}
 
             const normalizedTarget = normalizeSandboxPath(stepTargetFile);
 
+            const stepId = (typeof step === 'object' && (step?.id || step?.step_number)) ? (step.id || step.step_number || (idx + 1)) : (idx + 1);
+
             parsedSteps.push({
-              id: (typeof step === 'object' && (step?.id || step?.step_number)) ? (step.id || step.step_number) : (idx + 1),
+              id: stepId,
               description: desc,
               targetFile: normalizedTarget,
               isNewFile: (typeof step === 'object' && step?.isNewFile !== undefined) ? !!step.isNewFile : !fs.existsSync(normalizedTarget)

@@ -4,7 +4,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
-import { dockerSandbox } from './dockerSandbox';
+import { dockerSandbox } from '../tools/dockerSandbox';
 
 export interface MCPToolDefinition {
   name: string;
@@ -187,7 +187,7 @@ export class KaizenMCPServer {
     });
 
     // Handle MCP Tool Executions over JSON-RPC protocol
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    this.server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
       const { name, arguments: args } = request.params;
       const rootDir = process.cwd();
 

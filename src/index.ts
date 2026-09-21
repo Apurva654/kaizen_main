@@ -79,7 +79,7 @@ async function executeAgentPipeline(userInput: string) {
 
   if (state.status === "ROUTED_MCP_GIT") {
     console.log("\n-> Executing MCP Git operations...");
-    const { mcpInterface } = await import('./tools/mcpInterface');
+    const { mcpInterface } = await import('./mcp/mcpInterface');
     const actions = extractGitActions(state.userInput);
 
     for (const act of actions) {
@@ -92,7 +92,7 @@ async function executeAgentPipeline(userInput: string) {
 
   if (state.status === "ROUTED_MCP_TERMINAL") {
     console.log("\n-> Executing MCP Terminal operation...");
-    const { mcpInterface } = await import('./tools/mcpInterface');
+    const { mcpInterface } = await import('./mcp/mcpInterface');
     const res = await mcpInterface.executeTerminalCommand(state.userInput);
     console.log(`\n--- Terminal Execution Output ---`);
     console.log(res.output || res.error || '(clean output)');

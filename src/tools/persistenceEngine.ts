@@ -1,6 +1,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { KaizenStateType, PlanStep } from '../state';
+import { conversationalMemory } from '../memory/conversationalMemory';
+import { projectMemory } from '../memory/projectMemory';
+import { workflowMemory } from '../memory/workflowMemory';
+import { structuralMemory } from '../memory/structuralMemory';
 
 export interface PipelineSessionRecord {
   sessionId: string;
@@ -63,7 +67,7 @@ export class PersistenceEngine {
     return `sess_${timestamp}_${random}`;
   }
 
-  // --- Session Management ---
+  // --- Session & Conversational Memory ---
 
   public saveSession(session: PipelineSessionRecord): boolean {
     try {
@@ -71,8 +75,20 @@ export class PersistenceEngine {
       const filePath = path.join(this.sessionsDir, `${session.sessionId}.json`);
       fs.writeFileSync(filePath, JSON.stringify(session, null, 2), 'utf-8');
       
-      // Also update master session index file
       this.updateSessionIndex(session);
+
+      // Record into Conversational & Project Memory Tiers
+      conversationalMemory.addTurn(session.sessionId, {
+        role: 'user',
+        content: session.userInput,
+        metadata: { status: session.status, targetFiles: session.targetFiles }
+      });
+
+      projectMemory.saveProjectMetadata(process.cwd(), {
+        fileCount: session.targetFiles?.length || 0,
+        envVars: { lastSessionId: session.sessionId }
+      });
+
       return true;
     } catch (err) {
       console.error(`[PersistenceEngine] Error saving session '${session.sessionId}':`, err);
@@ -136,7 +152,7 @@ export class PersistenceEngine {
     return [];
   }
 
-  // --- State Checkpointing ---
+  // --- State Checkpointing & Workflow Memory ---
 
   public saveCheckpoint(sessionId: string, stepName: string, stateSnapshot: Partial<KaizenStateType>): boolean {
     try {
@@ -156,6 +172,15 @@ export class PersistenceEngine {
       };
 
       fs.writeFileSync(path.join(sessionCheckpointsDir, filename), JSON.stringify(record, null, 2), 'utf-8');
+
+      // Record into Workflow Memory Tier
+      workflowMemory.recordCheckpoint({
+        sessionId,
+        stepName,
+        status: stepName.includes('Approved') ? 'COMPLETED' : (stepName.includes('Pending') ? 'APPROVAL_REQUIRED' : 'PENDING'),
+        agentState: stateSnapshot
+      });
+
       return true;
     } catch (err) {
       console.error(`[PersistenceEngine] Error saving checkpoint '${stepName}' for session '${sessionId}':`, err);
@@ -183,7 +208,7 @@ export class PersistenceEngine {
     return [];
   }
 
-  // --- Workspace Graph & AST Cache ---
+  // --- Workspace Graph & Structural Memory ---
 
   public cacheWorkspaceGraph(workspaceRoot: string, summary: string, fileFactsCount: number, structuredPayload?: any): boolean {
     try {
@@ -198,6 +223,10 @@ export class PersistenceEngine {
         structuredPayload
       };
       fs.writeFileSync(cachePath, JSON.stringify(record, null, 2), 'utf-8');
+
+      // Record into Structural Memory Tier
+      structuralMemory.saveGraphCache(workspaceRoot, structuredPayload || { summary, fileFactsCount });
+
       return true;
     } catch (err) {
       console.warn(`[PersistenceEngine] Error caching workspace graph:`, err);
@@ -212,6 +241,17 @@ export class PersistenceEngine {
       if (fs.existsSync(cachePath)) {
         const raw = fs.readFileSync(cachePath, 'utf-8');
         return JSON.parse(raw);
+      }
+
+      const structCache = structuralMemory.getGraphCache(workspaceRoot);
+      if (structCache && structCache.structuredPayload) {
+        return {
+          workspaceRoot: structCache.workspaceRoot,
+          timestamp: structCache.timestamp,
+          summary: 'Loaded from Structural Memory',
+          fileFactsCount: structCache.fileNodesCount,
+          structuredPayload: structCache.structuredPayload
+        };
       }
     } catch (err) {
       console.warn(`[PersistenceEngine] Error reading workspace graph cache:`, err);
