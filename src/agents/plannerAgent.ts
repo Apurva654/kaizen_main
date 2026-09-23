@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { ChatGroq } from '@langchain/groq';
 import * as dotenv from 'dotenv';
 import * as fs from 'fs';
+import * as path from 'path';
 import { KaizenState, PlanStep } from '../state';
 import { ASTParserTool, ExtractedSymbol } from '../tools/astParser';
 import { isProtectedFile } from './codeGenAgent';
@@ -302,70 +303,110 @@ function buildModularFallbackPlan(userQuery: string, targetFiles: string[]): Pla
   const queryLower = userQuery.toLowerCase();
   
   const entityMatch = queryLower.match(/\b(order|event|user|product|item|inventory|payment|registration|auth|notification|customer|booking)\b/i);
-  const rawEntity = entityMatch ? entityMatch[1] : 'Module';
-  const entity = rawEntity.charAt(0).toUpperCase() + rawEntity.slice(1);
 
-  const modelFile = `src/sandbox/models/${entity}.ts`;
-  const typeFile = `src/sandbox/types/${entity.toLowerCase()}Types.ts`;
-  const repoFile = `src/sandbox/repositories/${entity}Repository.ts`;
-  const serviceFile = `src/sandbox/services/${entity}Service.ts`;
-  const controllerFile = `src/sandbox/controllers/${entity}Controller.ts`;
-  const testFile = `src/sandbox/tests/${entity}Service.test.ts`;
+  if (entityMatch) {
+    const rawEntity = entityMatch[1];
+    const entity = rawEntity.charAt(0).toUpperCase() + rawEntity.slice(1);
 
-  return [
-    {
-      id: 1,
-      targetFile: modelFile,
-      action: 'create',
-      isNewFile: !fs.existsSync(modelFile),
-      dependencies: [],
-      description: `Define core ${entity} domain data model structure, properties, and interface contracts`,
-      status: 'pending'
-    },
-    {
-      id: 2,
-      targetFile: typeFile,
-      action: 'create',
-      isNewFile: !fs.existsSync(typeFile),
-      dependencies: [modelFile],
-      description: `Create shared TypeScript types, enums, status codes, and error definitions for ${entity} management`,
-      status: 'pending'
-    },
-    {
-      id: 3,
-      targetFile: repoFile,
-      action: 'create',
-      isNewFile: !fs.existsSync(repoFile),
-      dependencies: [modelFile, typeFile],
-      description: `Implement ${entity}Repository for data storage operations, queries, and persistence management`,
-      status: 'pending'
-    },
-    {
-      id: 4,
-      targetFile: serviceFile,
-      action: 'create',
-      isNewFile: !fs.existsSync(serviceFile),
-      dependencies: [repoFile],
-      description: `Implement ${entity}Service containing core business logic, validation rules, and operations`,
-      status: 'pending'
-    },
-    {
-      id: 5,
-      targetFile: controllerFile,
-      action: 'create',
-      isNewFile: !fs.existsSync(controllerFile),
-      dependencies: [serviceFile],
-      description: `Implement ${entity}Controller route handlers and API request/response processing`,
-      status: 'pending'
-    },
-    {
-      id: 6,
-      targetFile: testFile,
-      action: 'test',
-      isNewFile: !fs.existsSync(testFile),
-      dependencies: [serviceFile],
-      description: `Implement ${entity}Service automated unit tests verifying business logic and edge cases`,
-      status: 'pending'
+    const modelFile = `src/sandbox/models/${entity}.ts`;
+    const typeFile = `src/sandbox/types/${entity.toLowerCase()}Types.ts`;
+    const repoFile = `src/sandbox/repositories/${entity}Repository.ts`;
+    const serviceFile = `src/sandbox/services/${entity}Service.ts`;
+    const controllerFile = `src/sandbox/controllers/${entity}Controller.ts`;
+    const testFile = `src/sandbox/tests/${entity}Service.test.ts`;
+
+    return [
+      {
+        id: 1,
+        targetFile: modelFile,
+        action: 'create',
+        isNewFile: !fs.existsSync(modelFile),
+        dependencies: [],
+        description: `Define core ${entity} domain data model structure, properties, and interface contracts`,
+        status: 'pending'
+      },
+      {
+        id: 2,
+        targetFile: typeFile,
+        action: 'create',
+        isNewFile: !fs.existsSync(typeFile),
+        dependencies: [modelFile],
+        description: `Create shared TypeScript types, enums, status codes, and error definitions for ${entity} management`,
+        status: 'pending'
+      },
+      {
+        id: 3,
+        targetFile: repoFile,
+        action: 'create',
+        isNewFile: !fs.existsSync(repoFile),
+        dependencies: [modelFile, typeFile],
+        description: `Implement ${entity}Repository for data storage operations, queries, and persistence management`,
+        status: 'pending'
+      },
+      {
+        id: 4,
+        targetFile: serviceFile,
+        action: 'create',
+        isNewFile: !fs.existsSync(serviceFile),
+        dependencies: [repoFile],
+        description: `Implement ${entity}Service containing core business logic, validation rules, and operations`,
+        status: 'pending'
+      },
+      {
+        id: 5,
+        targetFile: controllerFile,
+        action: 'create',
+        isNewFile: !fs.existsSync(controllerFile),
+        dependencies: [serviceFile],
+        description: `Implement ${entity}Controller route handlers and API request/response processing`,
+        status: 'pending'
+      },
+      {
+        id: 6,
+        targetFile: testFile,
+        action: 'test',
+        isNewFile: !fs.existsSync(testFile),
+        dependencies: [serviceFile],
+        description: `Implement ${entity}Service automated unit tests verifying business logic and edge cases`,
+        status: 'pending'
+      }
+    ];
+  }
+
+  const steps: PlanStep[] = [];
+  const normalizedTargets = targetFiles.length > 0 ? targetFiles.map(normalizeSandboxPath) : ['src/sandbox/main.ts'];
+
+  for (let idx = 0; idx < normalizedTargets.length; idx++) {
+    const tf = normalizedTargets[idx];
+    const isTest = tf.includes('/tests/') || tf.includes('.test.') || tf.includes('/test_') || tf.startsWith('src/sandbox/test_');
+    const ext = path.extname(tf);
+    const fileName = path.basename(tf);
+
+    let desc = '';
+    if (isTest) {
+      if (ext === '.py') {
+        desc = `Create pytest automated unit tests in ${fileName} to verify implementation`;
+      } else {
+        desc = `Create automated unit tests in ${fileName} to verify module logic`;
+      }
+    } else {
+      if (queryLower.includes('divide')) {
+        desc = `Implement function divide(a, b) returning a / b in ${fileName}`;
+      } else {
+        desc = `Implement core functionality and exported symbols in ${fileName} for request: "${userQuery.slice(0, 60)}"`;
+      }
     }
-  ];
+
+    steps.push({
+      id: idx + 1,
+      targetFile: tf,
+      action: !fs.existsSync(tf) ? 'create' : (isTest ? 'test' : 'modify'),
+      isNewFile: !fs.existsSync(tf),
+      dependencies: idx > 0 ? [normalizedTargets[idx - 1]] : [],
+      description: desc,
+      status: 'pending'
+    });
+  }
+
+  return steps;
 }

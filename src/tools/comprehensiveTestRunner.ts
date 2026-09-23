@@ -1252,6 +1252,20 @@ button [ref=e175] "Code Editor"
     });
   }
 
+  // 21. Four-Memory Architecture & Self-Healing Experience Reuse Tests
+  try {
+    const { runMemoryTests } = await import('./memoryTestRunner');
+    const memoryResults = await runMemoryTests();
+    results.push(...memoryResults);
+  } catch (memErr: any) {
+    results.push({
+      feature: 'Four-Memory Architecture Verification',
+      status: 'FAIL',
+      details: memErr?.message || String(memErr),
+      timestamp: new Date()
+    });
+  }
+
   // Console summary log
   const passed = results.filter(r => r.status === 'PASS').length;
   const failed = results.filter(r => r.status === 'FAIL').length;

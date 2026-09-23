@@ -12,7 +12,8 @@ import { debuggerAgentNode } from './agents/debuggerAgent';
 import { langfuseTracer } from './tools/langfuseTracer';
 import { persistenceEngine } from './tools/persistenceEngine';
 import { runWorkspaceTests, extractFailingFilesFromLogs } from './tools/testRunner';
-import { preprocessUserRequest, saveAgentState, loadAgentState, recordConversationTurn } from './tools/context-manager';
+import { preprocessUserRequest, saveAgentState, loadAgentState, recordConversationTurn } from './context/contextManager';
+import { memoryEngine } from './context/memory/memoryEngine';
 import { ocrService } from './tools/ocrService';
 import { permissionGate, PermissionMode } from './tools/permissionGate';
 import { mcpInterface } from './tools/mcpInterface';
@@ -189,6 +190,7 @@ function logDiagnostic(category: string, action: string, data: Record<string, an
 }
 
 async function runPipeline(rawUserInput: string, imagePayload?: string) {
+  memoryEngine.stateMemory.clearState();
   const sessionId = persistenceEngine.generateSessionId();
   const runId = `run_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
   const createdAt = new Date().toISOString();
@@ -324,10 +326,10 @@ async function runPipeline(rawUserInput: string, imagePayload?: string) {
     logDiagnostic('GRAPH', 'EXIT IntentAgent', { status: state.status, targetFiles: state.targetFiles });
     persistenceEngine.saveCheckpoint(sessionId, 'IntentAgent', state);
 
-    emitSSE('agent_step', { 
-      agent: 'IntentAgent', 
-      status: 'completed', 
-      result: { status: state.status, targetFiles: state.targetFiles } 
+    emitSSE('agent_step', {
+      agent: 'IntentAgent',
+      status: 'completed',
+      result: { status: state.status, targetFiles: state.targetFiles }
     });
 
     // Routing Logic for MCP Git Operations
@@ -564,7 +566,7 @@ async function runPipeline(rawUserInput: string, imagePayload?: string) {
     // Routing Logic for General Knowledge & Greetings
     if (state.status === "ROUTED_GENERAL_QUERY") {
       skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
-      
+
       let answer = `Hello! How can I help you with your coding project today?`;
       const apiKey = process.env.GROQ_API_KEY;
       if (apiKey && apiKey !== 'your_groq_api_key_here') {
@@ -598,6 +600,126 @@ Directives:
       return;
     }
 
+    // Routing Logic for Memory Write Operations
+    if (state.status === "ROUTED_MEMORY_WRITE") {
+      skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
+      state.targetFiles = [];
+      state.plan = [];
+
+      const { memoryEngine } = await import('./context/memory/memoryEngine');
+      memoryEngine.consolidator.consolidateTurn(rawUserInput, 'Acknowledged memory preference.');
+
+      const factsAdded: { key: string; value: string; category: string }[] = [];
+
+      if (/typescript/i.test(rawUserInput) && /strict/i.test(rawUserInput)) {
+        const f1 = memoryEngine.longTermMemory.addFact('coding_convention', 'TypeScript Strict Mode', 'Enabled / Preferred', 'user_explicit');
+        factsAdded.push({ key: f1.key, value: f1.value, category: f1.category });
+      }
+
+      if (/typescript/i.test(rawUserInput) && /backend/i.test(rawUserInput)) {
+        const f2 = memoryEngine.longTermMemory.addFact('project_fact', 'Backend Language', 'TypeScript', 'user_explicit');
+        factsAdded.push({ key: f2.key, value: f2.value, category: f2.category });
+      }
+
+      if (/tailwind/i.test(rawUserInput)) {
+        const f3 = memoryEngine.longTermMemory.addFact('coding_convention', 'UI Styling Framework', 'Tailwind CSS', 'user_explicit');
+        factsAdded.push({ key: f3.key, value: f3.value, category: f3.category });
+      }
+
+      if (factsAdded.length === 0) {
+        const keyMatch = rawUserInput.match(/(?:remember|preference|convention|we use|we prefer)\s+([^:.]+)/i);
+        const key = keyMatch && keyMatch[1] ? keyMatch[1].trim() : 'Project Preference';
+        const fGen = memoryEngine.longTermMemory.addFact('project_fact', key, rawUserInput, 'user_explicit');
+        factsAdded.push({ key: fGen.key, value: fGen.value, category: fGen.category });
+      }
+
+      const factItemsMarkdown = factsAdded.map(f => `✓ **${f.key}**: ${f.value}`).join('\n');
+      const explanation = `### 🧠 Memory Updated
+
+${factItemsMarkdown}
+
+- **Memory Type**: Long-Term Project Memory
+- **Files Modified**: 0
+- **Plan Steps**: 0
+- **Persistence**: \`.kaizen/storage/memory/long-term.json\`
+- **Route**: Memory Write`;
+
+      completedStages.push('response');
+      await finalizeExecution('COMPLETED', {
+        route: 'ROUTED_MEMORY_WRITE',
+        memoryUpdated: true,
+        targetFiles: [],
+        plan: [],
+        filePatches: [],
+        memoryRecordsUpdated: factsAdded.length,
+        memory: {
+          type: 'long_term',
+          records: factsAdded,
+          persisted: true
+        },
+        explanation
+      });
+      return;
+    }
+
+    // Routing Logic for Memory Read Operations
+    if (state.status === "ROUTED_MEMORY_READ") {
+      skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
+      state.targetFiles = [];
+      state.plan = [];
+
+      const { memoryEngine } = await import('./context/memory/memoryEngine');
+      const queryRes = memoryEngine.retrieveRelevant({ prompt: rawUserInput });
+
+      const longTermFacts = queryRes.longTermMemory;
+      const episodicEpisodes = queryRes.episodicMemory;
+
+      let explanation = `### 🧠 Memory Recall\n\n`;
+
+      if (longTermFacts.length > 0) {
+        explanation += `#### 📌 Relevant Project Memories\n`;
+        for (const f of longTermFacts) {
+          explanation += `- **${f.key}**: ${f.value} *(Category: ${f.category})*\n`;
+        }
+        explanation += `\n`;
+      } else {
+        explanation += `*(No long-term project facts match this query)*\n\n`;
+      }
+
+      if (episodicEpisodes.length > 0) {
+        explanation += `#### 📜 Previous Experience Episodes\n`;
+        for (const ep of episodicEpisodes) {
+          explanation += `- **Task**: ${ep.task}\n`;
+          explanation += `  - **Outcome**: ${ep.outcome.toUpperCase()}\n`;
+          explanation += `  - **Tests Passed**: ${ep.testsPassed}\n`;
+          explanation += `  - **Affected Files**: ${ep.affectedFiles.join(', ') || 'N/A'}\n`;
+          explanation += `  - **Solution / Resolution**: ${ep.solution}\n`;
+          if (ep.errors && ep.errors.length > 0) {
+            explanation += `  - **Errors Encountered**: ${ep.errors.join('; ')}\n`;
+          }
+          if (ep.lessons && ep.lessons.length > 0) {
+            explanation += `  - **Lessons**: ${ep.lessons.join('; ')}\n`;
+          }
+          explanation += `\n`;
+        }
+      } else {
+        explanation += `*(No episodic experience episodes match this query)*\n\n`;
+      }
+
+      explanation += `- **Files Modified**: 0\n- **Plan Steps**: 0\n- **Route**: Memory Read`;
+
+      completedStages.push('response');
+      await finalizeExecution('COMPLETED', {
+        route: 'ROUTED_MEMORY_READ',
+        targetFiles: [],
+        plan: [],
+        filePatches: [],
+        explanation
+      });
+      return;
+    }
+
+
     // 2. Context Retrieval Agent
     logDiagnostic('GRAPH', 'ENTER ContextRetrievalAgent', { targetFiles: state.targetFiles });
     emitSSE('agent_step', { agent: 'ContextRetrievalAgent', status: 'running', message: 'Analyzing workspace graph & AST symbols...' });
@@ -608,10 +730,10 @@ Directives:
     logDiagnostic('GRAPH', 'EXIT ContextRetrievalAgent', { contextLength: state.extractedContext.length });
     persistenceEngine.saveCheckpoint(sessionId, 'ContextRetrievalAgent', state);
 
-    emitSSE('agent_step', { 
-      agent: 'ContextRetrievalAgent', 
-      status: 'completed', 
-      result: { extractedContext: state.extractedContext } 
+    emitSSE('agent_step', {
+      agent: 'ContextRetrievalAgent',
+      status: 'completed',
+      result: { extractedContext: state.extractedContext }
     });
 
     // Routing Logic for Explanation
@@ -637,10 +759,10 @@ Directives:
       completedStages.push('testrunner');
       logDiagnostic('TEST', 'RESULT', { passed: testResult.passed, exitCode: testResult.exitCode });
 
-      emitSSE('agent_step', { 
-        agent: 'TestRunnerAgent', 
-        status: 'completed', 
-        result: { summary: testResult.summary, passed: testResult.passed } 
+      emitSSE('agent_step', {
+        agent: 'TestRunnerAgent',
+        status: 'completed',
+        result: { summary: testResult.summary, passed: testResult.passed }
       });
 
       const MAX_SELF_HEAL_RETRIES = 3;
@@ -661,10 +783,10 @@ Directives:
           }
 
           logDiagnostic('GRAPH', 'ENTER DebuggerAgent', { attempt: state.retryCount, targetFiles: state.targetFiles });
-          emitSSE('agent_step', { 
-            agent: 'DebuggerAgent', 
-            status: 'running', 
-            message: `Self-Healing Test Failure Diagnosis (Attempt #${state.retryCount}/${MAX_SELF_HEAL_RETRIES})...` 
+          emitSSE('agent_step', {
+            agent: 'DebuggerAgent',
+            status: 'running',
+            message: `Self-Healing Test Failure Diagnosis (Attempt #${state.retryCount}/${MAX_SELF_HEAL_RETRIES})...`
           });
 
           state.extractedContext = `${state.extractedContext}\n\n[AUTOMATED TEST FAILURE REPORT - ATTEMPT #${state.retryCount}]:\n${testResult.summary}\n${testResult.stderr}\nPlease diagnose the root cause and generate fixed patches to make tests pass.`;
@@ -684,18 +806,18 @@ Directives:
           if (validPatches.length > 0) {
             saveFilePatchesToServerDisk(validPatches);
             completedStages.push('coder');
-            emitSSE('agent_step', { 
-              agent: 'CoderAgent', 
-              status: 'completed', 
-              result: { filePatches: validPatches, diffCards: await prepareDiffCards(validPatches) } 
+            emitSSE('agent_step', {
+              agent: 'CoderAgent',
+              status: 'completed',
+              result: { filePatches: validPatches, diffCards: await prepareDiffCards(validPatches) }
             });
           }
           persistenceEngine.saveCheckpoint(sessionId, `DebuggerAgent_Retry_${state.retryCount}`, state);
 
-          emitSSE('agent_step', { 
-            agent: 'DebuggerAgent', 
-            status: 'completed', 
-            result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation } 
+          emitSSE('agent_step', {
+            agent: 'DebuggerAgent',
+            status: 'completed',
+            result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation }
           });
 
           logDiagnostic('GRAPH', 'RE-ENTER TestRunnerAgent', { attempt: state.retryCount });
@@ -724,10 +846,10 @@ Directives:
         completedStages.push('reviewer');
         logDiagnostic('GRAPH', 'EXIT ReviewerAgent', { approved: reviewResult.approved });
 
-        emitSSE('agent_step', { 
-          agent: 'ReviewerAgent', 
-          status: 'completed', 
-          result: reviewResult 
+        emitSSE('agent_step', {
+          agent: 'ReviewerAgent',
+          status: 'completed',
+          result: reviewResult
         });
 
         await finalizeExecution('TESTS_PASSED', {
@@ -762,10 +884,10 @@ Directives:
       completedStages.push('planner');
       persistenceEngine.saveCheckpoint(sessionId, 'PlanApproval_Pending', state);
 
-      emitSSE('agent_step', { 
-        agent: 'PlannerAgent', 
-        status: 'completed', 
-        result: { plan: state.plan, status: state.status, planApprovalStatus: 'PENDING_APPROVAL' } 
+      emitSSE('agent_step', {
+        agent: 'PlannerAgent',
+        status: 'completed',
+        result: { plan: state.plan, status: state.status, planApprovalStatus: 'PENDING_APPROVAL' }
       });
 
       // 4. Human-In-The-Loop (HITL) Plan Approval Request Widget (Pauses Graph Execution)
@@ -799,10 +921,10 @@ Directives:
         state.plan = updatedPlannerOutput.plan || state.plan;
         persistenceEngine.saveCheckpoint(sessionId, 'PlannerAgent_Feedback', state);
 
-        emitSSE('agent_step', { 
-          agent: 'PlannerAgent', 
-          status: 'completed', 
-          result: { plan: state.plan, status: state.status } 
+        emitSSE('agent_step', {
+          agent: 'PlannerAgent',
+          status: 'completed',
+          result: { plan: state.plan, status: state.status }
         });
       }
 
@@ -818,10 +940,10 @@ Directives:
       persistenceEngine.saveCheckpoint(sessionId, 'CoderAgent', state);
 
       const diffCards = await prepareDiffCards(coderOutput.filePatches || []);
-      emitSSE('agent_step', { 
-        agent: 'CoderAgent', 
-        status: 'completed', 
-        result: { filePatches: coderOutput.filePatches, diffCards } 
+      emitSSE('agent_step', {
+        agent: 'CoderAgent',
+        status: 'completed',
+        result: { filePatches: coderOutput.filePatches, diffCards }
       });
 
       saveFilePatchesToServerDisk(coderOutput.filePatches || []);
@@ -833,10 +955,10 @@ Directives:
       completedStages.push('testrunner');
       persistenceEngine.saveCheckpoint(sessionId, 'TestRunnerAgent', state);
 
-      emitSSE('agent_step', { 
-        agent: 'TestRunnerAgent', 
-        status: 'completed', 
-        result: { summary: testResult.summary, passed: testResult.passed } 
+      emitSSE('agent_step', {
+        agent: 'TestRunnerAgent',
+        status: 'completed',
+        result: { summary: testResult.summary, passed: testResult.passed }
       });
 
       const MAX_SELF_HEAL_RETRIES = 3;
@@ -849,10 +971,10 @@ Directives:
             state.targetFiles = Array.from(new Set([...state.targetFiles, ...discoveredFiles]));
           }
 
-          emitSSE('agent_step', { 
-            agent: 'DebuggerAgent', 
-            status: 'running', 
-            message: `Self-Healing Test Failure Diagnosis (Attempt #${state.retryCount}/${MAX_SELF_HEAL_RETRIES})...` 
+          emitSSE('agent_step', {
+            agent: 'DebuggerAgent',
+            status: 'running',
+            message: `Self-Healing Test Failure Diagnosis (Attempt #${state.retryCount}/${MAX_SELF_HEAL_RETRIES})...`
           });
 
           state.extractedContext = `${state.extractedContext}\n\n[AUTOMATED TEST FAILURE REPORT - ATTEMPT #${state.retryCount}]:\n${testResult.summary}\n${testResult.stderr}\nPlease diagnose the root cause and generate fixed patches to make tests pass.`;
@@ -864,10 +986,10 @@ Directives:
           }
           persistenceEngine.saveCheckpoint(sessionId, `DebuggerAgent_Retry_${state.retryCount}`, state);
 
-          emitSSE('agent_step', { 
-            agent: 'DebuggerAgent', 
-            status: 'completed', 
-            result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation } 
+          emitSSE('agent_step', {
+            agent: 'DebuggerAgent',
+            status: 'completed',
+            result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation }
           });
 
           emitSSE('agent_step', { agent: 'TestRunnerAgent', status: 'running', message: `Re-running unit tests after self-healing bug fix (Attempt #${state.retryCount})...` });
@@ -885,10 +1007,10 @@ Directives:
       completedStages.push('reviewer');
       persistenceEngine.saveCheckpoint(sessionId, 'ReviewerAgent', state);
 
-      emitSSE('agent_step', { 
-        agent: 'ReviewerAgent', 
-        status: 'completed', 
-        result: reviewResult 
+      emitSSE('agent_step', {
+        agent: 'ReviewerAgent',
+        status: 'completed',
+        result: reviewResult
       });
 
       await finalizeExecution('SUCCESS', {

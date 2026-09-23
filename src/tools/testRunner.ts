@@ -71,10 +71,12 @@ export async function runWorkspaceTests(targetFiles: string[] = []): Promise<Tes
 
     // Command selection
     let pyTestCmd = `python -m unittest discover -s src/sandbox -p "test_*.py"`;
-    if (pyTestFiles.length === 1) {
-      pyTestCmd = `python -m unittest ${pyTestFiles[0]}`;
-    } else if (hasPyTestInSubdir && pyTestFiles.length === 0) {
+    if (hasPyTestInSubdir) {
       pyTestCmd = `python -m unittest discover -s src/sandbox/tests -p "test_*.py"`;
+    }
+    if (pyTestFiles.length > 0) {
+      const formattedFiles = pyTestFiles.map(f => f.replace(/\\/g, '/'));
+      pyTestCmd = `python -m unittest ${formattedFiles.join(' ')}`;
     }
 
     const sandboxResult = await dockerSandbox.executeSandboxedCommand(pyTestCmd, rootDir);

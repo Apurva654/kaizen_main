@@ -8,7 +8,7 @@ import { langfuseTracer } from '../tools/langfuseTracer';
 dotenv.config();
 
 export const IntentSchema = z.object({
-  intent: z.enum(['GENERATE_CODE', 'DEBUG_ERROR', 'EXPLAIN_CODE', 'REFACTOR', 'RUN_EXISTING_TESTS', 'GENERAL_QUERY', 'MCP_GIT', 'MCP_TERMINAL'])
+  intent: z.enum(['GENERATE_CODE', 'DEBUG_ERROR', 'EXPLAIN_CODE', 'REFACTOR', 'RUN_EXISTING_TESTS', 'GENERAL_QUERY', 'MCP_GIT', 'MCP_TERMINAL', 'MEMORY_WRITE', 'MEMORY_READ'])
     .describe("The classified intent of the user request"),
   targetFiles: z.array(z.string()).optional()
     .describe("All target source file paths identified or implied for the task (e.g., ['src/sandbox/utils.ts', 'src/sandbox/main.ts'])"),
@@ -179,7 +179,7 @@ export function isBrowserQuery(input: string): boolean {
 
   // 2. Contains browser UI / inspection keywords
   const hasBrowserAction = /\b(open|inspect|navigate|visit|browse|login|page|screenshot|snapshot|view\s+page|check\s+page|ui)\b/i.test(rawPrompt);
-  const hasBrowserKeyword = /\b(browser|playwright|chrome|chromium|page|webpage)\b/i.test(rawPrompt);
+  const hasBrowserKeyword = /\b(browser|playwright|chrome|chromium|webpage)\b/i.test(rawPrompt);
 
   if (hasUrl && (hasBrowserAction || hasBrowserKeyword)) {
     return true;
@@ -209,6 +209,131 @@ export function extractBrowserUrl(input: string): string {
   return 'http://localhost:3000';
 }
 
+export function isMemoryWriteQuery(input: string): boolean {
+  if (isMemoryReadQuery(input)) return false;
+
+  const rawPrompt = extractRawUserPrompt(input).trim();
+  const lower = rawPrompt.toLowerCase();
+
+  // 1. Explicit coding action verbs targeting project configuration or source code files
+  const codeActionRegex = /^\s*(add|install|create|write|implement|modify|edit|fix|update|configure|delete|remove|refactor|build)\b.*?\b(file|config|tsconfig|package\.json|code|component|page|app|module|function|class|styling|service|repository)\b/i;
+  if (codeActionRegex.test(lower) && !/\bdo\s+not\s+modify\s+any\s+files\b/i.test(lower)) {
+    return false;
+  }
+
+  // 2. Explicit memory write intent patterns
+  const writePatterns = [
+    /\b(remember\s+(this|that|my|our|for|about|the)|remember\s+for\s+(this|our)\s+current\s+project)\b/i,
+    /\b(keep\s+(this|our|my)\s+(preference|fact|convention)?\s*in\s+mind)\b/i,
+    /\b(save|store)\s+(this|my|our)\s+(preference|convention|fact|info|information)\b/i,
+    /\b(remember\s+(our|my)\s+coding\s+convention)\b/i,
+    /\b(don't|do\s+not)\s+forget\s+(that|our|we)\b/i,
+    /\b(remember\s*:)/i,
+    /^remember\b/i
+  ];
+
+  for (const pattern of writePatterns) {
+    if (pattern.test(lower)) {
+      return true;
+    }
+  }
+
+  // 3. Declarative project convention/preference statements without file editing actions
+  const conventionPatterns = [
+    /\b(our\s+convention\s+is|we\s+prefer|always\s+use)\s+.*?\b(typescript|strict|tailwind|react|vue|express|python|convention|preference|style|backend|frontend)\b/i
+  ];
+
+  for (const pattern of conventionPatterns) {
+    if (pattern.test(lower) && !/\b(add|install|create|fix|update|modify|edit)\b/i.test(lower)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function isMemoryReadQuery(input: string): boolean {
+  const rawPrompt = extractRawUserPrompt(input).trim();
+  const lower = rawPrompt.toLowerCase();
+
+  const readPatterns = [
+    /\b(what|which)\s+.*?\bdo\s+you\s+remember\b/i,
+    /\b(what|which)\s+.*?\bhave\s+you\s+(stored|saved|remembered)\b/i,
+    /\b(show|display|list|view)\s+remembered\b/i,
+    /\bwhat\s+project\s+conventions\s+do\s+you\s+know\b/i,
+    /\brecall\s+(the|our|my|previous|past)\s+(preferences|conventions|facts|task|info)\b/i,
+    /\bwhat\s+did\s+you\s+remember\s+from\s+earlier\b/i,
+    /\bwhat\s+do\s+you\s+remember\b/i
+  ];
+
+  for (const pattern of readPatterns) {
+    if (pattern.test(lower)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function extractTargetFilesFromPrompt(prompt: string): string[] {
+  const rawPrompt = extractRawUserPrompt(prompt);
+  const foundFiles: string[] = [];
+
+  const normalizePath = (f: string): string => {
+    if (!f) return 'src/sandbox/main.ts';
+    let norm = f.replace(/\\/g, '/').trim();
+    norm = norm.replace(/^\.\//, '');
+    if (!norm.startsWith('src/sandbox/')) {
+      if (norm.startsWith('src/')) {
+        norm = norm.replace(/^src\//, 'src/sandbox/');
+      } else {
+        norm = `src/sandbox/${norm}`;
+      }
+    }
+    return norm;
+  };
+
+  const pathRegex = /\b(src\/sandbox\/[a-zA-Z0-9_\-\/]+\.[a-zA-Z0-9]+|src\/[a-zA-Z0-9_\-\/]+\.[a-zA-Z0-9]+|[a-zA-Z0-9_\-]+\/[a-zA-Z0-9_\-\/]+\.[a-zA-Z0-9]+|[a-zA-Z0-9_\-]+\.(py|ts|js|jsx|tsx|json|html|css))\b/gi;
+  let match: RegExpExecArray | null;
+  while ((match = pathRegex.exec(rawPrompt)) !== null) {
+    const norm = normalizePath(match[0].trim());
+    if (!foundFiles.includes(norm)) {
+      foundFiles.push(norm);
+    }
+  }
+
+  const lower = rawPrompt.toLowerCase();
+  const includesTestRequest = /\b(pytest|test|unit\s+test|spec)\b/i.test(lower);
+  
+  if (includesTestRequest && foundFiles.length > 0) {
+    const mainFile = foundFiles[0];
+    const isPy = mainFile.endsWith('.py');
+    const isTs = mainFile.endsWith('.ts') || mainFile.endsWith('.js');
+    
+    if (isPy && !foundFiles.some(f => f.includes('test'))) {
+      const parts = mainFile.split('/');
+      const fileName = parts.pop()!;
+      const dirName = parts.join('/');
+      const baseName = fileName.replace(/\.py$/, '');
+      const testFile = `${dirName}/test_${baseName}.py`;
+      if (!foundFiles.includes(testFile)) {
+        foundFiles.push(testFile);
+      }
+    } else if (isTs && !foundFiles.some(f => f.includes('test'))) {
+      const parts = mainFile.split('/');
+      const fileName = parts.pop()!;
+      const dirName = parts.join('/');
+      const baseName = fileName.replace(/\.(ts|js)$/, '');
+      const testFile = `${dirName}/tests/${baseName}.test.ts`;
+      if (!foundFiles.includes(testFile)) {
+        foundFiles.push(testFile);
+      }
+    }
+  }
+
+  return foundFiles;
+}
+
 export async function intentAgentNode(state: typeof KaizenState.State): Promise<{ status: string; targetFiles: string[] }> {
   // Fast-track heuristic for MCP Browser operations
   if (isBrowserQuery(state.userInput)) {
@@ -234,6 +359,22 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
     };
   }
 
+  // Fast-track heuristic for Memory Write operations BEFORE LLM/coding pipeline
+  if (isMemoryWriteQuery(state.userInput)) {
+    return {
+      status: 'ROUTED_MEMORY_WRITE',
+      targetFiles: []
+    };
+  }
+
+  // Fast-track heuristic for Memory Read operations BEFORE LLM/coding pipeline
+  if (isMemoryReadQuery(state.userInput)) {
+    return {
+      status: 'ROUTED_MEMORY_READ',
+      targetFiles: []
+    };
+  }
+
   // Fast-track heuristic for general greetings and general knowledge questions BEFORE LLM call
   if (isGeneralQuery(state.userInput)) {
     return {
@@ -242,6 +383,7 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
     };
   }
 
+  const promptExtracted = extractTargetFilesFromPrompt(state.userInput);
   const apiKey = process.env.GROQ_API_KEY;
 
   if (apiKey && apiKey !== 'your_groq_api_key_here') {
@@ -306,7 +448,11 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
         const rawFiles = result.targetFiles || result.target_files;
         let extractedFiles: string[] = (rawFiles && rawFiles.length > 0)
           ? (rawFiles as string[])
-          : (state.targetFiles.length > 0 ? state.targetFiles : ['src/sandbox/main.ts']);
+          : (state.targetFiles.length > 0 ? state.targetFiles : promptExtracted);
+
+        if (extractedFiles.length === 0) {
+          extractedFiles = ['src/sandbox/main.ts'];
+        }
 
         extractedFiles = extractedFiles.map((f: string) => {
           if (!f.includes('/') && !f.includes('\\')) {
@@ -314,6 +460,12 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
           }
           return f.replace(/\\/g, '/');
         });
+
+        for (const pe of promptExtracted) {
+          if (!extractedFiles.includes(pe)) {
+            extractedFiles.push(pe);
+          }
+        }
 
         return {
           status: `ROUTED_${intent}`,
@@ -346,12 +498,12 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
     intent = 'REFACTOR';
   }
 
-  const detectedFiles: string[] = [];
+  const detectedFiles: string[] = [...promptExtracted];
   if (input.includes('utils.ts') || input.includes('utils')) {
-    detectedFiles.push('src/sandbox/utils.ts');
+    if (!detectedFiles.includes('src/sandbox/utils.ts')) detectedFiles.push('src/sandbox/utils.ts');
   }
   if (input.includes('main.ts') || input.includes('main')) {
-    detectedFiles.push('src/sandbox/main.ts');
+    if (!detectedFiles.includes('src/sandbox/main.ts')) detectedFiles.push('src/sandbox/main.ts');
   }
 
   let finalTargets: string[];

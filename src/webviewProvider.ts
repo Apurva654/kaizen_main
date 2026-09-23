@@ -10,7 +10,8 @@ import { codeGenAgentNode, isProtectedFile, GeneratedFilePatch } from './agents/
 import { reviewerAgentNode } from './agents/reviewerAgent';
 import { debuggerAgentNode } from './agents/debuggerAgent';
 import { runWorkspaceTests, extractFailingFilesFromLogs } from './tools/testRunner';
-import { preprocessUserRequest, saveAgentState, loadAgentState, recordConversationTurn } from './tools/context-manager';
+import { preprocessUserRequest, saveAgentState, loadAgentState, recordConversationTurn } from './context/contextManager';
+import { memoryEngine } from './context/memory/memoryEngine';
 import { ocrService } from './tools/ocrService';
 
 export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
@@ -18,7 +19,7 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
   private _pendingHitlResolver: ((value: { action: 'approve' | 'reject' | 'feedback'; message?: string }) => void) | null = null;
 
-  constructor(private readonly _extensionUri: vscode.Uri) {}
+  constructor(private readonly _extensionUri: vscode.Uri) { }
 
   public resolveWebviewView(
     webviewView: vscode.WebviewView,
@@ -87,6 +88,7 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
   }
 
   public async runAgentPipeline(rawUserInput: string, imagePayload?: string) {
+    memoryEngine.stateMemory.clearState();
     this.postMessageToWebview('PIPELINE_START', { userInput: rawUserInput, timestamp: new Date().toISOString() });
 
     let extractedImageText = '';
@@ -203,10 +205,10 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
       state.targetFiles = intentOutput.targetFiles;
       completedStages.push('intent');
 
-      postWebviewEvent('AGENT_STEP', { 
-        agent: 'IntentAgent', 
-        status: 'completed', 
-        result: { status: state.status, targetFiles: state.targetFiles } 
+      postWebviewEvent('AGENT_STEP', {
+        agent: 'IntentAgent',
+        status: 'completed',
+        result: { status: state.status, targetFiles: state.targetFiles }
       });
 
       // Routing Logic for MCP Git Operations
@@ -443,7 +445,7 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
       // Routing Logic for General Knowledge & Greetings
       if (state.status === "ROUTED_GENERAL_QUERY") {
         skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
-        
+
         let answer = `Hello! I am Kaizen, an advanced AI Coding Agent. How can I assist you with your project today?`;
         const apiKey = process.env.GROQ_API_KEY;
         if (apiKey && apiKey !== 'your_groq_api_key_here') {
@@ -478,6 +480,108 @@ Directives:
         return;
       }
 
+      // Routing Logic for Memory Write Operations
+      if (state.status === "ROUTED_MEMORY_WRITE") {
+        skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
+        state.targetFiles = [];
+        state.plan = [];
+
+        const { memoryEngine } = await import('./context/memory/memoryEngine');
+        memoryEngine.consolidator.consolidateTurn(rawUserInput, 'Acknowledged memory preference.');
+
+        const factsAdded: { key: string; value: string; category: string }[] = [];
+
+        if (/typescript/i.test(rawUserInput) && /strict/i.test(rawUserInput)) {
+          const f1 = memoryEngine.longTermMemory.addFact('coding_convention', 'TypeScript Strict Mode', 'Enabled / Preferred', 'user_explicit');
+          factsAdded.push({ key: f1.key, value: f1.value, category: f1.category });
+        }
+
+        if (/typescript/i.test(rawUserInput) && /backend/i.test(rawUserInput)) {
+          const f2 = memoryEngine.longTermMemory.addFact('project_fact', 'Backend Language', 'TypeScript', 'user_explicit');
+          factsAdded.push({ key: f2.key, value: f2.value, category: f2.category });
+        }
+
+        if (/tailwind/i.test(rawUserInput)) {
+          const f3 = memoryEngine.longTermMemory.addFact('coding_convention', 'UI Styling Framework', 'Tailwind CSS', 'user_explicit');
+          factsAdded.push({ key: f3.key, value: f3.value, category: f3.category });
+        }
+
+        if (factsAdded.length === 0) {
+          const keyMatch = rawUserInput.match(/(?:remember|preference|convention|we use|we prefer)\s+([^:.]+)/i);
+          const key = keyMatch && keyMatch[1] ? keyMatch[1].trim() : 'Project Preference';
+          const fGen = memoryEngine.longTermMemory.addFact('project_fact', key, rawUserInput, 'user_explicit');
+          factsAdded.push({ key: fGen.key, value: fGen.value, category: fGen.category });
+        }
+
+        const factItemsMarkdown = factsAdded.map(f => `✓ **${f.key}**: ${f.value}`).join('\n');
+        const explanation = `### 🧠 Memory Updated
+
+${factItemsMarkdown}
+
+- **Memory Type**: Long-Term Project Memory
+- **Files Modified**: 0
+- **Plan Steps**: 0
+- **Persistence**: \`.kaizen/storage/memory/long-term.json\`
+- **Route**: Memory Write`;
+
+        completedStages.push('response');
+        await finalizeExecution('COMPLETED', {
+          route: 'ROUTED_MEMORY_WRITE',
+          memoryUpdated: true,
+          targetFiles: [],
+          plan: [],
+          filePatches: [],
+          memoryRecordsUpdated: factsAdded.length,
+          explanation
+        });
+        return;
+      }
+
+      // Routing Logic for Memory Read Operations
+      if (state.status === "ROUTED_MEMORY_READ") {
+        skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
+        state.targetFiles = [];
+        state.plan = [];
+
+        const { memoryEngine } = await import('./context/memory/memoryEngine');
+        const queryRes = memoryEngine.retrieveRelevant({ prompt: rawUserInput });
+
+        const longTermFacts = queryRes.longTermMemory;
+        const episodicEpisodes = queryRes.episodicMemory;
+
+        let explanation = `### 🧠 Memory Recall\n\n`;
+
+        if (longTermFacts.length > 0) {
+          explanation += `#### 📌 Relevant Project Memories\n`;
+          for (const f of longTermFacts) {
+            explanation += `- **${f.key}**: ${f.value} *(Category: ${f.category})*\n`;
+          }
+          explanation += `\n`;
+        } else {
+          explanation += `*(No long-term project facts match this query)*\n\n`;
+        }
+
+        if (episodicEpisodes.length > 0) {
+          explanation += `#### 📜 Previous Experience Episodes\n`;
+          for (const ep of episodicEpisodes) {
+            explanation += `- **${ep.task}**: ${ep.solution} *(Outcome: ${ep.outcome.toUpperCase()})*\n`;
+          }
+          explanation += `\n`;
+        }
+
+        explanation += `- **Files Modified**: 0\n- **Plan Steps**: 0\n- **Route**: Memory Read`;
+
+        completedStages.push('response');
+        await finalizeExecution('COMPLETED', {
+          route: 'ROUTED_MEMORY_READ',
+          targetFiles: [],
+          plan: [],
+          filePatches: [],
+          explanation
+        });
+        return;
+      }
+
       // 2. Context Retrieval Agent
       postWebviewEvent('AGENT_STEP', { agent: 'ContextRetrievalAgent', status: 'running', message: 'Analyzing workspace AST symbols...' });
       const retrievalOutput = await contextRetrievalAgentNode(state);
@@ -485,10 +589,10 @@ Directives:
       state.targetFiles = retrievalOutput.targetFiles;
       completedStages.push('context');
 
-      postWebviewEvent('AGENT_STEP', { 
-        agent: 'ContextRetrievalAgent', 
-        status: 'completed', 
-        result: { extractedContext: state.extractedContext } 
+      postWebviewEvent('AGENT_STEP', {
+        agent: 'ContextRetrievalAgent',
+        status: 'completed',
+        result: { extractedContext: state.extractedContext }
       });
 
       if (state.status === "ROUTED_EXPLAIN_CODE") {
@@ -511,10 +615,10 @@ Directives:
         let testResult = await runWorkspaceTests(state.targetFiles);
         completedStages.push('testrunner');
 
-        postWebviewEvent('AGENT_STEP', { 
-          agent: 'TestRunnerAgent', 
-          status: 'completed', 
-          result: { summary: testResult.summary, passed: testResult.passed } 
+        postWebviewEvent('AGENT_STEP', {
+          agent: 'TestRunnerAgent',
+          status: 'completed',
+          result: { summary: testResult.summary, passed: testResult.passed }
         });
 
         const MAX_SELF_HEAL_RETRIES = 3;
@@ -532,10 +636,10 @@ Directives:
               state.targetFiles = Array.from(new Set([...state.targetFiles, ...discoveredFiles]));
             }
 
-            postWebviewEvent('AGENT_STEP', { 
-              agent: 'DebuggerAgent', 
-              status: 'running', 
-              message: `Self-Healing Test Failure Diagnosis (Attempt #${state.retryCount}/${MAX_SELF_HEAL_RETRIES})...` 
+            postWebviewEvent('AGENT_STEP', {
+              agent: 'DebuggerAgent',
+              status: 'running',
+              message: `Self-Healing Test Failure Diagnosis (Attempt #${state.retryCount}/${MAX_SELF_HEAL_RETRIES})...`
             });
 
             state.extractedContext = `${state.extractedContext}\n\n[AUTOMATED TEST FAILURE REPORT - ATTEMPT #${state.retryCount}]:\n${testResult.summary}\n${testResult.stderr}\nPlease diagnose the root cause and generate fixed patches to make tests pass.`;
@@ -556,17 +660,17 @@ Directives:
                 await this.applyPatchToVSCodeDocument(patch.filePath, patch.code);
               }
               completedStages.push('coder');
-              postWebviewEvent('AGENT_STEP', { 
-                agent: 'CoderAgent', 
-                status: 'completed', 
-                result: { filePatches: validPatches, diffCards: await this.prepareDiffCards(validPatches) } 
+              postWebviewEvent('AGENT_STEP', {
+                agent: 'CoderAgent',
+                status: 'completed',
+                result: { filePatches: validPatches, diffCards: await this.prepareDiffCards(validPatches) }
               });
             }
 
-            postWebviewEvent('AGENT_STEP', { 
-              agent: 'DebuggerAgent', 
-              status: 'completed', 
-              result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation } 
+            postWebviewEvent('AGENT_STEP', {
+              agent: 'DebuggerAgent',
+              status: 'completed',
+              result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation }
             });
 
             postWebviewEvent('AGENT_STEP', { agent: 'TestRunnerAgent', status: 'running', message: `Re-running unit tests after bug fix (Attempt #${state.retryCount})...` });
@@ -591,10 +695,10 @@ Directives:
           const reviewResult = await reviewerAgentNode(state);
           completedStages.push('reviewer');
 
-          postWebviewEvent('AGENT_STEP', { 
-            agent: 'ReviewerAgent', 
-            status: 'completed', 
-            result: reviewResult 
+          postWebviewEvent('AGENT_STEP', {
+            agent: 'ReviewerAgent',
+            status: 'completed',
+            result: reviewResult
           });
 
           await finalizeExecution('TESTS_PASSED', {
@@ -625,10 +729,10 @@ Directives:
         state.status = plannerOutput.status || "PLANNED";
         completedStages.push('planner');
 
-        postWebviewEvent('AGENT_STEP', { 
-          agent: 'PlannerAgent', 
-          status: 'completed', 
-          result: { plan: state.plan, status: state.status } 
+        postWebviewEvent('AGENT_STEP', {
+          agent: 'PlannerAgent',
+          status: 'completed',
+          result: { plan: state.plan, status: state.status }
         });
 
         state.planApprovalStatus = 'PENDING_APPROVAL';
@@ -660,10 +764,10 @@ Directives:
           const updatedPlannerOutput = await plannerAgentNode(state);
           state.plan = updatedPlannerOutput.plan || state.plan;
 
-          postWebviewEvent('AGENT_STEP', { 
-            agent: 'PlannerAgent', 
-            status: 'completed', 
-            result: { plan: state.plan, status: state.status } 
+          postWebviewEvent('AGENT_STEP', {
+            agent: 'PlannerAgent',
+            status: 'completed',
+            result: { plan: state.plan, status: state.status }
           });
         }
 
@@ -676,10 +780,10 @@ Directives:
         completedStages.push('coder');
 
         const diffCards = await this.prepareDiffCards(coderOutput.filePatches || []);
-        postWebviewEvent('AGENT_STEP', { 
-          agent: 'CoderAgent', 
-          status: 'completed', 
-          result: { filePatches: coderOutput.filePatches, diffCards } 
+        postWebviewEvent('AGENT_STEP', {
+          agent: 'CoderAgent',
+          status: 'completed',
+          result: { filePatches: coderOutput.filePatches, diffCards }
         });
 
         // 6. Test Runner & Self-Healing Debugger Loop
@@ -687,10 +791,10 @@ Directives:
         let testResult = await runWorkspaceTests(state.targetFiles);
         completedStages.push('testrunner');
 
-        postWebviewEvent('AGENT_STEP', { 
-          agent: 'TestRunnerAgent', 
-          status: 'completed', 
-          result: { summary: testResult.summary, passed: testResult.passed } 
+        postWebviewEvent('AGENT_STEP', {
+          agent: 'TestRunnerAgent',
+          status: 'completed',
+          result: { summary: testResult.summary, passed: testResult.passed }
         });
 
         const MAX_SELF_HEAL_RETRIES = 3;
@@ -703,10 +807,10 @@ Directives:
               state.targetFiles = Array.from(new Set([...state.targetFiles, ...discoveredFiles]));
             }
 
-            postWebviewEvent('AGENT_STEP', { 
-              agent: 'DebuggerAgent', 
-              status: 'running', 
-              message: `Self-Healing Test Failure Diagnosis (Attempt #${state.retryCount}/${MAX_SELF_HEAL_RETRIES})...` 
+            postWebviewEvent('AGENT_STEP', {
+              agent: 'DebuggerAgent',
+              status: 'running',
+              message: `Self-Healing Test Failure Diagnosis (Attempt #${state.retryCount}/${MAX_SELF_HEAL_RETRIES})...`
             });
 
             state.extractedContext = `${state.extractedContext}\n\n[AUTOMATED TEST FAILURE REPORT - ATTEMPT #${state.retryCount}]:\n${testResult.summary}\n${testResult.stderr}\nPlease diagnose the root cause and generate fixed patches to make tests pass.`;
@@ -719,10 +823,10 @@ Directives:
               }
             }
 
-            postWebviewEvent('AGENT_STEP', { 
-              agent: 'DebuggerAgent', 
-              status: 'completed', 
-              result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation } 
+            postWebviewEvent('AGENT_STEP', {
+              agent: 'DebuggerAgent',
+              status: 'completed',
+              result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation }
             });
 
             postWebviewEvent('AGENT_STEP', { agent: 'TestRunnerAgent', status: 'running', message: `Re-running unit tests after bug fix (Attempt #${state.retryCount})...` });
@@ -738,10 +842,10 @@ Directives:
         let reviewResult = await reviewerAgentNode(state);
         completedStages.push('reviewer');
 
-        postWebviewEvent('AGENT_STEP', { 
-          agent: 'ReviewerAgent', 
-          status: 'completed', 
-          result: reviewResult 
+        postWebviewEvent('AGENT_STEP', {
+          agent: 'ReviewerAgent',
+          status: 'completed',
+          result: reviewResult
         });
 
         // Apply file patches directly to VS Code Workspace
