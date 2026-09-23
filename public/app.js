@@ -417,9 +417,12 @@ document.addEventListener('DOMContentLoaded', () => {
           const res = await fetch('/api/workspace/clear-sandbox', { method: 'POST' });
           if (res.ok) {
             showToast('Sandbox playground cleared (Empty Window)', 'success');
+            openTabsList = [];
+            tabsContentMap.clear();
             activeFilePath = '';
             if (codeEditor) codeEditor.value = '';
             if (editorFilePath) editorFilePath.textContent = 'No file open';
+            renderTabsHeader();
             updateLineNumbers();
             loadSandboxFiles();
           } else {
@@ -460,9 +463,68 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  // Multi-Tab Editor State
+  let openTabsList = [];
+  const tabsContentMap = new Map();
+
+  function renderTabsHeader() {
+    if (!editorTabs) return;
+    editorTabs.innerHTML = '';
+
+    openTabsList.forEach(relPath => {
+      const fileName = relPath.split('/').pop();
+      const tabEl = document.createElement('div');
+      tabEl.className = `tab ${relPath === activeFilePath ? 'active' : ''}`;
+      tabEl.setAttribute('data-path', relPath);
+
+      tabEl.innerHTML = `
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        <span>${fileName}</span>
+        <span class="tab-close-btn" title="Close tab">&times;</span>
+      `;
+
+      tabEl.addEventListener('click', (e) => {
+        if (e.target.classList.contains('tab-close-btn')) {
+          e.stopPropagation();
+          closeTab(relPath);
+        } else {
+          openFileInEditor(relPath);
+        }
+      });
+
+      editorTabs.appendChild(tabEl);
+    });
+  }
+
+  function closeTab(relPath) {
+    openTabsList = openTabsList.filter(p => p !== relPath);
+    tabsContentMap.delete(relPath);
+
+    if (activeFilePath === relPath) {
+      if (openTabsList.length > 0) {
+        const nextTab = openTabsList[openTabsList.length - 1];
+        openFileInEditor(nextTab);
+      } else {
+        activeFilePath = '';
+        if (codeEditor) codeEditor.value = '';
+        if (editorFilePath) editorFilePath.textContent = 'No file open';
+        updateLineNumbers();
+        renderTabsHeader();
+      }
+    } else {
+      renderTabsHeader();
+    }
+  }
+
   // 2. Open File in Editor
   async function openFileInEditor(relPath) {
+    if (!relPath) return;
     exitReadOnlyBrowserMode();
+
+    if (!openTabsList.includes(relPath)) {
+      openTabsList.push(relPath);
+    }
+
     activeFilePath = relPath;
     if (editorFilePath) editorFilePath.textContent = relPath;
 
@@ -470,14 +532,7 @@ document.addEventListener('DOMContentLoaded', () => {
       el.classList.toggle('active', el.getAttribute('data-path') === relPath);
     });
 
-    if (editorTabs) {
-      editorTabs.innerHTML = `
-        <div class="tab active" data-path="${relPath}">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-          <span>${relPath.split('/').pop()}</span>
-        </div>
-      `;
-    }
+    renderTabsHeader();
 
     if (isVsCodeEnv) return;
 
@@ -489,18 +544,14 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
       const data = await res.json();
-      if (data.path && data.path !== relPath) {
-        activeFilePath = data.path;
-        if (editorFilePath) editorFilePath.textContent = data.path;
-        if (editorTabs) {
-          editorTabs.innerHTML = `
-            <div class="tab active" data-path="${data.path}">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-              <span>${data.path.split('/').pop()}</span>
-            </div>
-          `;
-        }
+      const actualPath = data.path || relPath;
+      if (actualPath !== relPath) {
+        openTabsList = openTabsList.map(p => p === relPath ? actualPath : p);
+        activeFilePath = actualPath;
+        if (editorFilePath) editorFilePath.textContent = actualPath;
+        renderTabsHeader();
       }
+      tabsContentMap.set(actualPath, data.content);
       if (codeEditor) codeEditor.value = data.content;
       updateLineNumbers();
     } catch (err) {
@@ -659,16 +710,15 @@ document.addEventListener('DOMContentLoaded', () => {
         break;
 
       case 'PIPELINE_COMPLETE':
+        loadSandboxFiles();
         if (data.route === 'MCP_BROWSER' || data.route === 'ROUTED_MCP_BROWSER') {
           renderBrowserInspectionUI(data);
         } else {
           finalizeStepper(data);
-          if (data.status === 'SUCCESS' || data.status === 'DEBUG_COMPLETE' || data.status === 'TESTS_PASSED') {
-            loadSandboxFiles();
-            if (data.targetFiles && data.targetFiles[0]) {
-              openFileInEditor(data.targetFiles[0]);
-            }
-          } else if (data.route === 'EXPLAIN_CODE' || data.status === 'EXPLAIN_COMPLETE' || data.explanation) {
+          if (data.targetFiles && data.targetFiles[0]) {
+            openFileInEditor(data.targetFiles[0]);
+          }
+          if (data.route === 'EXPLAIN_CODE' || data.status === 'EXPLAIN_COMPLETE' || data.explanation) {
             renderExplanationCard(data);
           } else if (data.status === 'FAILED' || data.status === 'ABORTED') {
             renderErrorCard(data.message || data.error || 'Pipeline execution ended with failures.');

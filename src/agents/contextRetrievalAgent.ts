@@ -7,7 +7,23 @@ import { persistenceEngine } from '../tools/persistenceEngine';
 export async function contextRetrievalAgentNode(state: typeof KaizenState.State) {
   let targetFiles = state.targetFiles && state.targetFiles.length > 0 
     ? state.targetFiles 
-    : ['src/sandbox/main.ts'];
+    : [];
+
+  if (targetFiles.length === 0) {
+    const sandboxDir = path.resolve(process.cwd(), 'src/sandbox');
+    if (fs.existsSync(sandboxDir)) {
+      const existing = fs.readdirSync(sandboxDir)
+        .filter(f => fs.statSync(path.join(sandboxDir, f)).isFile() && !f.startsWith('.'))
+        .map(f => `src/sandbox/${f}`);
+      if (existing.length > 0) {
+        targetFiles = existing;
+      }
+    }
+  }
+
+  if (targetFiles.length === 0) {
+    targetFiles = ['src/sandbox/main.ts'];
+  }
 
   targetFiles = targetFiles.map(f => f.replace(/\\/g, '/'));
 

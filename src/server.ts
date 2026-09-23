@@ -18,6 +18,7 @@ import { permissionGate, PermissionMode } from './tools/permissionGate';
 import { mcpInterface } from './mcp/mcpInterface';
 import { dockerSandbox } from './tools/dockerSandbox';
 import { parseBrowserInspectionResult, formatBrowserInspectionMarkdown, extractRequestedBrowserAction, resolveAccessibilityTarget } from './tools/browserSnapshotParser';
+import { performWebSearch } from './tools/webSearchTool';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -189,7 +190,7 @@ app.get('/api/test/comprehensive', async (req: Request, res: Response) => {
 
 // Run Agent Pipeline Endpoint
 app.post('/api/pipeline/run', async (req: Request, res: Response) => {
-  const { userInput, imagePayload } = req.body;
+  const { userInput, imagePayload, sessionId: reqSessionId } = req.body;
 
   if ((!userInput || typeof userInput !== 'string') && !imagePayload) {
     res.status(400).json({ error: 'userInput string or imagePayload is required.' });
@@ -200,15 +201,15 @@ app.post('/api/pipeline/run', async (req: Request, res: Response) => {
   res.json({ status: 'started', message: 'Pipeline execution initiated.' });
 
   // Execute pipeline asynchronously and broadcast step updates via SSE
-  runPipeline(userInput || '', imagePayload);
+  runPipeline(userInput || '', imagePayload, reqSessionId);
 });
 
 function logDiagnostic(category: string, action: string, data: Record<string, any>) {
   console.log(`[KAIZEN][${category}] ${action}`, JSON.stringify(data));
 }
 
-async function runPipeline(rawUserInput: string, imagePayload?: string) {
-  const sessionId = persistenceEngine.generateSessionId();
+async function runPipeline(rawUserInput: string, imagePayload?: string, clientSessionId?: string) {
+  const sessionId = clientSessionId || persistenceEngine.generateSessionId();
   const runId = `run_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
   const createdAt = new Date().toISOString();
 
@@ -343,10 +344,10 @@ async function runPipeline(rawUserInput: string, imagePayload?: string) {
     logDiagnostic('GRAPH', 'EXIT IntentAgent', { status: state.status, targetFiles: state.targetFiles });
     persistenceEngine.saveCheckpoint(sessionId, 'IntentAgent', state);
 
-    emitSSE('agent_step', { 
-      agent: 'IntentAgent', 
-      status: 'completed', 
-      result: { status: state.status, targetFiles: state.targetFiles } 
+    emitSSE('agent_step', {
+      agent: 'IntentAgent',
+      status: 'completed',
+      result: { status: state.status, targetFiles: state.targetFiles }
     });
 
     // Routing Logic for MCP Git Operations
@@ -580,33 +581,173 @@ async function runPipeline(rawUserInput: string, imagePayload?: string) {
       return;
     }
 
+    // Routing Logic for File Deletion & Sandbox Clearing (Permission Gate HITL)
+    if (state.status === "ROUTED_DELETE_FILES") {
+      skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
+      emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: '⚠️ Evaluating file deletion request with Permission Gate...' });
+
+      const sandboxDir = path.resolve(process.cwd(), 'src/sandbox');
+      let targetFilesToDelete: string[] = [];
+      
+      const getFilesRecursively = (dir: string): string[] => {
+        let results: string[] = [];
+        if (!fs.existsSync(dir)) return results;
+        const list = fs.readdirSync(dir);
+        for (const item of list) {
+          const fullPath = path.join(dir, item);
+          const relPath = path.relative(process.cwd(), fullPath).replace(/\\/g, '/');
+          const stat = fs.statSync(fullPath);
+          if (stat.isDirectory()) {
+            results = results.concat(getFilesRecursively(fullPath));
+          } else {
+            results.push(relPath);
+          }
+        }
+        return results;
+      };
+
+      if (fs.existsSync(sandboxDir)) {
+        targetFilesToDelete = getFilesRecursively(sandboxDir);
+      }
+
+      if (targetFilesToDelete.length === 0) {
+        await finalizeExecution('GENERAL_COMPLETE', {
+          route: 'DELETE_FILES',
+          explanation: `### ℹ️ Workspace Sandbox Is Empty\n\nThe \`src/sandbox/\` directory is already clean and contains 0 files. No file deletion was needed.`
+        });
+        return;
+      }
+
+      const evalResult = permissionGate.evaluate('file_delete', { command: rawUserInput, files: targetFilesToDelete });
+      let isApproved = true;
+      let hasBlockedAction = false;
+
+      if (evalResult.requiresApproval && !evalResult.allowed) {
+        hasBlockedAction = true;
+        broadcastSSE('hitl_request', {
+          type: 'FILE_DELETION_APPROVAL',
+          title: 'Permission Gate Intercept: File Deletion Request',
+          message: `The agent is requesting permission to delete ${targetFilesToDelete.length} files in 'src/sandbox/':\n${targetFilesToDelete.join('\n')}`,
+          files: targetFilesToDelete,
+          riskScore: evalResult.riskScore
+        });
+
+        const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
+          pendingHitlResolver = resolve;
+        });
+        broadcastSSE('hitl_received', { response: userHitlResponse });
+        isApproved = userHitlResponse.action === 'approve';
+      }
+
+      let explanation = '';
+      if (isApproved) {
+        let deletedCount = 0;
+        const deletedFiles: string[] = [];
+        for (const fileRel of targetFilesToDelete) {
+          const fullPath = path.resolve(process.cwd(), fileRel);
+          if (fs.existsSync(fullPath)) {
+            try {
+              fs.unlinkSync(fullPath);
+              deletedCount++;
+              deletedFiles.push(fileRel);
+            } catch (err: any) {
+              console.warn(`Failed to delete ${fileRel}:`, err?.message || err);
+            }
+          }
+        }
+        // Clean up empty directories inside sandbox
+        if (fs.existsSync(sandboxDir)) {
+          try {
+            const cleanEmptyDirs = (dir: string) => {
+              const items = fs.readdirSync(dir);
+              for (const item of items) {
+                const p = path.join(dir, item);
+                if (fs.statSync(p).isDirectory()) {
+                  cleanEmptyDirs(p);
+                  if (fs.readdirSync(p).length === 0) {
+                    fs.rmdirSync(p);
+                  }
+                }
+              }
+            };
+            cleanEmptyDirs(sandboxDir);
+          } catch {}
+        }
+        explanation = `### 🗑️ File Deletion Completed\n\nSuccessfully deleted ${deletedCount} files from workspace:\n${deletedFiles.map(f => `- \`${f}\``).join('\n')}`;
+      } else {
+        explanation = `### 🛑 File Deletion Cancelled\n\nFile deletion request was cancelled by the user. No files were modified or deleted.`;
+      }
+
+      await finalizeExecution(hasBlockedAction ? 'HITL_REQUIRED' : 'GENERAL_COMPLETE', {
+        route: 'DELETE_FILES',
+        explanation
+      });
+      return;
+    }
+
     // Routing Logic for General Knowledge & Greetings
     if (state.status === "ROUTED_GENERAL_QUERY") {
       skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
-      
+
       let answer = `Hello! How can I help you with your coding project today?`;
       const apiKey = process.env.GROQ_API_KEY;
-      if (apiKey && apiKey !== 'your_groq_api_key_here') {
-        try {
-          const { ChatGroq } = await import('@langchain/groq');
-          const model = new ChatGroq({ apiKey, model: 'groq/compound-mini', temperature: 0.3 });
-          const systemContent = `You are Kaizen, a helpful AI assistant.
-Always check the USER PROFILE & KNOWN FACTS and RECENT CONVERSATION HISTORY provided below to answer user queries:
 
-${userInput}
+      const { isAmbiguousQuery } = await import('./agents/intentAgent');
+      if (isAmbiguousQuery(rawUserInput)) {
+        const langMatch = rawUserInput.match(/\bin\s+([a-zA-Z0-9+#]+)/i);
+        const langStr = langMatch ? langMatch[1].toUpperCase() : 'your specified language';
+        answer = `I'd be happy to help you create code files in ${langStr}! Could you please clarify what specific program, feature, or logic you'd like to build?\n\nFor example:\n- File Read/Write Operations & Data Persistence\n- Object-Oriented Class Structures & Inheritance\n- Data Structures & Algorithms (e.g. Trees, Graphs, Sorting)\n- CLI Utility Tool or Math Calculator`;
+      } else {
+
+      // Check if user query requires live web search (e.g. unknown people, news, external topics)
+      let webSearchResultsText = '';
+      const isSearchQuery = /\b(who is|nole|djokovic|news|today|latest|tell me about|what happened|search|google|company|openai)\b/i.test(rawUserInput);
+      const isMemoryQuery = /\b(my name|what is my name|whats my name|who am i)\b/i.test(rawUserInput);
+
+      if (isSearchQuery && !isMemoryQuery) {
+        emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: '🌐 Performing live web search (DuckDuckGo / Google)...' });
+        const results = await performWebSearch(rawUserInput);
+        if (results.length > 0) {
+          webSearchResultsText = `\n\n=== LIVE WEB SEARCH RESULTS ===\n` +
+            results.map((r, i) => `[${i + 1}] Title: ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet}`).join('\n\n');
+        }
+      }
+
+      if (apiKey && apiKey !== 'your_groq_api_key_here') {
+        const modelCandidates = [
+          'openai/gpt-oss-120b',
+          'openai/gpt-oss-20b',
+          'qwen/qwen3.8-27b',
+          'llama-3.3-70b-versatile',
+          'llama-3.1-8b-instant'
+        ];
+
+        for (const modelName of modelCandidates) {
+          try {
+            const { ChatGroq } = await import('@langchain/groq');
+            const model = new ChatGroq({ apiKey, model: modelName, temperature: 0.3 });
+            const systemContent = `You are Kaizen, a helpful AI assistant.
+Always check the USER PROFILE & KNOWN FACTS, CONVERSATION HISTORY, and LIVE WEB SEARCH RESULTS provided below to answer user queries:
+
+${state.extractedContext || userInput}
+${webSearchResultsText}
 
 Directives:
-- If the user asks for their name, identity, or previous details, state their name/identity from the KNOWN FACTS and CONVERSATION HISTORY above.
+- If LIVE WEB SEARCH RESULTS are provided above, use them to answer facts, current events, or people queries directly.
+- If the user asks for their name or identity, state their name/identity from the KNOWN FACTS and CONVERSATION HISTORY.
 - Provide concise, friendly, and direct answers without generating code unless explicitly requested.`;
 
-          const res: any = await model.invoke([
-            { role: 'system', content: systemContent },
-            { role: 'user', content: rawUserInput }
-          ]);
-          answer = typeof res.content === 'string' ? res.content : String(res.content ?? '');
-        } catch (err) {
-          console.warn('General query LLM invocation failed:', err);
+            const res: any = await model.invoke([
+              { role: 'system', content: systemContent },
+              { role: 'user', content: rawUserInput }
+            ]);
+            answer = typeof res.content === 'string' ? res.content : String(res.content ?? '');
+            if (answer) break;
+          } catch (err) {
+            console.warn(`General query LLM invocation failed for model '${modelName}':`, err);
+          }
         }
+      }
       }
 
       completedStages.push('response');
@@ -627,10 +768,10 @@ Directives:
     logDiagnostic('GRAPH', 'EXIT ContextRetrievalAgent', { contextLength: state.extractedContext.length });
     persistenceEngine.saveCheckpoint(sessionId, 'ContextRetrievalAgent', state);
 
-    emitSSE('agent_step', { 
-      agent: 'ContextRetrievalAgent', 
-      status: 'completed', 
-      result: { extractedContext: state.extractedContext } 
+    emitSSE('agent_step', {
+      agent: 'ContextRetrievalAgent',
+      status: 'completed',
+      result: { extractedContext: state.extractedContext }
     });
 
     // Routing Logic for Explanation
@@ -656,10 +797,10 @@ Directives:
       completedStages.push('testrunner');
       logDiagnostic('TEST', 'RESULT', { passed: testResult.passed, exitCode: testResult.exitCode });
 
-      emitSSE('agent_step', { 
-        agent: 'TestRunnerAgent', 
-        status: 'completed', 
-        result: { summary: testResult.summary, passed: testResult.passed } 
+      emitSSE('agent_step', {
+        agent: 'TestRunnerAgent',
+        status: 'completed',
+        result: { summary: testResult.summary, passed: testResult.passed }
       });
 
       const MAX_SELF_HEAL_RETRIES = 3;
@@ -680,10 +821,10 @@ Directives:
           }
 
           logDiagnostic('GRAPH', 'ENTER DebuggerAgent', { attempt: state.retryCount, targetFiles: state.targetFiles });
-          emitSSE('agent_step', { 
-            agent: 'DebuggerAgent', 
-            status: 'running', 
-            message: `Self-Healing Test Failure Diagnosis (Attempt #${state.retryCount}/${MAX_SELF_HEAL_RETRIES})...` 
+          emitSSE('agent_step', {
+            agent: 'DebuggerAgent',
+            status: 'running',
+            message: `Self-Healing Test Failure Diagnosis (Attempt #${state.retryCount}/${MAX_SELF_HEAL_RETRIES})...`
           });
 
           state.extractedContext = `${state.extractedContext}\n\n[AUTOMATED TEST FAILURE REPORT - ATTEMPT #${state.retryCount}]:\n${testResult.summary}\n${testResult.stderr}\nPlease diagnose the root cause and generate fixed patches to make tests pass.`;
@@ -703,18 +844,18 @@ Directives:
           if (validPatches.length > 0) {
             saveFilePatchesToServerDisk(validPatches);
             completedStages.push('coder');
-            emitSSE('agent_step', { 
-              agent: 'CoderAgent', 
-              status: 'completed', 
-              result: { filePatches: validPatches, diffCards: await prepareDiffCards(validPatches) } 
+            emitSSE('agent_step', {
+              agent: 'CoderAgent',
+              status: 'completed',
+              result: { filePatches: validPatches, diffCards: await prepareDiffCards(validPatches) }
             });
           }
           persistenceEngine.saveCheckpoint(sessionId, `DebuggerAgent_Retry_${state.retryCount}`, state);
 
-          emitSSE('agent_step', { 
-            agent: 'DebuggerAgent', 
-            status: 'completed', 
-            result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation } 
+          emitSSE('agent_step', {
+            agent: 'DebuggerAgent',
+            status: 'completed',
+            result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation }
           });
 
           logDiagnostic('GRAPH', 'RE-ENTER TestRunnerAgent', { attempt: state.retryCount });
@@ -743,10 +884,10 @@ Directives:
         completedStages.push('reviewer');
         logDiagnostic('GRAPH', 'EXIT ReviewerAgent', { approved: reviewResult.approved });
 
-        emitSSE('agent_step', { 
-          agent: 'ReviewerAgent', 
-          status: 'completed', 
-          result: reviewResult 
+        emitSSE('agent_step', {
+          agent: 'ReviewerAgent',
+          status: 'completed',
+          result: reviewResult
         });
 
         await finalizeExecution('TESTS_PASSED', {
@@ -781,10 +922,10 @@ Directives:
       completedStages.push('planner');
       persistenceEngine.saveCheckpoint(sessionId, 'PlanApproval_Pending', state);
 
-      emitSSE('agent_step', { 
-        agent: 'PlannerAgent', 
-        status: 'completed', 
-        result: { plan: state.plan, status: state.status, planApprovalStatus: 'PENDING_APPROVAL' } 
+      emitSSE('agent_step', {
+        agent: 'PlannerAgent',
+        status: 'completed',
+        result: { plan: state.plan, status: state.status, planApprovalStatus: 'PENDING_APPROVAL' }
       });
 
       // 4. Human-In-The-Loop (HITL) Plan Approval Request Widget (Pauses Graph Execution)
@@ -818,10 +959,10 @@ Directives:
         state.plan = updatedPlannerOutput.plan || state.plan;
         persistenceEngine.saveCheckpoint(sessionId, 'PlannerAgent_Feedback', state);
 
-        emitSSE('agent_step', { 
-          agent: 'PlannerAgent', 
-          status: 'completed', 
-          result: { plan: state.plan, status: state.status } 
+        emitSSE('agent_step', {
+          agent: 'PlannerAgent',
+          status: 'completed',
+          result: { plan: state.plan, status: state.status }
         });
       }
 
@@ -837,13 +978,13 @@ Directives:
       persistenceEngine.saveCheckpoint(sessionId, 'CoderAgent', state);
 
       const diffCards = await prepareDiffCards(coderOutput.filePatches || []);
-      emitSSE('agent_step', { 
-        agent: 'CoderAgent', 
-        status: 'completed', 
-        result: { filePatches: coderOutput.filePatches, diffCards } 
+      emitSSE('agent_step', {
+        agent: 'CoderAgent',
+        status: 'completed',
+        result: { filePatches: coderOutput.filePatches, diffCards }
       });
 
-      saveFilePatchesToServerDisk(coderOutput.filePatches || []);
+      // Code patches are rendered in UI diff cards and written to disk ONLY when the user clicks "Apply Patch"
 
       // 6. Test Runner & Self-Healing Debugger Loop
       logDiagnostic('GRAPH', 'ENTER TestRunnerAgent', {});
@@ -852,10 +993,10 @@ Directives:
       completedStages.push('testrunner');
       persistenceEngine.saveCheckpoint(sessionId, 'TestRunnerAgent', state);
 
-      emitSSE('agent_step', { 
-        agent: 'TestRunnerAgent', 
-        status: 'completed', 
-        result: { summary: testResult.summary, passed: testResult.passed } 
+      emitSSE('agent_step', {
+        agent: 'TestRunnerAgent',
+        status: 'completed',
+        result: { summary: testResult.summary, passed: testResult.passed }
       });
 
       const MAX_SELF_HEAL_RETRIES = 3;
@@ -868,10 +1009,10 @@ Directives:
             state.targetFiles = Array.from(new Set([...state.targetFiles, ...discoveredFiles]));
           }
 
-          emitSSE('agent_step', { 
-            agent: 'DebuggerAgent', 
-            status: 'running', 
-            message: `Self-Healing Test Failure Diagnosis (Attempt #${state.retryCount}/${MAX_SELF_HEAL_RETRIES})...` 
+          emitSSE('agent_step', {
+            agent: 'DebuggerAgent',
+            status: 'running',
+            message: `Self-Healing Test Failure Diagnosis (Attempt #${state.retryCount}/${MAX_SELF_HEAL_RETRIES})...`
           });
 
           state.extractedContext = `${state.extractedContext}\n\n[AUTOMATED TEST FAILURE REPORT - ATTEMPT #${state.retryCount}]:\n${testResult.summary}\n${testResult.stderr}\nPlease diagnose the root cause and generate fixed patches to make tests pass.`;
@@ -883,10 +1024,10 @@ Directives:
           }
           persistenceEngine.saveCheckpoint(sessionId, `DebuggerAgent_Retry_${state.retryCount}`, state);
 
-          emitSSE('agent_step', { 
-            agent: 'DebuggerAgent', 
-            status: 'completed', 
-            result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation } 
+          emitSSE('agent_step', {
+            agent: 'DebuggerAgent',
+            status: 'completed',
+            result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation }
           });
 
           emitSSE('agent_step', { agent: 'TestRunnerAgent', status: 'running', message: `Re-running unit tests after self-healing bug fix (Attempt #${state.retryCount})...` });
@@ -904,10 +1045,10 @@ Directives:
       completedStages.push('reviewer');
       persistenceEngine.saveCheckpoint(sessionId, 'ReviewerAgent', state);
 
-      emitSSE('agent_step', { 
-        agent: 'ReviewerAgent', 
-        status: 'completed', 
-        result: reviewResult 
+      emitSSE('agent_step', {
+        agent: 'ReviewerAgent',
+        status: 'completed',
+        result: reviewResult
       });
 
       await finalizeExecution('SUCCESS', {
@@ -1130,10 +1271,43 @@ app.get('/api/langfuse/traces', (req: Request, res: Response) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`\n==================================================`);
-  console.log(`🚀 Kaizen AI Client Tier & Generative UI Server`);
-  console.log(`   Running at: http://localhost:${PORT}`);
-  console.log(`==================================================\n`);
+// Validate Groq API key on startup
+async function validateGroqApiKey() {
+  const API_KEY = process.env.GROQ_API_KEY;
+
+  if (!API_KEY || API_KEY === 'your_groq_api_key_here') {
+    console.error("❌ FATAL: GROQ_API_KEY not found in .env");
+    process.exit(1);
+  }
+
+  try {
+    console.log("🔍 Validating Groq API key on startup...");
+    const response = await fetch('https://api.groq.com/openai/v1/models', {
+      headers: { 'Authorization': `Bearer ${API_KEY}` }
+    });
+
+    if (response.status === 200) {
+      console.log("✅ Groq API Key validated successfully on startup");
+      return true;
+    } else {
+      const error = await response.text();
+      console.error(`❌ Groq API returned ${response.status}: ${error}`);
+      process.exit(1);
+    }
+  } catch (error: any) {
+    console.error("❌ Failed to validate Groq API Key:", error?.message || error);
+    process.exit(1);
+  }
+}
+
+// Execute startup validation before starting Express server listener
+validateGroqApiKey().then(() => {
+  app.listen(PORT, () => {
+    console.log(`\n==================================================`);
+    console.log(`🚀 Kaizen AI Client Tier & Generative UI Server`);
+    console.log(`   Running at: http://localhost:${PORT}`);
+    console.log(`==================================================\n`);
+  });
 });
+
 

@@ -17,12 +17,12 @@ export interface LLMMetrics {
 
 // Estimated pricing per 1,000,000 tokens (USD)
 const MODEL_PRICING: Record<string, { prompt: number; completion: number }> = {
-  'openai/gpt-oss-120b': { prompt: 0.15, completion: 0.60 },
-  'groq/compound-mini': { prompt: 0.05, completion: 0.08 },
-  'qwen/qwen3.8-27b': { prompt: 0.20, completion: 0.50 },
-  'openai/gpt-oss-20b': { prompt: 0.07, completion: 0.10 },
   'llama-3.3-70b-versatile': { prompt: 0.59, completion: 0.79 },
-  'llama-3.1-8b-instant': { prompt: 0.05, completion: 0.08 }
+  'llama-3.1-8b-instant': { prompt: 0.05, completion: 0.08 },
+  'llama3-70b-8192': { prompt: 0.59, completion: 0.79 },
+  'llama3-8b-8192': { prompt: 0.05, completion: 0.08 },
+  'qwen-2.5-coder-32b': { prompt: 0.20, completion: 0.50 },
+  'deepseek-r1-distill-llama-70b': { prompt: 0.59, completion: 0.79 }
 };
 
 export class LangfuseTracerManager {

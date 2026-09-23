@@ -64,7 +64,7 @@ function extractSymbolsFromWorkspace(targetFiles: string[], extractedContext: st
             }
           }
         }
-      } catch {}
+      } catch { }
     }
   }
 
@@ -114,10 +114,11 @@ export async function plannerAgentNode(state: typeof KaizenState.State) {
 
   if (apiKey && apiKey !== 'your_groq_api_key_here') {
     const modelCandidates = [
+      'openai/gpt-oss-120b',
+      'openai/gpt-oss-20b',
+      'qwen/qwen3.8-27b',
       'llama-3.3-70b-versatile',
-      'llama-3.1-8b-instant',
-      'mixtral-8x7b-32768',
-      'gemma2-9b-it'
+      'llama-3.1-8b-instant'
     ];
 
     for (const modelName of modelCandidates) {
@@ -151,14 +152,14 @@ ${symbolSummary}
 ${(state.extractedContext || "No context provided.").slice(-4000)}
 
 === CONSTRAINTS ===
-1. All target files MUST reside inside 'src/sandbox/' (e.g., 'src/sandbox/models/Order.ts').
-2. Do NOT collapse modular architectures (such as Order/Event management) into a single file. Decompose into models, repositories, services, controllers, and unit tests.
+1. All target files MUST reside inside 'src/sandbox/' (e.g., 'src/sandbox/OOPSsample.cpp').
+2. ADAPTIVE GRANULARITY: For simple requests, quick scripts, C++/Python files, or refactoring tasks (e.g. removing comments, fixing namespace, adding functions), generate concise 1-3 targeted steps. Do NOT force 6-step enterprise web architecture (models/repositories/controllers) unless the user explicitly requests an enterprise multi-module system.
 3. Every step MUST include an explicit targetFile under 'src/sandbox/'.
 4. Do NOT modify any files on disk during planning.
 
 === PLANNING REQUIREMENTS ===
-1. Produce modular steps with targetFile, action, isNewFile, and dependencies.
-2. Step Descriptions must be clear and actionable without using internal class names like ASTParserTool.`;
+1. Produce grounded, actionable steps with targetFile, action, isNewFile, and dependencies.
+2. Step Descriptions must be clear, concise, and professional without repeating raw user prompts or using internal class names like ASTParserTool.`;
 
         const startTime = Date.now();
         const invokePromise = structuredModel.invoke([
@@ -300,73 +301,120 @@ ${(state.extractedContext || "No context provided.").slice(-4000)}
   };
 }
 
+function formatSmartStepDescription(userQuery: string, targetFile: string, idx: number): string {
+  const queryLower = userQuery.toLowerCase().trim();
+
+  if (queryLower.includes('remove std') || queryLower.includes('using namespace std')) {
+    return `Refactor \`using namespace std;\` in ${targetFile}`;
+  }
+  if (queryLower.includes('remove comment') || queryLower.includes('delete comment') || queryLower.includes('clean comment')) {
+    return `Remove inline comments and clean code in ${targetFile}`;
+  }
+  if (queryLower.includes('oops') || queryLower.includes('class') || queryLower.includes('object')) {
+    return `Implement Object-Oriented C++ structure in ${targetFile}`;
+  }
+  if (queryLower.includes('description') || queryLower.includes('nole')) {
+    return `Write character description and utility logic in ${targetFile}`;
+  }
+
+  let verb = 'Implement';
+  if (/\b(add|create|make|write|generate)\b/i.test(queryLower)) verb = 'Create';
+  else if (/\b(remove|delete|clean|clear|strip)\b/i.test(queryLower)) verb = 'Refactor';
+  else if (/\b(fix|debug|repair|correct)\b/i.test(queryLower)) verb = 'Fix';
+  else if (/\b(update|modify|change|edit)\b/i.test(queryLower)) verb = 'Update';
+  else if (/\b(test|spec|verify)\b/i.test(queryLower)) verb = 'Test';
+
+  let subject = userQuery.replace(/^(please|pls|can you|help me|make|create|write|add|remove|delete|update|fix)\s+/i, '').slice(0, 40).trim();
+  if (!subject) subject = 'requested changes';
+
+  return `${verb} ${subject} in ${targetFile}`;
+}
+
 function buildModularFallbackPlan(userQuery: string, targetFiles: string[]): PlanStep[] {
   const queryLower = userQuery.toLowerCase();
+
+  // Check if target file or prompt specifies non-TypeScript language (C++, Python, Java, Rust, Go, C#, PHP)
+  const isCpp = /\b(c\+\+|cpp|cplusplus)\b/i.test(queryLower) || targetFiles.some(f => f.endsWith('.cpp') || f.endsWith('.h') || f.endsWith('.hpp'));
+  const isPython = /\b(python|py)\b/i.test(queryLower) || targetFiles.some(f => f.endsWith('.py'));
+  const isJava = /\b(java)\b/i.test(queryLower) || targetFiles.some(f => f.endsWith('.java'));
+  const isRust = /\b(rust|rs)\b/i.test(queryLower) || targetFiles.some(f => f.endsWith('.rs'));
+  const isGo = /\b(golang|go)\b/i.test(queryLower) || targetFiles.some(f => f.endsWith('.go'));
+
+  if (isCpp || isPython || isJava || isRust || isGo || (targetFiles.length > 0 && !targetFiles[0].endsWith('.ts'))) {
+    let mainTarget = targetFiles[0];
+    if (!mainTarget || mainTarget.endsWith('.ts')) {
+      const ext = isCpp ? '.cpp' : (isPython ? '.py' : (isJava ? '.java' : (isRust ? '.rs' : (isGo ? '.go' : '.cpp'))));
+      const slug = userQuery.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '').slice(0, 20) || 'solution';
+      mainTarget = `src/sandbox/${slug}${ext}`;
+    }
+
+    const steps: PlanStep[] = targetFiles.length > 0 ? targetFiles.map((tf, idx) => ({
+      id: idx + 1,
+      targetFile: tf,
+      action: fs.existsSync(tf) ? 'modify' : 'create',
+      isNewFile: !fs.existsSync(tf),
+      dependencies: idx > 0 ? [targetFiles[idx - 1]] : [],
+      description: formatSmartStepDescription(userQuery, tf, idx),
+      status: 'pending'
+    })) : [
+      {
+        id: 1,
+        targetFile: mainTarget,
+        action: 'create',
+        isNewFile: !fs.existsSync(mainTarget),
+        dependencies: [],
+        description: formatSmartStepDescription(userQuery, mainTarget, 0),
+        status: 'pending'
+      }
+    ];
+
+    return steps;
+  }
+
+  // If target files exist or specific target files are provided, create concise targeted plan steps
+  const validTargets = targetFiles.length > 0 ? targetFiles : ['src/sandbox/main.ts'];
   
+  // Check if query asks for a small edit / modification (e.g. remove comments, add feature, refactor)
+  const isModification = /\b(add|remove|fix|update|modify|change|refactor|clean|namespace|comment|comments|use|using)\b/i.test(queryLower);
+
+  if (isModification || validTargets.length <= 2) {
+    const steps: PlanStep[] = validTargets.map((tf, idx) => ({
+      id: idx + 1,
+      targetFile: tf,
+      action: fs.existsSync(tf) ? 'modify' : 'create',
+      isNewFile: !fs.existsSync(tf),
+      dependencies: idx > 0 ? [validTargets[idx - 1]] : [],
+      description: formatSmartStepDescription(userQuery, tf, idx),
+      status: 'pending'
+    }));
+    return steps;
+  }
+
+  // Enterprise multi-module fallback ONLY if user explicitly requests domain architecture
   const entityMatch = queryLower.match(/\b(order|event|user|product|item|inventory|payment|registration|auth|notification|customer|booking)\b/i);
-  const rawEntity = entityMatch ? entityMatch[1] : 'Module';
+  const rawEntity = entityMatch ? entityMatch[1] : 'App';
   const entity = rawEntity.charAt(0).toUpperCase() + rawEntity.slice(1);
 
-  const modelFile = `src/sandbox/models/${entity}.ts`;
-  const typeFile = `src/sandbox/types/${entity.toLowerCase()}Types.ts`;
-  const repoFile = `src/sandbox/repositories/${entity}Repository.ts`;
-  const serviceFile = `src/sandbox/services/${entity}Service.ts`;
-  const controllerFile = `src/sandbox/controllers/${entity}Controller.ts`;
-  const testFile = `src/sandbox/tests/${entity}Service.test.ts`;
+  const mainFile = `src/sandbox/${entity.toLowerCase()}Service.ts`;
+  const testFile = `src/sandbox/tests/${entity.toLowerCase()}.test.ts`;
 
   return [
     {
       id: 1,
-      targetFile: modelFile,
+      targetFile: mainFile,
       action: 'create',
-      isNewFile: !fs.existsSync(modelFile),
+      isNewFile: !fs.existsSync(mainFile),
       dependencies: [],
-      description: `Define core ${entity} domain data model structure, properties, and interface contracts`,
+      description: formatSmartStepDescription(userQuery, mainFile, 0),
       status: 'pending'
     },
     {
       id: 2,
-      targetFile: typeFile,
-      action: 'create',
-      isNewFile: !fs.existsSync(typeFile),
-      dependencies: [modelFile],
-      description: `Create shared TypeScript types, enums, status codes, and error definitions for ${entity} management`,
-      status: 'pending'
-    },
-    {
-      id: 3,
-      targetFile: repoFile,
-      action: 'create',
-      isNewFile: !fs.existsSync(repoFile),
-      dependencies: [modelFile, typeFile],
-      description: `Implement ${entity}Repository for data storage operations, queries, and persistence management`,
-      status: 'pending'
-    },
-    {
-      id: 4,
-      targetFile: serviceFile,
-      action: 'create',
-      isNewFile: !fs.existsSync(serviceFile),
-      dependencies: [repoFile],
-      description: `Implement ${entity}Service containing core business logic, validation rules, and operations`,
-      status: 'pending'
-    },
-    {
-      id: 5,
-      targetFile: controllerFile,
-      action: 'create',
-      isNewFile: !fs.existsSync(controllerFile),
-      dependencies: [serviceFile],
-      description: `Implement ${entity}Controller route handlers and API request/response processing`,
-      status: 'pending'
-    },
-    {
-      id: 6,
       targetFile: testFile,
       action: 'test',
       isNewFile: !fs.existsSync(testFile),
-      dependencies: [serviceFile],
-      description: `Implement ${entity}Service automated unit tests verifying business logic and edge cases`,
+      dependencies: [mainFile],
+      description: `Implement unit test suite for ${entity} module`,
       status: 'pending'
     }
   ];

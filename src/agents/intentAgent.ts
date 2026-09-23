@@ -8,7 +8,7 @@ import { langfuseTracer } from '../tools/langfuseTracer';
 dotenv.config();
 
 export const IntentSchema = z.object({
-  intent: z.enum(['GENERATE_CODE', 'DEBUG_ERROR', 'EXPLAIN_CODE', 'REFACTOR', 'RUN_EXISTING_TESTS', 'GENERAL_QUERY', 'MCP_GIT', 'MCP_TERMINAL'])
+  intent: z.enum(['GENERATE_CODE', 'DEBUG_ERROR', 'EXPLAIN_CODE', 'REFACTOR', 'RUN_EXISTING_TESTS', 'GENERAL_QUERY', 'MCP_GIT', 'MCP_TERMINAL', 'DELETE_FILES'])
     .describe("The classified intent of the user request"),
   targetFiles: z.array(z.string()).optional()
     .describe("All target source file paths identified or implied for the task (e.g., ['src/sandbox/utils.ts', 'src/sandbox/main.ts'])"),
@@ -196,6 +196,53 @@ export function isBrowserQuery(input: string): boolean {
   return false;
 }
 
+export function isAmbiguousQuery(input: string): boolean {
+  const rawPrompt = extractRawUserPrompt(input).toLowerCase().trim();
+  
+  const vaguePatterns = [
+    /^(make|create|write|add|generate)\s+(\d+\s+)?(code\s+)?files?\s*(in\s+[a-zA-Z0-9+#]+)?$/i,
+    /^(make|create|write)\s+(a\s+)?(code|program|file|script)\s*(in\s+[a-zA-Z0-9+#]+)?$/i,
+    /^(make|create|write)\s+something\s*(in\s+[a-zA-Z0-9+#]+)?$/i
+  ];
+  
+  return vaguePatterns.some(p => p.test(rawPrompt));
+}
+
+export function isDeleteQuery(input: string): boolean {
+  const rawPrompt = extractRawUserPrompt(input).toLowerCase().trim();
+
+  // Guard: Code element edits inside a file (e.g., "remove std::", "remove comments", "remove unused imports", "remove function", "remove line")
+  const isCodeEdit = /\b(std::|std|comment|comments|import|imports|function|method|class|variable|line|code|prefix|namespace|log|print|unused)\b/i.test(rawPrompt);
+  const isInsideFileRefactor = /\b(from|inside|in)\s+.*\b(file|files|code|class|cpp|ts|py|js)\b/i.test(rawPrompt);
+
+  if (isCodeEdit && (isInsideFileRefactor || /\b(remove|delete)\s+(std|comment|comments|import|function|line|log|print|unused|prefix|namespace)\b/i.test(rawPrompt))) {
+    return false;
+  }
+
+  // Explicit File / Directory Deletion intent (including "both files", "these files", "2 files")
+  const explicitFileDelete = /\b(delete|delte|delt|deleate|remove|clear|wipe|erase|unlink|destroy)\s+(the\s+)?(both|these|those|two|selected|\d+\s+)?(file|files|folder|directory|sandbox|workspace|everything|all)\b/i;
+  const explicitPathDelete = /\b(delete|remove|unlink|rm)\s+[a-zA-Z0-9_\-\/]+\.(cpp|py|ts|js|json|html|css|txt)\b/i;
+  const deleteAllPattern = /\b(delete|remove|clear|wipe)\s+(both|all|everything)\b/i;
+
+  if (explicitFileDelete.test(rawPrompt) || explicitPathDelete.test(rawPrompt) || deleteAllPattern.test(rawPrompt)) {
+    return true;
+  }
+
+  return false;
+}
+
+export function detectRequestedLanguageExtension(input: string): string {
+  const rawPrompt = extractRawUserPrompt(input).toLowerCase();
+  if (/\b(c\+\+|cpp|cplusplus)\b/i.test(rawPrompt)) return '.cpp';
+  if (/\b(python|py)\b/i.test(rawPrompt)) return '.py';
+  if (/\b(java)\b/i.test(rawPrompt)) return '.java';
+  if (/\b(rust|rs)\b/i.test(rawPrompt)) return '.rs';
+  if (/\b(golang|go)\b/i.test(rawPrompt)) return '.go';
+  if (/\b(c#|csharp|cs)\b/i.test(rawPrompt)) return '.cs';
+  if (/\b(php)\b/i.test(rawPrompt)) return '.php';
+  return '.ts';
+}
+
 export function extractBrowserUrl(input: string): string {
   const raw = extractRawUserPrompt(input);
   const match = raw.match(/\b(https?:\/\/[^\s]+|localhost:\d+)\b/i);
@@ -210,6 +257,14 @@ export function extractBrowserUrl(input: string): string {
 }
 
 export async function intentAgentNode(state: typeof KaizenState.State): Promise<{ status: string; targetFiles: string[] }> {
+  // Fast-track heuristic for File Deletion queries
+  if (isDeleteQuery(state.userInput)) {
+    return {
+      status: 'ROUTED_DELETE_FILES',
+      targetFiles: []
+    };
+  }
+
   // Fast-track heuristic for MCP Browser operations
   if (isBrowserQuery(state.userInput)) {
     return {
@@ -234,6 +289,14 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
     };
   }
 
+  // Fast-track heuristic for ambiguous prompts -> route to general query for conversational clarification
+  if (isAmbiguousQuery(state.userInput)) {
+    return {
+      status: 'ROUTED_GENERAL_QUERY',
+      targetFiles: []
+    };
+  }
+
   // Fast-track heuristic for general greetings and general knowledge questions BEFORE LLM call
   if (isGeneralQuery(state.userInput)) {
     return {
@@ -246,10 +309,11 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
 
   if (apiKey && apiKey !== 'your_groq_api_key_here') {
     const modelCandidates = [
+      'openai/gpt-oss-120b',
+      'openai/gpt-oss-20b',
+      'qwen/qwen3.8-27b',
       'llama-3.3-70b-versatile',
-      'llama-3.1-8b-instant',
-      'mixtral-8x7b-32768',
-      'gemma2-9b-it'
+      'llama-3.1-8b-instant'
     ];
 
     for (const modelName of modelCandidates) {
@@ -365,8 +429,8 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
       .replace(/[^a-z0-9]/g, '_')
       .replace(/_+/g, '_')
       .replace(/^_+|_+$/g, '')
-      .slice(0, 20) || 'task';
-    finalTargets = [`src/sandbox/${slug}.ts`];
+    const ext = detectRequestedLanguageExtension(state.userInput);
+    finalTargets = [`src/sandbox/${slug}${ext}`];
   }
 
   return {
