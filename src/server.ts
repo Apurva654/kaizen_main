@@ -2,11 +2,13 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
+import { execSync } from 'child_process';
+import * as universalValidator from './tools/universalValidator';
 import { KaizenStateType } from './state';
 import { intentAgentNode, extractTerminalCommand, extractGitActions, extractBrowserUrl } from './agents/intentAgent';
 import { contextRetrievalAgentNode } from './agents/contextRetrievalAgent';
 import { plannerAgentNode } from './agents/plannerAgent';
-import { codeGenAgentNode, isProtectedFile, GeneratedFilePatch } from './agents/codeGenAgent';
+import { codeGenAgentNode, isProtectedFile, GeneratedFilePatch, saveFilePatchesToServerDiskWithVerification } from './agents/codeGenAgent';
 import { reviewerAgentNode } from './agents/reviewerAgent';
 import { debuggerAgentNode } from './agents/debuggerAgent';
 import { langfuseTracer } from './tools/langfuseTracer';
@@ -18,7 +20,7 @@ import { permissionGate, PermissionMode } from './tools/permissionGate';
 import { mcpInterface } from './mcp/mcpInterface';
 import { dockerSandbox } from './tools/dockerSandbox';
 import { parseBrowserInspectionResult, formatBrowserInspectionMarkdown, extractRequestedBrowserAction, resolveAccessibilityTarget } from './tools/browserSnapshotParser';
-import { performWebSearch } from './tools/webSearchTool';
+import { performWebSearch, setSSEEmitter } from './tools/webSearchTool';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -217,6 +219,8 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
     broadcastSSE(eventType, { ...data, runId, sessionId });
   };
 
+  setSSEEmitter(emitSSE);
+
   logDiagnostic('RUN', 'INITIATED', { runId, sessionId, rawUserInput, hasImage: !!imagePayload });
   emitSSE('pipeline_start', { sessionId, userInput: rawUserInput, timestamp: createdAt });
 
@@ -277,7 +281,11 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
     mcpActions: [],
     dockerSandboxActive: await dockerSandbox.checkDockerAvailable(),
     structuredFailures: [],
-    errorsEncountered: 0
+    errorsEncountered: 0,
+    lastPlan: undefined,
+    planTimestamp: undefined,
+    canRetry: true,
+    rejectionReason: undefined
   };
 
   persistenceEngine.saveCheckpoint(sessionId, 'INITIALIZED', state);
@@ -377,7 +385,7 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
             riskScore: evalResult.riskScore
           });
 
-          const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
+          let userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve: (value: { action: 'approve' | 'reject' | 'feedback'; message?: string }) => void) => {
             pendingHitlResolver = resolve;
           });
           broadcastSSE('hitl_received', { response: userHitlResponse });
@@ -588,7 +596,7 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
 
       const sandboxDir = path.resolve(process.cwd(), 'src/sandbox');
       let targetFilesToDelete: string[] = [];
-      
+
       const getFilesRecursively = (dir: string): string[] => {
         let results: string[] = [];
         if (!fs.existsSync(dir)) return results;
@@ -609,6 +617,15 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
       if (fs.existsSync(sandboxDir)) {
         targetFilesToDelete = getFilesRecursively(sandboxDir);
       }
+
+      // --- START OF FIX FOR ISSUE #1 ---
+      // Parse exclusion patterns from the raw user prompt
+      const exceptMatch = rawUserInput.match(/\b(except|exclude|keep|don't delete|save)\s+([a-zA-Z0-9_\-\.\/]+)/i);
+      if (exceptMatch) {
+        const excludedFile = exceptMatch[2].toLowerCase();
+        targetFilesToDelete = targetFilesToDelete.filter(f => !f.toLowerCase().includes(excludedFile));
+      }
+      // --- END OF FIX FOR ISSUE #1 ---
 
       if (targetFilesToDelete.length === 0) {
         await finalizeExecution('GENERAL_COMPLETE', {
@@ -671,8 +688,9 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
               }
             };
             cleanEmptyDirs(sandboxDir);
-          } catch {}
+          } catch { }
         }
+        state.targetFiles = (state.targetFiles || []).filter(f => !deletedFiles.includes(f));
         explanation = `### 🗑️ File Deletion Completed\n\nSuccessfully deleted ${deletedCount} files from workspace:\n${deletedFiles.map(f => `- \`${f}\``).join('\n')}`;
       } else {
         explanation = `### 🛑 File Deletion Cancelled\n\nFile deletion request was cancelled by the user. No files were modified or deleted.`;
@@ -680,6 +698,7 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
 
       await finalizeExecution(hasBlockedAction ? 'HITL_REQUIRED' : 'GENERAL_COMPLETE', {
         route: 'DELETE_FILES',
+        targetFiles: state.targetFiles,
         explanation
       });
       return;
@@ -699,34 +718,48 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
         answer = `I'd be happy to help you create code files in ${langStr}! Could you please clarify what specific program, feature, or logic you'd like to build?\n\nFor example:\n- File Read/Write Operations & Data Persistence\n- Object-Oriented Class Structures & Inheritance\n- Data Structures & Algorithms (e.g. Trees, Graphs, Sorting)\n- CLI Utility Tool or Math Calculator`;
       } else {
 
-      // Check if user query requires live web search (e.g. unknown people, news, external topics)
-      let webSearchResultsText = '';
-      const isSearchQuery = /\b(who is|nole|djokovic|news|today|latest|tell me about|what happened|search|google|company|openai)\b/i.test(rawUserInput);
-      const isMemoryQuery = /\b(my name|what is my name|whats my name|who am i)\b/i.test(rawUserInput);
+        // --- START OF FIX FOR ISSUE #4 ---
+        const now = new Date();
+        const istTime = now.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true });
+        const jstTime = now.toLocaleTimeString('en-JP', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', hour12: true });
 
-      if (isSearchQuery && !isMemoryQuery) {
-        emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: '🌐 Performing live web search (DuckDuckGo / Google)...' });
-        const results = await performWebSearch(rawUserInput);
-        if (results.length > 0) {
-          webSearchResultsText = `\n\n=== LIVE WEB SEARCH RESULTS ===\n` +
-            results.map((r, i) => `[${i + 1}] Title: ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet}`).join('\n\n');
+        const systemPromptClockExtension = `
+Current Context:
+- Current Date/Time: ${now.toISOString()}
+- India (IST): ${istTime}
+- Japan (JST): ${jstTime}
+`;
+
+        // Check if user query requires live web search (e.g. unknown people, news, external topics)
+        let webSearchResultsText = '';
+        const isSearchQuery = /\b(who is|nole|djokovic|news|today|latest|tell me about|what happened|search|google|company|openai|time|cricket|schedule|tour|visiting|match|weather|current|now)\b/i.test(rawUserInput);
+        const isMemoryQuery = /\b(my name|what is my name|whats my name|who am i)\b/i.test(rawUserInput);
+        // --- END OF FIX FOR ISSUE #4 ---
+
+        if (isSearchQuery && !isMemoryQuery) {
+          emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: '🌐 Performing live web search (DuckDuckGo / Google)...' });
+          const results = await performWebSearch(rawUserInput);
+          if (results.length > 0) {
+            webSearchResultsText = `\n\n=== LIVE WEB SEARCH RESULTS ===\n` +
+              results.map((r, i) => `[${i + 1}] Title: ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet}`).join('\n\n');
+          }
         }
-      }
 
-      if (apiKey && apiKey !== 'your_groq_api_key_here') {
-        const modelCandidates = [
-          'openai/gpt-oss-120b',
-          'openai/gpt-oss-20b',
-          'qwen/qwen3.8-27b',
-          'llama-3.3-70b-versatile',
-          'llama-3.1-8b-instant'
-        ];
+        if (apiKey && apiKey !== 'your_groq_api_key_here') {
+          const modelCandidates = [
+            'openai/gpt-oss-120b',
+            'openai/gpt-oss-20b',
+            'qwen/qwen3.8-27b',
+            'llama-3.3-70b-versatile',
+            'llama-3.1-8b-instant'
+          ];
 
-        for (const modelName of modelCandidates) {
-          try {
-            const { ChatGroq } = await import('@langchain/groq');
-            const model = new ChatGroq({ apiKey, model: modelName, temperature: 0.3 });
-            const systemContent = `You are Kaizen, a helpful AI assistant.
+          for (const modelName of modelCandidates) {
+            try {
+              const { ChatGroq } = await import('@langchain/groq');
+              const model = new ChatGroq({ apiKey, model: modelName, temperature: 0.3 });
+              const systemContent = `You are Kaizen, a helpful AI assistant.
+${systemPromptClockExtension}
 Always check the USER PROFILE & KNOWN FACTS, CONVERSATION HISTORY, and LIVE WEB SEARCH RESULTS provided below to answer user queries:
 
 ${state.extractedContext || userInput}
@@ -737,17 +770,17 @@ Directives:
 - If the user asks for their name or identity, state their name/identity from the KNOWN FACTS and CONVERSATION HISTORY.
 - Provide concise, friendly, and direct answers without generating code unless explicitly requested.`;
 
-            const res: any = await model.invoke([
-              { role: 'system', content: systemContent },
-              { role: 'user', content: rawUserInput }
-            ]);
-            answer = typeof res.content === 'string' ? res.content : String(res.content ?? '');
-            if (answer) break;
-          } catch (err) {
-            console.warn(`General query LLM invocation failed for model '${modelName}':`, err);
+              const res: any = await model.invoke([
+                { role: 'system', content: systemContent },
+                { role: 'user', content: rawUserInput }
+              ]);
+              answer = typeof res.content === 'string' ? res.content : String(res.content ?? '');
+              if (answer) break;
+            } catch (err) {
+              console.warn(`General query LLM invocation failed for model '${modelName}':`, err);
+            }
           }
         }
-      }
       }
 
       completedStages.push('response');
@@ -842,13 +875,17 @@ Directives:
           const validPatches = (debugResult.filePatches || []).filter(p => !isTestFile(p.filePath));
 
           if (validPatches.length > 0) {
-            saveFilePatchesToServerDisk(validPatches);
-            completedStages.push('coder');
-            emitSSE('agent_step', {
-              agent: 'CoderAgent',
-              status: 'completed',
-              result: { filePatches: validPatches, diffCards: await prepareDiffCards(validPatches) }
-            });
+            const diffCards = await prepareDiffCards(validPatches);
+            const writeResult = saveFilePatchesToServerDiskWithVerification(validPatches, emitSSE);
+            console.log(`[Debugger] Files written: ${writeResult.successCount}/${validPatches.length}`);
+            if (writeResult.successCount > 0) {
+              completedStages.push('coder');
+              emitSSE('agent_step', {
+                agent: 'CoderAgent',
+                status: 'completed',
+                result: { filePatches: validPatches, diffCards }
+              });
+            }
           }
           persistenceEngine.saveCheckpoint(sessionId, `DebuggerAgent_Retry_${state.retryCount}`, state);
 
@@ -938,18 +975,47 @@ Directives:
         planApprovalStatus: 'PENDING_APPROVAL'
       });
 
-      const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
+      let userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
         pendingHitlResolver = resolve;
       });
 
       emitSSE('hitl_received', { response: userHitlResponse });
 
-      if (userHitlResponse.action === 'reject') {
-        state.planApprovalStatus = 'REJECTED';
-        skippedStages.push('coder', 'testrunner', 'debugger', 'reviewer');
-        await finalizeExecution('ABORTED', { message: 'Plan rejected by user.', planApprovalStatus: 'REJECTED' });
-        return;
+      // --- START OF FIX FOR ISSUE #2 ---
+      while (userHitlResponse.action === 'reject') {
+        state.retryCount = (state.retryCount || 0) + 1;
+        if (state.retryCount <= 3) {
+          emitSSE('agent_step', {
+            agent: 'PlannerAgent',
+            status: 'running',
+            message: `[Attempt #${state.retryCount}] User rejected plan. Re-planning alternative approach...`
+          });
+          state.userInput = `${state.originalUserRequest || state.userInput} (Previous plan rejected by user. Generate an alternative refined plan)`;
+          const updatedPlannerOutput = await plannerAgentNode(state);
+          state.plan = updatedPlannerOutput.plan || state.plan;
+
+          emitSSE('hitl_request', {
+            type: 'PLAN_APPROVAL',
+            title: 'Plan Approval Required',
+            message: 'Please review the generated implementation plan before proceeding to code generation.',
+            plan: state.plan,
+            targetFiles: state.targetFiles,
+            planApprovalStatus: 'PENDING_APPROVAL'
+          });
+
+          userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
+            pendingHitlResolver = resolve;
+          });
+
+          emitSSE('hitl_received', { response: userHitlResponse });
+        } else {
+          state.planApprovalStatus = 'REJECTED';
+          skippedStages.push('coder', 'testrunner', 'debugger', 'reviewer');
+          await finalizeExecution('ABORTED', { message: 'Plan rejected by user max retries reached.', planApprovalStatus: 'REJECTED' });
+          return;
+        }
       }
+      // --- END OF FIX FOR ISSUE #2 ---
 
       if (userHitlResponse.action === 'feedback' && userHitlResponse.message) {
         state.planApprovalStatus = 'FEEDBACK_SUBMITTED';
@@ -1020,7 +1086,9 @@ Directives:
           const debugResult = await debuggerAgentNode(state);
           completedStages.push('debugger');
           if (debugResult.filePatches && debugResult.filePatches.length > 0) {
-            saveFilePatchesToServerDisk(debugResult.filePatches);
+            const diffCards = await prepareDiffCards(debugResult.filePatches);
+            const writeResult = saveFilePatchesToServerDiskWithVerification(debugResult.filePatches, emitSSE);
+            console.log(`[CoderAgent] Verified write: ${writeResult.successCount}/${debugResult.filePatches.length} files`);
           }
           persistenceEngine.saveCheckpoint(sessionId, `DebuggerAgent_Retry_${state.retryCount}`, state);
 
@@ -1051,6 +1119,24 @@ Directives:
         result: reviewResult
       });
 
+      // --- START OF FIX FOR ISSUE #3 ---
+      try {
+        // Option A: Use custom validator if available
+        if (typeof (universalValidator as any)?.validateWorkspace === 'function') {
+          await (universalValidator as any).validateWorkspace(state.targetFiles);
+        } else {
+          // Option B: Fallback to a zero-emit syntax/type check
+          execSync('npx tsc --noEmit', { cwd: './src/sandbox' });
+        }
+      } catch (error: any) {
+        // Feed errors straight to the self-healing loop
+        (state as any).compilerError = error.message || String(error);
+        if (typeof debuggerAgentNode === 'function') {
+          await debuggerAgentNode(state);
+        }
+      }
+      // --- END OF FIX FOR ISSUE #3 ---
+
       await finalizeExecution('SUCCESS', {
         filePatches: coderOutput.filePatches,
         diffCards: await prepareDiffCards(coderOutput.filePatches || []),
@@ -1072,12 +1158,12 @@ async function prepareDiffCards(filePatches: GeneratedFilePatch[]) {
     let originalCode = "";
     const fullPath = path.resolve(process.cwd(), patch.filePath);
     if (fs.existsSync(fullPath)) {
-      originalCode = fs.readFileSync(fullPath, 'utf-8');
+      originalCode = fs.readFileSync(fullPath, 'utf-8').replace(/\r\n/g, '\n');
     }
     cards.push({
       filePath: patch.filePath,
       originalCode,
-      generatedCode: patch.code
+      generatedCode: (patch.code || '').replace(/\r\n/g, '\n')
     });
   }
   return cards;

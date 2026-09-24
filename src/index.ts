@@ -60,7 +60,11 @@ async function executeAgentPipeline(userInput: string) {
     mcpActions: [],
     dockerSandboxActive: false,
     structuredFailures: [],
-    errorsEncountered: 0
+    errorsEncountered: 0,
+    lastPlan: undefined,
+    planTimestamp: undefined,
+    canRetry: true,
+    rejectionReason: undefined
   };
 
   persistenceEngine.saveCheckpoint(sessionId, 'INITIALIZED', state);

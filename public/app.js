@@ -715,7 +715,12 @@ document.addEventListener('DOMContentLoaded', () => {
           renderBrowserInspectionUI(data);
         } else {
           finalizeStepper(data);
-          if (data.targetFiles && data.targetFiles[0]) {
+          if (data.route === 'DELETE_FILES' || data.route === 'ROUTED_DELETE_FILES') {
+            activeFilePath = '';
+            if (codeEditor) codeEditor.value = '';
+            updateLineNumbers();
+            renderTargetBadges([]);
+          } else if (data.targetFiles && data.targetFiles[0]) {
             openFileInEditor(data.targetFiles[0]);
           }
           if (data.route === 'EXPLAIN_CODE' || data.status === 'EXPLAIN_COMPLETE' || data.explanation) {
@@ -1230,16 +1235,36 @@ document.addEventListener('DOMContentLoaded', () => {
       const card = document.createElement('div');
       card.className = 'gen-card diff-card';
 
-      const origLines = (cardData.originalCode || '').split('\n');
-      const genLines = (cardData.generatedCode || '').split('\n');
+      const origLinesRaw = (cardData.originalCode || '').replace(/\r\n/g, '\n').split('\n');
+      const genLinesRaw = (cardData.generatedCode || '').replace(/\r\n/g, '\n').split('\n');
+
+      const origLinesNormalized = origLinesRaw.map(l => l.trim());
+      const genLinesNormalized = genLinesRaw.map(l => l.trim());
 
       let diffHtml = '';
-      genLines.forEach((line, idx) => {
-        const isNew = !origLines.includes(line);
-        const lineClass = isNew ? 'diff-line add' : 'diff-line';
-        const prefix = isNew ? '+ ' : '  ';
-        diffHtml += `<div class="${lineClass}">${prefix}${escapeHtml(line)}</div>`;
-      });
+      const hasOriginal = cardData.originalCode && cardData.originalCode.trim().length > 0;
+
+      if (!hasOriginal) {
+        genLinesRaw.forEach(line => {
+          diffHtml += `<div class="diff-line add">+ ${escapeHtml(line)}</div>`;
+        });
+      } else {
+        // 1. Render removed lines (-)
+        origLinesRaw.forEach((origLine) => {
+          const norm = origLine.trim();
+          if (norm.length > 0 && !genLinesNormalized.includes(norm)) {
+            diffHtml += `<div class="diff-line del">- ${escapeHtml(origLine)}</div>`;
+          }
+        });
+        // 2. Render added (+) and unchanged lines
+        genLinesRaw.forEach((genLine) => {
+          const norm = genLine.trim();
+          const isNew = norm.length > 0 ? !origLinesNormalized.includes(norm) : false;
+          const lineClass = isNew ? 'diff-line add' : 'diff-line';
+          const prefix = isNew ? '+ ' : '  ';
+          diffHtml += `<div class="${lineClass}">${prefix}${escapeHtml(genLine)}</div>`;
+        });
+      }
 
       card.innerHTML = `
         <div class="diff-card-header">

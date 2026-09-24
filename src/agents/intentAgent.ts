@@ -165,7 +165,21 @@ export function isGeneralQuery(input: string): boolean {
   const gkStartersRegex = /^(who is|whats|what is|where is|when did|why is|how is|tell me|explain who|explain what|do you know|is it|are you|can you tell|how far|how many|who was|what was|my name|whats my name|what is my name|who am i)/i;
   if (gkStartersRegex.test(trimmed)) return true;
 
-  // 3. Short prompts without any coding keywords (e.g., "who is nole?", "my name is carlitos")
+  // 3. Person, celebrity, sports & entity query patterns (e.g. "djokovic is strong", "is federer good", "nole", "messi stats", "schedule", "time")
+  const personEntityPatterns = [
+    /\b(who is|who was|who are|tell me about|information on|news about|stats of|details of)\b/i,
+    /\b(djokovic|nole|federer|nadal|alcaraz|sinner|messi|ronaldo|lebron|curry|kobe|jordan|mbappe|haaland|kohli|rohit|dhoni)\b/i,
+    /\b(is|was|are|does|can|has|will)\s+.*?\s+(strong|good|great|fast|rich|famous|tall|old|young|active|retired|playing|the goat|goat|best|worst|winning|champion|match|player|athlete)\b/i,
+    /\b(weather|temperature|forecast|score|match|schedule|tournament|grand slam|world cup|olympics|championship|time|today|now)\b/i
+  ];
+
+  for (const pattern of personEntityPatterns) {
+    if (pattern.test(trimmed)) {
+      return true;
+    }
+  }
+
+  // 4. Short prompts without any coding keywords (e.g., "who is nole?", "my name is carlitos", "djokovic is strong")
   if (trimmed.length < 150) return true;
 
   return false;
@@ -211,18 +225,18 @@ export function isAmbiguousQuery(input: string): boolean {
 export function isDeleteQuery(input: string): boolean {
   const rawPrompt = extractRawUserPrompt(input).toLowerCase().trim();
 
-  // Guard: Code element edits inside a file (e.g., "remove std::", "remove comments", "remove unused imports", "remove function", "remove line")
-  const isCodeEdit = /\b(std::|std|comment|comments|import|imports|function|method|class|variable|line|code|prefix|namespace|log|print|unused)\b/i.test(rawPrompt);
-  const isInsideFileRefactor = /\b(from|inside|in)\s+.*\b(file|files|code|class|cpp|ts|py|js)\b/i.test(rawPrompt);
+  // Guard: Code element edits inside a file (e.g., "remove all comments", "remove unused imports", "remove function", "remove line", "refactor auth.ts")
+  const isCodeEdit = /\b(std::|std|comment|comments|import|imports|function|method|class|variable|line|lines|code|prefix|namespace|log|print|unused)\b/i.test(rawPrompt);
+  const isInsideFileRefactor = /\b(from|inside|in|refactor|update|edit|clean)\s+.*\b(file|files|code|class|cpp|ts|py|js|auth\.ts|main\.ts)\b/i.test(rawPrompt) || /\brefactor\b/i.test(rawPrompt);
 
-  if (isCodeEdit && (isInsideFileRefactor || /\b(remove|delete)\s+(std|comment|comments|import|function|line|log|print|unused|prefix|namespace)\b/i.test(rawPrompt))) {
+  if (isCodeEdit && (isInsideFileRefactor || /\b(remove|delete)\s+(all\s+)?(inline\s+)?(std|comment|comments|import|imports|function|line|lines|log|print|unused|prefix|namespace)\b/i.test(rawPrompt))) {
     return false;
   }
 
-  // Explicit File / Directory Deletion intent (including "both files", "these files", "2 files")
-  const explicitFileDelete = /\b(delete|delte|delt|deleate|remove|clear|wipe|erase|unlink|destroy)\s+(the\s+)?(both|these|those|two|selected|\d+\s+)?(file|files|folder|directory|sandbox|workspace|everything|all)\b/i;
-  const explicitPathDelete = /\b(delete|remove|unlink|rm)\s+[a-zA-Z0-9_\-\/]+\.(cpp|py|ts|js|json|html|css|txt)\b/i;
-  const deleteAllPattern = /\b(delete|remove|clear|wipe)\s+(both|all|everything)\b/i;
+  // Explicit File / Directory Deletion intent (including "both files", "these files", "2 files", "delete all files", "delete all work")
+  const explicitFileDelete = /\b(delete|delte|delt|deleate|remove|clear|wipe|erase|unlink|destroy)\s+(the\s+)?(both|these|those|two|selected|\d+\s+)?(file|files|folder|directory|sandbox|workspace|everything|work)\b/i;
+  const explicitPathDelete = /\b(delete|remove|unlink|rm)\s+(the\s+file\s+)?([a-zA-Z0-9_\-\/]+\.(cpp|py|ts|js|json|html|css|txt))\b/i;
+  const deleteAllPattern = /\b(delete|remove|clear|wipe)\s+(both\s+files|all\s+files|all\s+the\s+files|all\s+work|everything)\b/i;
 
   if (explicitFileDelete.test(rawPrompt) || explicitPathDelete.test(rawPrompt) || deleteAllPattern.test(rawPrompt)) {
     return true;

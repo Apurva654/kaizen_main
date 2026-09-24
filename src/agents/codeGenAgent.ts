@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { ChatGroq } from '@langchain/groq';
 import * as dotenv from 'dotenv';
+import * as fs from 'fs';
+import * as path from 'path';
 import { KaizenState, PlanStep } from '../state';
 import { langfuseTracer } from '../tools/langfuseTracer';
 
@@ -73,6 +75,138 @@ export interface GeneratedFilePatch {
   code: string;
   imports?: string[];
 }
+
+// --- FIX FOR ISSUE #2 START ---
+/**
+ * Verify that a file was successfully written to disk
+ * @param filePath Absolute path to the file
+ * @returns true if file exists and contains content, false otherwise
+ */
+export function verifyFileWasWritten(filePath: string): boolean {
+  try {
+    if (!fs.existsSync(filePath)) {
+      console.error(`[FileVerification] File does not exist: ${filePath}`);
+      return false;
+    }
+    const stat = fs.statSync(filePath);
+    if (stat.size === 0) {
+      console.warn(`[FileVerification] File is empty: ${filePath}`);
+      return false;
+    }
+    const content = fs.readFileSync(filePath, 'utf-8');
+    // Check if file contains error markers (sign of failed generation)
+    if (content.includes('// File not found:') || content.includes('# File not found:')) {
+      console.error(`[FileVerification] File contains error marker: ${filePath}`);
+      return false;
+    }
+    return true;
+  } catch (err: any) {
+    console.error(`[FileVerification] Error checking file ${filePath}:`, err?.message || err);
+    return false;
+  }
+}
+
+/**
+ * Write patches to disk and verify each one
+ * @param patches Array of file patches to write
+ * @param emitSSE Optional SSE emitter for progress reporting
+ * @returns Object containing success count, failed files, and verified paths
+ */
+export function saveFilePatchesToServerDiskWithVerification(
+  patches: GeneratedFilePatch[],
+  emitSSE?: (eventType: string, data: any) => void
+): { successCount: number; failedFiles: string[]; verifiedPaths: string[] } {
+  const failedFiles: string[] = [];
+  const verifiedPaths: string[] = [];
+  let successCount = 0;
+
+  for (const patch of patches) {
+    if (isProtectedFile(patch.filePath)) {
+      console.warn(`[CodeGen] Skipping protected file: ${patch.filePath}`);
+      failedFiles.push(patch.filePath);
+      continue;
+    }
+
+    try {
+      const fullPath = path.resolve(process.cwd(), patch.filePath);
+      const dir = path.dirname(fullPath);
+      
+      // Create directory if needed
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
+      // Clean code before writing
+      let cleanCode = patch.code || '';
+      if (cleanCode.includes('\\n')) {
+        cleanCode = cleanCode.replace(/\\n/g, '\n').replace(/\\"/g, '"');
+      }
+
+      // Write file to disk
+      fs.writeFileSync(fullPath, cleanCode, 'utf-8');
+
+      // --- VERIFICATION STEP (FIX FOR ISSUE #2) ---
+      if (verifyFileWasWritten(fullPath)) {
+        successCount++;
+        verifiedPaths.push(patch.filePath);
+        console.log(`[CodeGen] ✅ Successfully created: ${patch.filePath}`);
+        
+        // Emit SSE event for this file
+        if (emitSSE) {
+          emitSSE('agent_step', {
+            agent: 'CoderAgent',
+            status: 'file_written',
+            message: `✅ File created: ${patch.filePath}`,
+            filePath: patch.filePath,
+            fileSize: fs.statSync(fullPath).size
+          });
+        }
+      } else {
+        failedFiles.push(patch.filePath);
+        console.error(`[CodeGen] ❌ Verification failed for: ${patch.filePath}`);
+        
+        if (emitSSE) {
+          emitSSE('agent_step', {
+            agent: 'CoderAgent',
+            status: 'file_write_failed',
+            message: `❌ File verification failed: ${patch.filePath}`,
+            filePath: patch.filePath
+          });
+        }
+      }
+    } catch (err: any) {
+      failedFiles.push(patch.filePath);
+      console.error(`[CodeGen] Failed to write patch ${patch.filePath}:`, err?.message || err);
+      
+      if (emitSSE) {
+        emitSSE('agent_step', {
+          agent: 'CoderAgent',
+          status: 'file_write_error',
+          message: `❌ Error writing ${patch.filePath}: ${err?.message || err}`,
+          filePath: patch.filePath,
+          error: err?.message || String(err)
+        });
+      }
+    }
+  }
+
+  // Emit final summary
+  if (emitSSE) {
+    emitSSE('agent_step', {
+      agent: 'CoderAgent',
+      status: 'file_write_summary',
+      message: `📊 File Creation Summary: ${successCount} created, ${failedFiles.length} failed`,
+      successCount,
+      failedCount: failedFiles.length,
+      totalAttempted: patches.length,
+      verifiedPaths,
+      failedFiles
+    });
+  }
+
+  return { successCount, failedFiles, verifiedPaths };
+}
+// --- FIX FOR ISSUE #2 END ---
 
 export async function codeGenAgentNode(state: typeof KaizenState.State) {
   const planTargetFiles = (state.plan || [])

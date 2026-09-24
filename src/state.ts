@@ -8,6 +8,10 @@ export interface PlanStep {
   action?: string;
   isNewFile?: boolean;
   dependencies?: string[];
+  requiresApproval?: boolean;
+  appliedPatch?: boolean;
+  userApprovedFile?: boolean;
+  patchId?: string;
 }
 
 export const KaizenState = Annotation.Root({
@@ -61,8 +65,29 @@ export const KaizenState = Annotation.Root({
   }),
 
   retryCount: Annotation<number>({
-    reducer: (x, y) => (y === 1 ? x + 1 : y),
+    reducer: (x, y) => y !== undefined ? y : x,
     default: () => 0
+  }),
+
+  // ✅ ADD THESE NEW FIELDS
+  lastPlan: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
+
+  planTimestamp: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
+
+  canRetry: Annotation<boolean>({
+    reducer: (_, y) => y,
+    default: () => true
+  }),
+
+  rejectionReason: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
   }),
 
   status: Annotation<string>({
@@ -157,6 +182,3 @@ export const KaizenState = Annotation.Root({
 });
 
 export type KaizenStateType = typeof KaizenState.State;
-
-
-

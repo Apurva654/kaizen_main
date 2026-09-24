@@ -307,27 +307,38 @@ function formatSmartStepDescription(userQuery: string, targetFile: string, idx: 
   if (queryLower.includes('remove std') || queryLower.includes('using namespace std')) {
     return `Refactor \`using namespace std;\` in ${targetFile}`;
   }
-  if (queryLower.includes('remove comment') || queryLower.includes('delete comment') || queryLower.includes('clean comment')) {
-    return `Remove inline comments and clean code in ${targetFile}`;
+  if (queryLower.includes('remove comment') || queryLower.includes('delete comment') || queryLower.includes('clean comment') || queryLower.includes('inline comment')) {
+    return `Remove inline comments and clean code structure in ${targetFile}`;
   }
   if (queryLower.includes('oops') || queryLower.includes('class') || queryLower.includes('object')) {
-    return `Implement Object-Oriented C++ structure in ${targetFile}`;
+    return `Implement Object-Oriented structure in ${targetFile}`;
   }
   if (queryLower.includes('description') || queryLower.includes('nole')) {
-    return `Write character description and utility logic in ${targetFile}`;
+    return `Write description and utility logic in ${targetFile}`;
   }
 
   let verb = 'Implement';
   if (/\b(add|create|make|write|generate)\b/i.test(queryLower)) verb = 'Create';
-  else if (/\b(remove|delete|clean|clear|strip)\b/i.test(queryLower)) verb = 'Refactor';
+  else if (/\b(remove|delete|clean|clear|strip|refactor)\b/i.test(queryLower)) verb = 'Refactor';
   else if (/\b(fix|debug|repair|correct)\b/i.test(queryLower)) verb = 'Fix';
   else if (/\b(update|modify|change|edit)\b/i.test(queryLower)) verb = 'Update';
   else if (/\b(test|spec|verify)\b/i.test(queryLower)) verb = 'Test';
 
-  let subject = userQuery.replace(/^(please|pls|can you|help me|make|create|write|add|remove|delete|update|fix)\s+/i, '').slice(0, 40).trim();
-  if (!subject) subject = 'requested changes';
+  // Clean raw prompt string: strip conversational prefixes and file paths
+  let cleanSubject = userQuery
+    .replace(/^(please|pls|can you|help me|make|create|write|add|remove|delete|update|fix|refactor|clean)\s+/i, '')
+    .replace(/\b(in|from|inside|for|of)\s+src\/sandbox\/[a-zA-Z0-9_\-\.]+/gi, '')
+    .replace(/\bsrc\/sandbox\/[a-zA-Z0-9_\-\.]+/gi, '')
+    .replace(/\b[a-zA-Z0-9_\-]+\.(ts|py|cpp|js|java|rs|go|json|html|css)\b/gi, '')
+    .replace(/^(to|and|the|a|an)\s+/i, '')
+    .trim();
 
-  return `${verb} ${subject} in ${targetFile}`;
+  cleanSubject = cleanSubject.slice(0, 50).trim();
+  if (!cleanSubject || cleanSubject.length < 3) {
+    cleanSubject = 'requested code changes';
+  }
+
+  return `${verb} ${cleanSubject} in ${targetFile}`;
 }
 
 function buildModularFallbackPlan(userQuery: string, targetFiles: string[]): PlanStep[] {

@@ -118,6 +118,21 @@ export async function contextRetrievalAgentNode(state: typeof KaizenState.State)
     }
   }
 
+// --- START OF FIX FOR ISSUE #5 ---
+  if (targetFiles && targetFiles.length > 0) {
+    let preservedContext = '';
+    for (const filename of targetFiles) {
+      const relName = filename.replace(/^src\/sandbox[\/\\]/, '');
+      const fullPath = path.join('src/sandbox', relName);
+      if (fs.existsSync(fullPath)) {
+        const existingContent = fs.readFileSync(fullPath, 'utf-8');
+        preservedContext += `\n=== PRE-EXISTING FILE CONTENT FOR ${filename} ===\n${existingContent}\n`;
+      }
+    }
+    extractedContext = preservedContext + (extractedContext || '');
+  }
+// --- END OF FIX FOR ISSUE #5 ---
+
   console.log(`[ContextRetrievalAgent] Successfully completed workspace scan. Target files: ${targetFiles.join(', ')}`);
 
   return {
