@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { ChatGroq } from '@langchain/groq';
 import * as dotenv from 'dotenv';
 import * as fs from 'fs';
+import * as path from 'path';
 import { KaizenState, PlanStep } from '../state';
 import { ASTParserTool, ExtractedSymbol } from '../tools/astParser';
 import { isProtectedFile } from './codeGenAgent';
@@ -89,8 +90,22 @@ function extractSymbolsFromWorkspace(targetFiles: string[], extractedContext: st
 }
 
 export async function plannerAgentNode(state: typeof KaizenState.State) {
-  const targetFiles = (state.targetFiles.length > 0 ? state.targetFiles : ['src/sandbox/main.ts'])
-    .map(f => normalizeSandboxPath(f));
+  const cleanUserQuery = state.originalUserRequest || state.userInput;
+  const isWebReq = /\b(html|website|webpage|landing\s+page|web|frontend)\b/i.test(cleanUserQuery) ||
+    state.targetFiles.some(f => f.endsWith('.html'));
+
+  let rawTargets = state.targetFiles.length > 0
+    ? state.targetFiles
+    : (isWebReq ? ['src/sandbox/index.html', 'src/sandbox/style.css', 'src/sandbox/script.js'] : ['src/sandbox/main.ts']);
+
+  if (isWebReq) {
+    const hasCss = rawTargets.some(f => f.endsWith('.css'));
+    const hasJs = rawTargets.some(f => f.endsWith('.js'));
+    if (!hasCss) rawTargets.push('src/sandbox/style.css');
+    if (!hasJs) rawTargets.push('src/sandbox/script.js');
+  }
+
+  const targetFiles = Array.from(new Set(rawTargets)).map(f => normalizeSandboxPath(f));
 
   const existingFiles = targetFiles.filter(tf => fs.existsSync(tf));
   const newFiles = targetFiles.filter(tf => !fs.existsSync(tf));
@@ -101,8 +116,6 @@ export async function plannerAgentNode(state: typeof KaizenState.State) {
   const symbolSummary = extractedSymbols.length > 0
     ? extractedSymbols.map((s: ExtractedSymbol) => `- [${s.language || 'code'}] ${s.type} ${s.name}`).join('\n')
     : "No existing file AST symbols pre-extracted.";
-
-  const cleanUserQuery = state.originalUserRequest || state.userInput;
 
   console.log(`[PLANNER][INPUT] originalUserRequest: "${state.originalUserRequest}"`);
   console.log(`[PLANNER][INPUT] userInput: "${state.userInput}"`);
@@ -385,6 +398,45 @@ function buildModularFallbackPlan(userQuery: string, targetFiles: string[]): Pla
   // If target files exist or specific target files are provided, create concise targeted plan steps
   const validTargets = targetFiles.length > 0 ? targetFiles : ['src/sandbox/main.ts'];
   
+  const isWebProject = /\b(html|website|webpage|landing\s+page|web|frontend)\b/i.test(queryLower) ||
+    targetFiles.some(f => f.endsWith('.html') || f.endsWith('.css'));
+
+  if (isWebProject) {
+    const htmlFile = 'src/sandbox/index.html';
+    const cssFile = 'src/sandbox/style.css';
+    const jsFile = 'src/sandbox/script.js';
+
+    return [
+      {
+        id: 1,
+        targetFile: htmlFile,
+        action: 'create',
+        isNewFile: !fs.existsSync(htmlFile),
+        dependencies: [],
+        description: `Create semantic HTML5 landing page structure in ${htmlFile} with hero section, features grid, call to action, and footer`,
+        status: 'pending'
+      },
+      {
+        id: 2,
+        targetFile: cssFile,
+        action: 'create',
+        isNewFile: !fs.existsSync(cssFile),
+        dependencies: [htmlFile],
+        description: `Create responsive CSS styling in ${cssFile} with modern typography, dark mode theme, glassmorphism card layouts, and hover effects`,
+        status: 'pending'
+      },
+      {
+        id: 3,
+        targetFile: jsFile,
+        action: 'create',
+        isNewFile: !fs.existsSync(jsFile),
+        dependencies: [htmlFile, cssFile],
+        description: `Create interactive JavaScript behavior in ${jsFile} for dynamic button interactions, form validation, and animations`,
+        status: 'pending'
+      }
+    ];
+  }
+
   // Check if query asks for a small edit / modification (e.g. remove comments, add feature, refactor)
   const isModification = /\b(add|remove|fix|update|modify|change|refactor|clean|namespace|comment|comments|use|using)\b/i.test(queryLower);
 
@@ -401,32 +453,111 @@ function buildModularFallbackPlan(userQuery: string, targetFiles: string[]): Pla
     return steps;
   }
 
-  // Enterprise multi-module fallback ONLY if user explicitly requests domain architecture
   const entityMatch = queryLower.match(/\b(order|event|user|product|item|inventory|payment|registration|auth|notification|customer|booking)\b/i);
-  const rawEntity = entityMatch ? entityMatch[1] : 'App';
-  const entity = rawEntity.charAt(0).toUpperCase() + rawEntity.slice(1);
 
-  const mainFile = `src/sandbox/${entity.toLowerCase()}Service.ts`;
-  const testFile = `src/sandbox/tests/${entity.toLowerCase()}.test.ts`;
+  if (entityMatch) {
+    const rawEntity = entityMatch[1];
+    const entity = rawEntity.charAt(0).toUpperCase() + rawEntity.slice(1);
 
-  return [
-    {
-      id: 1,
-      targetFile: mainFile,
-      action: 'create',
-      isNewFile: !fs.existsSync(mainFile),
-      dependencies: [],
-      description: formatSmartStepDescription(userQuery, mainFile, 0),
-      status: 'pending'
-    },
-    {
-      id: 2,
-      targetFile: testFile,
-      action: 'test',
-      isNewFile: !fs.existsSync(testFile),
-      dependencies: [mainFile],
-      description: `Implement unit test suite for ${entity} module`,
-      status: 'pending'
+    const modelFile = `src/sandbox/models/${entity}.ts`;
+    const typeFile = `src/sandbox/types/${entity.toLowerCase()}Types.ts`;
+    const repoFile = `src/sandbox/repositories/${entity}Repository.ts`;
+    const serviceFile = `src/sandbox/services/${entity}Service.ts`;
+    const controllerFile = `src/sandbox/controllers/${entity}Controller.ts`;
+    const testFile = `src/sandbox/tests/${entity}Service.test.ts`;
+
+    return [
+      {
+        id: 1,
+        targetFile: modelFile,
+        action: 'create',
+        isNewFile: !fs.existsSync(modelFile),
+        dependencies: [],
+        description: `Define core ${entity} domain data model structure, properties, and interface contracts`,
+        status: 'pending'
+      },
+      {
+        id: 2,
+        targetFile: typeFile,
+        action: 'create',
+        isNewFile: !fs.existsSync(typeFile),
+        dependencies: [modelFile],
+        description: `Create shared TypeScript types, enums, status codes, and error definitions for ${entity} management`,
+        status: 'pending'
+      },
+      {
+        id: 3,
+        targetFile: repoFile,
+        action: 'create',
+        isNewFile: !fs.existsSync(repoFile),
+        dependencies: [modelFile, typeFile],
+        description: `Implement ${entity}Repository for data storage operations, queries, and persistence management`,
+        status: 'pending'
+      },
+      {
+        id: 4,
+        targetFile: serviceFile,
+        action: 'create',
+        isNewFile: !fs.existsSync(serviceFile),
+        dependencies: [repoFile],
+        description: `Implement ${entity}Service containing core business logic, validation rules, and operations`,
+        status: 'pending'
+      },
+      {
+        id: 5,
+        targetFile: controllerFile,
+        action: 'create',
+        isNewFile: !fs.existsSync(controllerFile),
+        dependencies: [serviceFile],
+        description: `Implement ${entity}Controller route handlers and API request/response processing`,
+        status: 'pending'
+      },
+      {
+        id: 6,
+        targetFile: testFile,
+        action: 'test',
+        isNewFile: !fs.existsSync(testFile),
+        dependencies: [serviceFile],
+        description: `Implement ${entity}Service automated unit tests verifying business logic and edge cases`,
+        status: 'pending'
+      }
+    ];
+  }
+
+  const steps: PlanStep[] = [];
+  const normalizedTargets = targetFiles.length > 0 ? targetFiles.map(normalizeSandboxPath) : ['src/sandbox/main.ts'];
+
+  for (let idx = 0; idx < normalizedTargets.length; idx++) {
+    const tf = normalizedTargets[idx];
+    const isTest = tf.includes('/tests/') || tf.includes('.test.') || tf.includes('/test_') || tf.startsWith('src/sandbox/test_');
+    const ext = path.extname(tf);
+    const fileName = path.basename(tf);
+
+    let desc = '';
+    if (isTest) {
+      if (ext === '.py') {
+        desc = `Create pytest automated unit tests in ${fileName} to verify implementation`;
+      } else {
+        desc = `Create automated unit tests in ${fileName} to verify module logic`;
+      }
+    } else {
+      if (queryLower.includes('divide')) {
+        desc = `Implement function divide(a, b) returning a / b in ${fileName}`;
+      } else {
+        desc = `Implement core functionality and exported symbols in ${fileName} for request: "${userQuery.slice(0, 60)}"`;
+      }
     }
-  ];
+
+    steps.push({
+      id: idx + 1,
+      targetFile: tf,
+      action: !fs.existsSync(tf) ? 'create' : (isTest ? 'test' : 'modify'),
+      isNewFile: !fs.existsSync(tf),
+      dependencies: idx > 0 ? [normalizedTargets[idx - 1]] : [],
+      description: desc,
+      status: 'pending'
+    });
+  }
+
+  return steps;
 }

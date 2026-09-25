@@ -74,9 +74,9 @@ export class DockerSandboxEngine {
       console.warn(`[DockerSandbox] Container execution failed (${dockerResult.output}), attempting Process Sandbox fallback...`);
     }
 
-    // Local Process Sandbox Fallback (Isolated CWD: src/sandbox/)
+    // Local Process Sandbox Fallback
     return new Promise((resolve) => {
-      exec(command, { cwd: sandboxDir, timeout: 15000 }, (error, stdout, stderr) => {
+      exec(command, { cwd: workDir, env: { ...process.env, PYTHONPATH: workDir }, timeout: 15000 }, (error, stdout, stderr) => {
         const combined = (stdout + '\n' + stderr).trim();
         const exitCode = error ? (error.code || 1) : 0;
         resolve({

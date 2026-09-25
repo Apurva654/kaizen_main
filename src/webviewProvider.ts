@@ -10,7 +10,8 @@ import { codeGenAgentNode, isProtectedFile, GeneratedFilePatch } from './agents/
 import { reviewerAgentNode } from './agents/reviewerAgent';
 import { debuggerAgentNode } from './agents/debuggerAgent';
 import { runWorkspaceTests, extractFailingFilesFromLogs } from './tools/testRunner';
-import { preprocessUserRequest, saveAgentState, loadAgentState, recordConversationTurn } from './tools/context-manager';
+import { preprocessUserRequest, saveAgentState, loadAgentState, recordConversationTurn } from './context/contextManager';
+import { memoryEngine } from './context/memory/memoryEngine';
 import { ocrService } from './tools/ocrService';
 
 export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
@@ -87,6 +88,7 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
   }
 
   public async runAgentPipeline(rawUserInput: string, imagePayload?: string) {
+    memoryEngine.stateMemory.clearState();
     this.postMessageToWebview('PIPELINE_START', { userInput: rawUserInput, timestamp: new Date().toISOString() });
 
     let extractedImageText = '';
@@ -483,6 +485,108 @@ Directives:
         return;
       }
 
+      // Routing Logic for Memory Write Operations
+      if (state.status === "ROUTED_MEMORY_WRITE") {
+        skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
+        state.targetFiles = [];
+        state.plan = [];
+
+        const { memoryEngine } = await import('./context/memory/memoryEngine');
+        memoryEngine.consolidator.consolidateTurn(rawUserInput, 'Acknowledged memory preference.');
+
+        const factsAdded: { key: string; value: string; category: string }[] = [];
+
+        if (/typescript/i.test(rawUserInput) && /strict/i.test(rawUserInput)) {
+          const f1 = memoryEngine.longTermMemory.addFact('coding_convention', 'TypeScript Strict Mode', 'Enabled / Preferred', 'user_explicit');
+          factsAdded.push({ key: f1.key, value: f1.value, category: f1.category });
+        }
+
+        if (/typescript/i.test(rawUserInput) && /backend/i.test(rawUserInput)) {
+          const f2 = memoryEngine.longTermMemory.addFact('project_fact', 'Backend Language', 'TypeScript', 'user_explicit');
+          factsAdded.push({ key: f2.key, value: f2.value, category: f2.category });
+        }
+
+        if (/tailwind/i.test(rawUserInput)) {
+          const f3 = memoryEngine.longTermMemory.addFact('coding_convention', 'UI Styling Framework', 'Tailwind CSS', 'user_explicit');
+          factsAdded.push({ key: f3.key, value: f3.value, category: f3.category });
+        }
+
+        if (factsAdded.length === 0) {
+          const keyMatch = rawUserInput.match(/(?:remember|preference|convention|we use|we prefer)\s+([^:.]+)/i);
+          const key = keyMatch && keyMatch[1] ? keyMatch[1].trim() : 'Project Preference';
+          const fGen = memoryEngine.longTermMemory.addFact('project_fact', key, rawUserInput, 'user_explicit');
+          factsAdded.push({ key: fGen.key, value: fGen.value, category: fGen.category });
+        }
+
+        const factItemsMarkdown = factsAdded.map(f => `✓ **${f.key}**: ${f.value}`).join('\n');
+        const explanation = `### 🧠 Memory Updated
+
+${factItemsMarkdown}
+
+- **Memory Type**: Long-Term Project Memory
+- **Files Modified**: 0
+- **Plan Steps**: 0
+- **Persistence**: \`.kaizen/storage/memory/long-term.json\`
+- **Route**: Memory Write`;
+
+        completedStages.push('response');
+        await finalizeExecution('COMPLETED', {
+          route: 'ROUTED_MEMORY_WRITE',
+          memoryUpdated: true,
+          targetFiles: [],
+          plan: [],
+          filePatches: [],
+          memoryRecordsUpdated: factsAdded.length,
+          explanation
+        });
+        return;
+      }
+
+      // Routing Logic for Memory Read Operations
+      if (state.status === "ROUTED_MEMORY_READ") {
+        skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
+        state.targetFiles = [];
+        state.plan = [];
+
+        const { memoryEngine } = await import('./context/memory/memoryEngine');
+        const queryRes = memoryEngine.retrieveRelevant({ prompt: rawUserInput });
+
+        const longTermFacts = queryRes.longTermMemory;
+        const episodicEpisodes = queryRes.episodicMemory;
+
+        let explanation = `### 🧠 Memory Recall\n\n`;
+
+        if (longTermFacts.length > 0) {
+          explanation += `#### 📌 Relevant Project Memories\n`;
+          for (const f of longTermFacts) {
+            explanation += `- **${f.key}**: ${f.value} *(Category: ${f.category})*\n`;
+          }
+          explanation += `\n`;
+        } else {
+          explanation += `*(No long-term project facts match this query)*\n\n`;
+        }
+
+        if (episodicEpisodes.length > 0) {
+          explanation += `#### 📜 Previous Experience Episodes\n`;
+          for (const ep of episodicEpisodes) {
+            explanation += `- **${ep.task}**: ${ep.solution} *(Outcome: ${ep.outcome.toUpperCase()})*\n`;
+          }
+          explanation += `\n`;
+        }
+
+        explanation += `- **Files Modified**: 0\n- **Plan Steps**: 0\n- **Route**: Memory Read`;
+
+        completedStages.push('response');
+        await finalizeExecution('COMPLETED', {
+          route: 'ROUTED_MEMORY_READ',
+          targetFiles: [],
+          plan: [],
+          filePatches: [],
+          explanation
+        });
+        return;
+      }
+
       // 2. Context Retrieval Agent
       postWebviewEvent('AGENT_STEP', { agent: 'ContextRetrievalAgent', status: 'running', message: 'Analyzing workspace AST symbols...' });
       const retrievalOutput = await contextRetrievalAgentNode(state);
@@ -530,6 +634,16 @@ Directives:
           }
 
           while (!testResult.passed && state.retryCount < MAX_SELF_HEAL_RETRIES) {
+            const isToolFailure = testResult.failureType === 'TOOL_EXECUTION_FAILURE' || testResult.structuredFailure?.failureType === 'TOOL_EXECUTION_FAILURE';
+            if (isToolFailure) {
+              postWebviewEvent('AGENT_STEP', {
+                agent: 'TestRunnerAgent',
+                status: 'error',
+                result: { summary: `[TOOL_EXECUTION_FAILURE] ${testResult.summary}. Source code files were preserved untouched.`, passed: false }
+              });
+              break;
+            }
+
             state.retryCount += 1;
 
             const discoveredFiles = extractFailingFilesFromLogs(`${testResult.summary}\n${testResult.stdout}\n${testResult.stderr}`);
@@ -701,6 +815,16 @@ Directives:
         const MAX_SELF_HEAL_RETRIES = 3;
         if (!testResult.passed) {
           while (!testResult.passed && state.retryCount < MAX_SELF_HEAL_RETRIES) {
+            const isToolFailure = testResult.failureType === 'TOOL_EXECUTION_FAILURE' || testResult.structuredFailure?.failureType === 'TOOL_EXECUTION_FAILURE';
+            if (isToolFailure) {
+              postWebviewEvent('AGENT_STEP', {
+                agent: 'TestRunnerAgent',
+                status: 'error',
+                result: { summary: `[TOOL_EXECUTION_FAILURE] ${testResult.summary}. Source code files were preserved untouched.`, passed: false }
+              });
+              break;
+            }
+
             state.retryCount += 1;
 
             const discoveredFiles = extractFailingFilesFromLogs(`${testResult.summary}\n${testResult.stdout}\n${testResult.stderr}`);

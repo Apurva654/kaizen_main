@@ -1252,6 +1252,62 @@ button [ref=e175] "Code Editor"
     });
   }
 
+  // 21. Four-Memory Architecture & Self-Healing Experience Reuse Tests
+  try {
+    const { runMemoryTests } = await import('./memoryTestRunner');
+    const memoryResults = await runMemoryTests();
+    results.push(...memoryResults);
+  } catch (memErr: any) {
+    results.push({
+      feature: 'Four-Memory Architecture Verification',
+      status: 'FAIL',
+      details: memErr?.message || String(memErr),
+      timestamp: new Date()
+    });
+  }
+
+  // 22. Self-Healing Pipeline Bug Fix Regression Suite (Tests A-G)
+  try {
+    const { runSelfHealingRegressionTests } = await import('./pipelineSelfHealingRegressionTest');
+    const regRes = await runSelfHealingRegressionTests();
+    for (const r of regRes.results) {
+      results.push({
+        feature: `Regression: ${r.name}`,
+        status: r.passed ? 'PASS' : 'FAIL',
+        details: r.details,
+        timestamp: new Date()
+      });
+    }
+  } catch (regErr: any) {
+    results.push({
+      feature: 'Self-Healing Pipeline Regression Suite',
+      status: 'FAIL',
+      details: regErr?.message || String(regErr),
+      timestamp: new Date()
+    });
+  }
+
+  // 23. HTML/Web Project Pipeline Regression Suite (Tests A-I)
+  try {
+    const { runWebProjectPipelineRegressionTests } = await import('./webProjectPipelineRegressionTest');
+    const webRegRes = await runWebProjectPipelineRegressionTests();
+    for (const r of webRegRes.results) {
+      results.push({
+        feature: `Web Regression: ${r.name}`,
+        status: r.passed ? 'PASS' : 'FAIL',
+        details: r.details,
+        timestamp: new Date()
+      });
+    }
+  } catch (webRegErr: any) {
+    results.push({
+      feature: 'Web Project Pipeline Regression Suite',
+      status: 'FAIL',
+      details: webRegErr?.message || String(webRegErr),
+      timestamp: new Date()
+    });
+  }
+
   // Console summary log
   const passed = results.filter(r => r.status === 'PASS').length;
   const failed = results.filter(r => r.status === 'FAIL').length;

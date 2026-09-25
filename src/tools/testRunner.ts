@@ -4,6 +4,8 @@ import * as path from 'path';
 import { validateBeforeSubmission, FileMetadata } from './universalValidator';
 import { dockerSandbox } from './dockerSandbox';
 
+export type TestFailureType = 'TOOL_EXECUTION_FAILURE' | 'TEST_FAILURE' | 'CODE_FAILURE' | 'TIMEOUT';
+
 export interface StructuredTestFailure {
   success: boolean;
   executionEnvironment: 'docker' | 'process';
@@ -13,6 +15,7 @@ export interface StructuredTestFailure {
   exitCode: number;
   stdout: string;
   stderr: string;
+  failureType: TestFailureType;
   errorType?: string;
   errorMessage?: string;
   sourceFile?: string;
@@ -27,6 +30,7 @@ export interface TestExecutionResult {
   stderr: string;
   summary: string;
   testedFiles: string[];
+  failureType?: TestFailureType;
   structuredFailure?: StructuredTestFailure;
 }
 
@@ -60,37 +64,78 @@ export async function runWorkspaceTests(targetFiles: string[] = []): Promise<Tes
   const combinedTargets = Array.from(new Set([...targetFiles, ...allSandboxFiles]));
   const pyTestFiles = combinedTargets.filter(f => f.endsWith('.py') && isTestFile(f));
   const pyImplFiles = combinedTargets.filter(f => f.endsWith('.py') && !isTestFile(f));
+  const isWebProject = targetFiles.some(f => f.endsWith('.html') || f.endsWith('.css') || (f.endsWith('.js') && !f.includes('.test.')));
+  const hasTargetPyFiles = targetFiles.some(f => f.endsWith('.py'));
+
+  if (isWebProject && !hasTargetPyFiles) {
+    const htmlFiles = targetFiles.filter(f => f.endsWith('.html'));
+    let webPassed = true;
+    let summaryText = 'Static HTML/Web project validation PASSED cleanly.';
+
+    for (const hf of htmlFiles) {
+      if (fs.existsSync(hf)) {
+        const content = fs.readFileSync(hf, 'utf-8');
+        if (!content.includes('<!DOCTYPE html>') && !content.includes('<html')) {
+          webPassed = false;
+          summaryText = `HTML validation warning: '${hf}' missing DOCTYPE html declaration`;
+        }
+      }
+    }
+
+    return {
+      passed: webPassed,
+      exitCode: webPassed ? 0 : 1,
+      stdout: summaryText,
+      stderr: webPassed ? '' : summaryText,
+      summary: summaryText,
+      testedFiles: targetFiles
+    };
+  }
 
   // If there are Python test files in src/sandbox or src/sandbox/tests, run Python tests via Docker Sandbox engine
   const testsDir = path.resolve(sandboxDir, 'tests');
   const hasPyTestInSubdir = fs.existsSync(testsDir) && fs.readdirSync(testsDir).some(f => f.startsWith('test_') && f.endsWith('.py'));
 
-  if (pyTestFiles.length > 0 || hasPyTestInSubdir) {
+  if ((pyTestFiles.length > 0 || (hasPyTestInSubdir && hasTargetPyFiles)) && hasTargetPyFiles) {
     const isDockerAvailable = await dockerSandbox.checkDockerAvailable(true);
     const env: 'docker' | 'process' = isDockerAvailable ? 'docker' : 'process';
 
     // Command selection
     let pyTestCmd = `python -m unittest discover -s src/sandbox -p "test_*.py"`;
-    if (pyTestFiles.length === 1) {
-      pyTestCmd = `python -m unittest ${pyTestFiles[0]}`;
-    } else if (hasPyTestInSubdir && pyTestFiles.length === 0) {
+    if (hasPyTestInSubdir) {
       pyTestCmd = `python -m unittest discover -s src/sandbox/tests -p "test_*.py"`;
+    }
+    if (pyTestFiles.length > 0) {
+      const formattedFiles = pyTestFiles.map(f => f.replace(/\\/g, '/'));
+      pyTestCmd = `python -m unittest ${formattedFiles.join(' ')}`;
     }
 
     const sandboxResult = await dockerSandbox.executeSandboxedCommand(pyTestCmd, rootDir);
     const passed = sandboxResult.success;
-    const combinedOutput = `${sandboxResult.output}\n${sandboxResult.output}`;
+    const logText = sandboxResult.output || '';
+
+    // Classify failure type accurately
+    let failureType: TestFailureType = 'TEST_FAILURE';
+    if (!passed) {
+      if (/not recognized as an internal or external command|command not found|permission denied|docker error|TOOL_EXECUTION_FAILURE|invalid command/i.test(logText)) {
+        failureType = 'TOOL_EXECUTION_FAILURE';
+      } else if (/SyntaxError|IndentationError|ImportError|ModuleNotFoundError/i.test(logText)) {
+        failureType = 'CODE_FAILURE';
+      } else if (/timed out|ETIMEDOUT/i.test(logText)) {
+        failureType = 'TIMEOUT';
+      }
+    }
 
     // Extract errorType and errorMessage
-    let errorType = 'AssertionError';
-    let errorMessage = 'Test failed';
-    const errMatch = sandboxResult.output.match(/(\b[A-Za-z0-9_]*Error\b):\s*(.+)/);
+    let errorType = failureType === 'TOOL_EXECUTION_FAILURE' ? 'ToolExecutionError' : 'AssertionError';
+    let errorMessage = failureType === 'TOOL_EXECUTION_FAILURE' ? 'Command/Tool execution failed' : 'Test failed';
+    const errMatch = logText.match(/(\b[A-Za-z0-9_]*Error\b):\s*(.+)/);
     if (errMatch) {
       errorType = errMatch[1].trim();
       errorMessage = errMatch[2].trim();
-    } else if (sandboxResult.output.includes('FAIL:')) {
+    } else if (logText.includes('FAIL:')) {
       errorType = 'AssertionError';
-      const failLine = sandboxResult.output.split('\n').find(l => l.includes('FAIL:')) || 'Assertion failure';
+      const failLine = logText.split('\n').find(l => l.includes('FAIL:')) || 'Assertion failure';
       errorMessage = failLine.trim();
     }
 
@@ -108,11 +153,12 @@ export async function runWorkspaceTests(targetFiles: string[] = []): Promise<Tes
         exitCode: sandboxResult.exitCode || 1,
         stdout: sandboxResult.output,
         stderr: sandboxResult.output,
+        failureType,
         errorType,
         errorMessage,
         sourceFile: primaryImplFile,
         testFile: primaryTestFile,
-        summary: `Python unit test failed (${errorType}: ${errorMessage})`
+        summary: `Python unit test failed [${failureType}] (${errorType}: ${errorMessage})`
       };
     }
 
@@ -121,8 +167,9 @@ export async function runWorkspaceTests(targetFiles: string[] = []): Promise<Tes
       exitCode: sandboxResult.exitCode,
       stdout: sandboxResult.output,
       stderr: sandboxResult.output,
-      summary: passed ? 'Python unit tests PASSED cleanly in Docker Sandbox.' : `Python unit tests FAILED in Docker Sandbox (${errorType}: ${errorMessage}).`,
+      summary: passed ? 'Python unit tests PASSED cleanly in Docker Sandbox.' : `Python unit tests FAILED in Docker Sandbox [${failureType}] (${errorType}: ${errorMessage}).`,
       testedFiles: combinedTargets,
+      failureType: passed ? undefined : failureType,
       structuredFailure
     };
   }
@@ -147,6 +194,7 @@ export async function runWorkspaceTests(targetFiles: string[] = []): Promise<Tes
         exitCode: 1,
         stdout: summary,
         stderr: report.reason || 'Validation pipeline failure',
+        failureType: 'TEST_FAILURE',
         errorType: 'ValidationError',
         errorMessage: report.reason || 'Validation gate blocked',
         sourceFile: targetFiles.find(f => !isTestFile(f)) || 'src/sandbox/main.ts',

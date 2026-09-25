@@ -39,18 +39,20 @@ export class PersistenceEngine {
   private sessionsDir: string;
   private checkpointsDir: string;
   private cacheDir: string;
+  private memoryDir: string;
 
   constructor(customBaseDir?: string) {
     this.baseDir = customBaseDir || path.resolve(process.cwd(), '.kaizen', 'storage');
     this.sessionsDir = path.join(this.baseDir, 'sessions');
     this.checkpointsDir = path.join(this.baseDir, 'checkpoints');
     this.cacheDir = path.join(this.baseDir, 'cache');
+    this.memoryDir = path.join(this.baseDir, 'memory');
 
     this.ensureDirectories();
   }
 
   private ensureDirectories() {
-    [this.baseDir, this.sessionsDir, this.checkpointsDir, this.cacheDir].forEach((dir) => {
+    [this.baseDir, this.sessionsDir, this.checkpointsDir, this.cacheDir, this.memoryDir].forEach((dir) => {
       if (!fs.existsSync(dir)) {
         try {
           fs.mkdirSync(dir, { recursive: true });
@@ -257,6 +259,70 @@ export class PersistenceEngine {
       console.warn(`[PersistenceEngine] Error reading workspace graph cache:`, err);
     }
     return null;
+  }
+
+  // --- Semantic Memory Layer Persistence ---
+
+  public getMemoryDir(): string {
+    return this.memoryDir;
+  }
+
+  public appendMemoryJsonl(fileName: string, record: any): boolean {
+    try {
+      this.ensureDirectories();
+      const filePath = path.join(this.memoryDir, fileName.endsWith('.jsonl') ? fileName : `${fileName}.jsonl`);
+      const line = JSON.stringify(record) + '\n';
+      fs.appendFileSync(filePath, line, 'utf-8');
+      return true;
+    } catch (err) {
+      console.error(`[PersistenceEngine] Error appending memory record to '${fileName}':`, err);
+      return false;
+    }
+  }
+
+  public readMemoryJsonl<T>(fileName: string): T[] {
+    try {
+      const filePath = path.join(this.memoryDir, fileName.endsWith('.jsonl') ? fileName : `${fileName}.jsonl`);
+      if (!fs.existsSync(filePath)) return [];
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const lines = content.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+      const records: T[] = [];
+      for (const line of lines) {
+        try {
+          records.push(JSON.parse(line));
+        } catch {
+          // Ignore corrupt line
+        }
+      }
+      return records;
+    } catch (err) {
+      console.error(`[PersistenceEngine] Error reading memory jsonl '${fileName}':`, err);
+      return [];
+    }
+  }
+
+  public writeMemoryJson(fileName: string, data: any): boolean {
+    try {
+      this.ensureDirectories();
+      const filePath = path.join(this.memoryDir, fileName.endsWith('.json') ? fileName : `${fileName}.json`);
+      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+      return true;
+    } catch (err) {
+      console.error(`[PersistenceEngine] Error writing memory json '${fileName}':`, err);
+      return false;
+    }
+  }
+
+  public readMemoryJson<T>(fileName: string): T | null {
+    try {
+      const filePath = path.join(this.memoryDir, fileName.endsWith('.json') ? fileName : `${fileName}.json`);
+      if (!fs.existsSync(filePath)) return null;
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      return JSON.parse(raw);
+    } catch (err) {
+      console.error(`[PersistenceEngine] Error reading memory json '${fileName}':`, err);
+      return null;
+    }
   }
 }
 

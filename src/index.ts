@@ -9,6 +9,7 @@ import { codeGenAgentNode, isProtectedFile } from './agents/codeGenAgent';
 import { reviewerAgentNode } from './agents/reviewerAgent';
 import { debuggerAgentNode } from './agents/debuggerAgent';
 import { persistenceEngine } from './tools/persistenceEngine';
+import { memoryEngine } from './context/memory/memoryEngine';
 
 function promptUserApproval(questionText: string): Promise<string> {
   const rl = readline.createInterface({
@@ -25,6 +26,7 @@ function promptUserApproval(questionText: string): Promise<string> {
 }
 
 async function executeAgentPipeline(userInput: string) {
+  memoryEngine.stateMemory.clearState();
   console.log(`\n=========================================`);
   console.log(`User Input: "${userInput}"`);
   console.log(`=========================================`);
@@ -100,6 +102,33 @@ async function executeAgentPipeline(userInput: string) {
     const res = await mcpInterface.executeTerminalCommand(state.userInput);
     console.log(`\n--- Terminal Execution Output ---`);
     console.log(res.output || res.error || '(clean output)');
+    return;
+  }
+
+  if (state.status === "ROUTED_MEMORY_WRITE") {
+    console.log("\n-> Executing Memory Write operation...");
+    const { memoryEngine } = await import('./context/memory/memoryEngine');
+    memoryEngine.consolidator.consolidateTurn(state.userInput, 'Acknowledged memory preference.');
+
+    if (/typescript/i.test(state.userInput) && /strict/i.test(state.userInput)) {
+      memoryEngine.longTermMemory.addFact('coding_convention', 'TypeScript Strict Mode', 'Enabled / Preferred', 'user_explicit');
+    }
+    if (/typescript/i.test(state.userInput) && /backend/i.test(state.userInput)) {
+      memoryEngine.longTermMemory.addFact('project_fact', 'Backend Language', 'TypeScript', 'user_explicit');
+    }
+    if (/tailwind/i.test(state.userInput)) {
+      memoryEngine.longTermMemory.addFact('coding_convention', 'UI Styling Framework', 'Tailwind CSS', 'user_explicit');
+    }
+
+    console.log("🧠 Memory Updated successfully. No code files modified.");
+    return;
+  }
+
+  if (state.status === "ROUTED_MEMORY_READ") {
+    console.log("\n-> Executing Memory Read operation...");
+    const { memoryEngine } = await import('./context/memory/memoryEngine');
+    console.log("\n=== REMEMBERED PROJECT KNOWLEDGE ===");
+    console.log(memoryEngine.longTermMemory.formatForPrompt());
     return;
   }
 

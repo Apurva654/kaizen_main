@@ -622,7 +622,22 @@ export class MCPUnifiedInterface {
     cwd: string = process.cwd(),
     options?: GitActionOptions
   ): Promise<MCPActionResult> {
-    const evalResult = permissionGate.evaluate('terminal_exec', { command });
+    const trimmedCmd = (command || '').trim();
+    if (!trimmedCmd || /^(execution|permission gate|command result|status|error|\[automated test)/i.test(trimmedCmd)) {
+      return {
+        success: false,
+        tool: 'terminal',
+        action: 'terminal_exec',
+        output: '',
+        error: `TOOL_EXECUTION_FAILURE: Invalid shell command '${command}'. Status headers or empty strings cannot be executed as a command.`,
+        riskScore: 100,
+        isSimulated: false,
+        approvalStatus: 'REJECTED',
+        requestedAction: 'terminal_exec'
+      };
+    }
+
+    const evalResult = permissionGate.evaluate('terminal_exec', { command: trimmedCmd });
     const isDryRun = options?.dryRun ?? permissionGate.isDryRunMode();
 
     if (isDryRun || permissionGate.isDryRunMode()) {

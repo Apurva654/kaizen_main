@@ -14,7 +14,8 @@ import { debuggerAgentNode } from './agents/debuggerAgent';
 import { langfuseTracer } from './tools/langfuseTracer';
 import { persistenceEngine } from './tools/persistenceEngine';
 import { runWorkspaceTests, extractFailingFilesFromLogs } from './tools/testRunner';
-import { preprocessUserRequest, saveAgentState, loadAgentState, recordConversationTurn } from './tools/context-manager';
+import { preprocessUserRequest, saveAgentState, loadAgentState, recordConversationTurn } from './context/contextManager';
+import { memoryEngine } from './context/memory/memoryEngine';
 import { ocrService } from './tools/ocrService';
 import { permissionGate, PermissionMode } from './tools/permissionGate';
 import { mcpInterface } from './mcp/mcpInterface';
@@ -28,6 +29,8 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, '../public')));
+app.use('/sandbox', express.static(path.resolve(process.cwd(), 'src/sandbox')));
+app.use('/src/sandbox', express.static(path.resolve(process.cwd(), 'src/sandbox')));
 
 // Server-Sent Events (SSE) Clients list
 let sseClients: Response[] = [];
@@ -211,6 +214,7 @@ function logDiagnostic(category: string, action: string, data: Record<string, an
 }
 
 async function runPipeline(rawUserInput: string, imagePayload?: string, clientSessionId?: string) {
+  memoryEngine.stateMemory.clearState();
   const sessionId = clientSessionId || persistenceEngine.generateSessionId();
   const runId = `run_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
   const createdAt = new Date().toISOString();
@@ -791,6 +795,126 @@ Directives:
       return;
     }
 
+    // Routing Logic for Memory Write Operations
+    if (state.status === "ROUTED_MEMORY_WRITE") {
+      skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
+      state.targetFiles = [];
+      state.plan = [];
+
+      const { memoryEngine } = await import('./context/memory/memoryEngine');
+      memoryEngine.consolidator.consolidateTurn(rawUserInput, 'Acknowledged memory preference.');
+
+      const factsAdded: { key: string; value: string; category: string }[] = [];
+
+      if (/typescript/i.test(rawUserInput) && /strict/i.test(rawUserInput)) {
+        const f1 = memoryEngine.longTermMemory.addFact('coding_convention', 'TypeScript Strict Mode', 'Enabled / Preferred', 'user_explicit');
+        factsAdded.push({ key: f1.key, value: f1.value, category: f1.category });
+      }
+
+      if (/typescript/i.test(rawUserInput) && /backend/i.test(rawUserInput)) {
+        const f2 = memoryEngine.longTermMemory.addFact('project_fact', 'Backend Language', 'TypeScript', 'user_explicit');
+        factsAdded.push({ key: f2.key, value: f2.value, category: f2.category });
+      }
+
+      if (/tailwind/i.test(rawUserInput)) {
+        const f3 = memoryEngine.longTermMemory.addFact('coding_convention', 'UI Styling Framework', 'Tailwind CSS', 'user_explicit');
+        factsAdded.push({ key: f3.key, value: f3.value, category: f3.category });
+      }
+
+      if (factsAdded.length === 0) {
+        const keyMatch = rawUserInput.match(/(?:remember|preference|convention|we use|we prefer)\s+([^:.]+)/i);
+        const key = keyMatch && keyMatch[1] ? keyMatch[1].trim() : 'Project Preference';
+        const fGen = memoryEngine.longTermMemory.addFact('project_fact', key, rawUserInput, 'user_explicit');
+        factsAdded.push({ key: fGen.key, value: fGen.value, category: fGen.category });
+      }
+
+      const factItemsMarkdown = factsAdded.map(f => `✓ **${f.key}**: ${f.value}`).join('\n');
+      const explanation = `### 🧠 Memory Updated
+
+${factItemsMarkdown}
+
+- **Memory Type**: Long-Term Project Memory
+- **Files Modified**: 0
+- **Plan Steps**: 0
+- **Persistence**: \`.kaizen/storage/memory/long-term.json\`
+- **Route**: Memory Write`;
+
+      completedStages.push('response');
+      await finalizeExecution('COMPLETED', {
+        route: 'ROUTED_MEMORY_WRITE',
+        memoryUpdated: true,
+        targetFiles: [],
+        plan: [],
+        filePatches: [],
+        memoryRecordsUpdated: factsAdded.length,
+        memory: {
+          type: 'long_term',
+          records: factsAdded,
+          persisted: true
+        },
+        explanation
+      });
+      return;
+    }
+
+    // Routing Logic for Memory Read Operations
+    if (state.status === "ROUTED_MEMORY_READ") {
+      skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
+      state.targetFiles = [];
+      state.plan = [];
+
+      const { memoryEngine } = await import('./context/memory/memoryEngine');
+      const queryRes = memoryEngine.retrieveRelevant({ prompt: rawUserInput });
+
+      const longTermFacts = queryRes.longTermMemory;
+      const episodicEpisodes = queryRes.episodicMemory;
+
+      let explanation = `### 🧠 Memory Recall\n\n`;
+
+      if (longTermFacts.length > 0) {
+        explanation += `#### 📌 Relevant Project Memories\n`;
+        for (const f of longTermFacts) {
+          explanation += `- **${f.key}**: ${f.value} *(Category: ${f.category})*\n`;
+        }
+        explanation += `\n`;
+      } else {
+        explanation += `*(No long-term project facts match this query)*\n\n`;
+      }
+
+      if (episodicEpisodes.length > 0) {
+        explanation += `#### 📜 Previous Experience Episodes\n`;
+        for (const ep of episodicEpisodes) {
+          explanation += `- **Task**: ${ep.task}\n`;
+          explanation += `  - **Outcome**: ${ep.outcome.toUpperCase()}\n`;
+          explanation += `  - **Tests Passed**: ${ep.testsPassed}\n`;
+          explanation += `  - **Affected Files**: ${ep.affectedFiles.join(', ') || 'N/A'}\n`;
+          explanation += `  - **Solution / Resolution**: ${ep.solution}\n`;
+          if (ep.errors && ep.errors.length > 0) {
+            explanation += `  - **Errors Encountered**: ${ep.errors.join('; ')}\n`;
+          }
+          if (ep.lessons && ep.lessons.length > 0) {
+            explanation += `  - **Lessons**: ${ep.lessons.join('; ')}\n`;
+          }
+          explanation += `\n`;
+        }
+      } else {
+        explanation += `*(No episodic experience episodes match this query)*\n\n`;
+      }
+
+      explanation += `- **Files Modified**: 0\n- **Plan Steps**: 0\n- **Route**: Memory Read`;
+
+      completedStages.push('response');
+      await finalizeExecution('COMPLETED', {
+        route: 'ROUTED_MEMORY_READ',
+        targetFiles: [],
+        plan: [],
+        filePatches: [],
+        explanation
+      });
+      return;
+    }
+
+
     // 2. Context Retrieval Agent
     logDiagnostic('GRAPH', 'ENTER ContextRetrievalAgent', { targetFiles: state.targetFiles });
     emitSSE('agent_step', { agent: 'ContextRetrievalAgent', status: 'running', message: 'Analyzing workspace graph & AST symbols...' });
@@ -845,6 +969,17 @@ Directives:
         }
 
         while (!testResult.passed && state.retryCount < MAX_SELF_HEAL_RETRIES) {
+          const isToolFailure = testResult.failureType === 'TOOL_EXECUTION_FAILURE' || testResult.structuredFailure?.failureType === 'TOOL_EXECUTION_FAILURE';
+          if (isToolFailure) {
+            logDiagnostic('SELF_HEAL', 'TOOL_EXECUTION_FAILURE_STOP', { summary: testResult.summary });
+            emitSSE('agent_step', {
+              agent: 'TestRunnerAgent',
+              status: 'error',
+              result: { summary: `[TOOL_EXECUTION_FAILURE] ${testResult.summary}. Source code files were preserved untouched.`, passed: false }
+            });
+            break;
+          }
+
           state.retryCount += 1;
 
           // Extract failing implementation file paths from test stack traces
@@ -1068,6 +1203,17 @@ Directives:
       const MAX_SELF_HEAL_RETRIES = 3;
       if (!testResult.passed) {
         while (!testResult.passed && state.retryCount < MAX_SELF_HEAL_RETRIES) {
+          const isToolFailure = testResult.failureType === 'TOOL_EXECUTION_FAILURE' || testResult.structuredFailure?.failureType === 'TOOL_EXECUTION_FAILURE';
+          if (isToolFailure) {
+            logDiagnostic('SELF_HEAL', 'TOOL_EXECUTION_FAILURE_STOP', { summary: testResult.summary });
+            emitSSE('agent_step', {
+              agent: 'TestRunnerAgent',
+              status: 'error',
+              result: { summary: `[TOOL_EXECUTION_FAILURE] ${testResult.summary}. Source code files were preserved untouched.`, passed: false }
+            });
+            break;
+          }
+
           state.retryCount += 1;
 
           const discoveredFiles = extractFailingFilesFromLogs(`${testResult.summary}\n${testResult.stdout}\n${testResult.stderr}`);
