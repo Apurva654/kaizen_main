@@ -71,19 +71,25 @@ export function parseBrowserInspectionResult(
     }
   }
 
+  let reportedErrorHeaderCount = 0;
+  let reportedHeaderStr = '';
+
   const lines = rawSnapshot.split('\n');
 
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    // Ignore meta summary header lines like "Console: 2 errors, 0 warnings"
-    if (/^console:\s*\d+\s*errors?/i.test(trimmed) || /^console\s*errors?\s*\(\d+\)/i.test(trimmed)) {
+    // Detect meta summary header lines like "Console: 2 errors, 0 warnings" or "Console: 1 error"
+    const summaryMatch = trimmed.match(/^console:\s*(\d+)\s*errors?/i) || trimmed.match(/^console\s*errors?\s*\(\s*(\d+)\s*\)/i);
+    if (summaryMatch) {
+      reportedErrorHeaderCount = parseInt(summaryMatch[1], 10);
+      reportedHeaderStr = trimmed;
       continue;
     }
 
     // Detect Console Errors in snapshot or output
-    if (/console\s*error|uncaught\s*error|failed\s*to\s*load|404\s*\(not\s*found\)|500\s*\(internal\s*server\s*error\)/i.test(trimmed)) {
+    if (/console\s*error|uncaught\s*error|failed\s*to\s*load|404\s*\(not\s*found\)|500\s*\(internal\s*server\s*error\)|typeerror:|referenceerror:|syntaxerror:|\[error\]|error\s*\(/i.test(trimmed)) {
       if (!consoleErrors.includes(trimmed)) {
         consoleErrors.push(trimmed);
       }
@@ -153,6 +159,10 @@ export function parseBrowserInspectionResult(
     } catch {
       pageTitle = 'Web Inspection Page';
     }
+  }
+
+  if (consoleErrors.length === 0 && reportedErrorHeaderCount > 0) {
+    consoleErrors.push(reportedHeaderStr || `Console: ${reportedErrorHeaderCount} error${reportedErrorHeaderCount === 1 ? '' : 's'}`);
   }
 
   return {

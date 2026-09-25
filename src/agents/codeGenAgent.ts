@@ -221,11 +221,272 @@ ${truncatedContext || "No context provided."}`;
           fallbackCode = `${securityDirective}// Dynamic Programming on Graphs (Longest Path in DAG)\nexport interface GraphEdge { to: number; weight: number; }\n\nexport class GraphDP {\n  private adj: GraphEdge[][];\n  constructor(public vertices: number) {\n    this.adj = Array.from({ length: vertices }, () => []);\n  }\n  addEdge(u: number, v: number, weight: number = 1): void {\n    this.adj[u].push({ to: v, weight });\n  }\n  findLongestPath(u: number, dp: number[] = []): number {\n    if (dp[u] !== undefined) return dp[u];\n    let maxDist = 0;\n    for (const edge of this.adj[u]) {\n      maxDist = Math.max(maxDist, edge.weight + this.findLongestPath(edge.to, dp));\n    }\n    dp[u] = maxDist;\n    return dp[u];\n  }\n}\n\nexport function executeTask() {\n  const g = new GraphDP(5);\n  g.addEdge(0, 1, 3);\n  g.addEdge(0, 2, 2);\n  g.addEdge(1, 3, 4);\n  g.addEdge(2, 3, 1);\n  g.addEdge(3, 4, 5);\n  const longest = g.findLongestPath(0);\n  console.log("Longest Path in DAG from 0:", longest);\n  return { status: "success", maxPathLength: longest };\n}\n`;
         }
       } else if (ext === 'html') {
-        fallbackCode = `<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n  <title>${state.userInput}</title>\n  <link rel="stylesheet" href="style.css">\n</head>\n<body>\n  <div id="app">\n    <h1>${state.userInput}</h1>\n  </div>\n  <script src="script.js"></script>\n</body>\n</html>\n`;
+        const title = state.userInput.length < 50 ? state.userInput : "Modern Web Landing Page";
+        fallbackCode = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${title}</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="navbar">
+    <div class="logo">⚡ KaizenWeb</div>
+    <nav>
+      <a href="#features">Features</a>
+      <a href="#stats">Stats</a>
+      <a href="#contact" class="btn-primary">Get Started</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="hero-content">
+        <h1>Build Faster with Modern AI Architecture</h1>
+        <p>A complete, high-performance landing page experience built with modular web design patterns.</p>
+        <div class="cta-group">
+          <button id="cta-btn" class="btn-primary">Explore Platform</button>
+          <button id="demo-btn" class="btn-secondary">View Demo</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="features" class="features">
+      <h2>Core Platform Features</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>🚀 High Performance</h3>
+          <p>Optimized rendering pipeline designed for instant load times and zero layout shifts.</p>
+        </div>
+        <div class="card">
+          <h3>🎨 Modular Design</h3>
+          <p>Clean HTML5 semantics paired with CSS custom properties and interactive JavaScript components.</p>
+        </div>
+        <div class="card">
+          <h3>🔒 Built-in Security</h3>
+          <p>Sandbox-validated code structures ensuring production reliability and clean architecture.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="stats" class="stats">
+      <div class="stat-item">
+        <span class="stat-num" id="stat-speed">99.9%</span>
+        <span class="stat-label">Uptime Guarantee</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-num" id="stat-users">100k+</span>
+        <span class="stat-label">Active Users</span>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>&copy; ${new Date().getFullYear()} Kaizen Web Applications. All rights reserved.</p>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
+`;
       } else if (ext === 'css') {
-        fallbackCode = `/* Styles for ${targetFile} */\n* {\n  box-sizing: border-box;\n  margin: 0;\n  padding: 0;\n}\nbody {\n  font-family: system-ui, -apple-system, sans-serif;\n  background: #0f172a;\n  color: #f8fafc;\n  display: flex;\n  justify-content: center;\n  align-items: center;\n  min-height: 100vh;\n}\n`;
+        fallbackCode = `/* Styles for ${targetFile} */
+:root {
+  --bg-primary: #0f172a;
+  --bg-card: #1e293b;
+  --text-primary: #f8fafc;
+  --text-muted: #94a3b8;
+  --accent-blue: #38bdf8;
+  --accent-purple: #a855f7;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+.navbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1.5rem 3rem;
+  background: rgba(15, 23, 42, 0.8);
+  backdrop-filter: blur(12px);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.logo {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--accent-blue);
+}
+
+nav a {
+  color: var(--text-muted);
+  text-decoration: none;
+  margin-left: 2rem;
+  transition: color 0.2s ease;
+}
+
+nav a:hover {
+  color: var(--text-primary);
+}
+
+.hero {
+  padding: 8rem 2rem;
+  text-align: center;
+  background: radial-gradient(circle at center, rgba(56, 189, 248, 0.15) 0%, transparent 70%);
+}
+
+.hero h1 {
+  font-size: 3.5rem;
+  font-weight: 800;
+  margin-bottom: 1.5rem;
+  background: linear-gradient(135deg, #f8fafc 0%, var(--accent-blue) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.hero p {
+  font-size: 1.25rem;
+  color: var(--text-muted);
+  max-width: 650px;
+  margin: 0 auto 2.5rem;
+}
+
+.cta-group {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent-blue) 0%, var(--accent-purple) 100%);
+  color: #fff;
+  padding: 0.8rem 2rem;
+  border-radius: 8px;
+  border: none;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+
+.btn-primary:hover {
+  transform: translateY(-2px);
+  opacity: 0.95;
+}
+
+.btn-secondary {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+  padding: 0.8rem 2rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.features {
+  padding: 5rem 3rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.features h2 {
+  text-align: center;
+  margin-bottom: 3rem;
+  font-size: 2.25rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 2rem;
+}
+
+.card {
+  background: var(--bg-card);
+  padding: 2.5rem;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  transition: transform 0.3s ease, border-color 0.3s ease;
+}
+
+.card:hover {
+  transform: translateY(-4px);
+  border-color: var(--accent-blue);
+}
+
+.card h3 {
+  margin-bottom: 1rem;
+  color: var(--accent-blue);
+}
+
+.stats {
+  display: flex;
+  justify-content: space-around;
+  padding: 4rem 2rem;
+  background: rgba(30, 41, 59, 0.5);
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.stat-item {
+  text-align: center;
+}
+
+.stat-num {
+  display: block;
+  font-size: 3rem;
+  font-weight: 800;
+  color: var(--accent-purple);
+}
+
+.stat-label {
+  color: var(--text-muted);
+}
+
+footer {
+  text-align: center;
+  padding: 3rem;
+  color: var(--text-muted);
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+`;
       } else if (ext === 'js' || ext === 'jsx') {
-        fallbackCode = `// ${state.userInput}\nconsole.log("Initializing ${targetFile}...");\n\ndocument.addEventListener("DOMContentLoaded", () => {\n  console.log("App ready!");\n});\n`;
+        fallbackCode = `// Interactive JavaScript Application Behavior for ${targetFile}
+document.addEventListener("DOMContentLoaded", () => {
+  console.log("Kaizen Web Application initialized cleanly.");
+
+  const ctaBtn = document.getElementById("cta-btn");
+  if (ctaBtn) {
+    ctaBtn.addEventListener("click", () => {
+      alert("Welcome to Kaizen Web Application!");
+    });
+  }
+
+  const demoBtn = document.getElementById("demo-btn");
+  if (demoBtn) {
+    demoBtn.addEventListener("click", () => {
+      const features = document.getElementById("features");
+      if (features) {
+        features.scrollIntoView({ behavior: "smooth" });
+      }
+    });
+  }
+});
+`;
       } else if (ext === 'py') {
         const isTest = targetFile.includes('/tests/') || targetFile.includes('.test.') || targetFile.includes('test_');
         if (isTest) {

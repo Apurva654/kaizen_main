@@ -90,8 +90,22 @@ function extractSymbolsFromWorkspace(targetFiles: string[], extractedContext: st
 }
 
 export async function plannerAgentNode(state: typeof KaizenState.State) {
-  const targetFiles = (state.targetFiles.length > 0 ? state.targetFiles : ['src/sandbox/main.ts'])
-    .map(f => normalizeSandboxPath(f));
+  const cleanUserQuery = state.originalUserRequest || state.userInput;
+  const isWebReq = /\b(html|website|webpage|landing\s+page|web|frontend)\b/i.test(cleanUserQuery) ||
+    state.targetFiles.some(f => f.endsWith('.html'));
+
+  let rawTargets = state.targetFiles.length > 0
+    ? state.targetFiles
+    : (isWebReq ? ['src/sandbox/index.html', 'src/sandbox/style.css', 'src/sandbox/script.js'] : ['src/sandbox/main.ts']);
+
+  if (isWebReq) {
+    const hasCss = rawTargets.some(f => f.endsWith('.css'));
+    const hasJs = rawTargets.some(f => f.endsWith('.js'));
+    if (!hasCss) rawTargets.push('src/sandbox/style.css');
+    if (!hasJs) rawTargets.push('src/sandbox/script.js');
+  }
+
+  const targetFiles = Array.from(new Set(rawTargets)).map(f => normalizeSandboxPath(f));
 
   const existingFiles = targetFiles.filter(tf => fs.existsSync(tf));
   const newFiles = targetFiles.filter(tf => !fs.existsSync(tf));
@@ -102,8 +116,6 @@ export async function plannerAgentNode(state: typeof KaizenState.State) {
   const symbolSummary = extractedSymbols.length > 0
     ? extractedSymbols.map((s: ExtractedSymbol) => `- [${s.language || 'code'}] ${s.type} ${s.name}`).join('\n')
     : "No existing file AST symbols pre-extracted.";
-
-  const cleanUserQuery = state.originalUserRequest || state.userInput;
 
   console.log(`[PLANNER][INPUT] originalUserRequest: "${state.originalUserRequest}"`);
   console.log(`[PLANNER][INPUT] userInput: "${state.userInput}"`);
@@ -302,6 +314,45 @@ ${(state.extractedContext || "No context provided.").slice(-4000)}
 function buildModularFallbackPlan(userQuery: string, targetFiles: string[]): PlanStep[] {
   const queryLower = userQuery.toLowerCase();
   
+  const isWebProject = /\b(html|website|webpage|landing\s+page|web|frontend)\b/i.test(queryLower) ||
+    targetFiles.some(f => f.endsWith('.html') || f.endsWith('.css'));
+
+  if (isWebProject) {
+    const htmlFile = 'src/sandbox/index.html';
+    const cssFile = 'src/sandbox/style.css';
+    const jsFile = 'src/sandbox/script.js';
+
+    return [
+      {
+        id: 1,
+        targetFile: htmlFile,
+        action: 'create',
+        isNewFile: !fs.existsSync(htmlFile),
+        dependencies: [],
+        description: `Create semantic HTML5 landing page structure in ${htmlFile} with hero section, features grid, call to action, and footer`,
+        status: 'pending'
+      },
+      {
+        id: 2,
+        targetFile: cssFile,
+        action: 'create',
+        isNewFile: !fs.existsSync(cssFile),
+        dependencies: [htmlFile],
+        description: `Create responsive CSS styling in ${cssFile} with modern typography, dark mode theme, glassmorphism card layouts, and hover effects`,
+        status: 'pending'
+      },
+      {
+        id: 3,
+        targetFile: jsFile,
+        action: 'create',
+        isNewFile: !fs.existsSync(jsFile),
+        dependencies: [htmlFile, cssFile],
+        description: `Create interactive JavaScript behavior in ${jsFile} for dynamic button interactions, form validation, and animations`,
+        status: 'pending'
+      }
+    ];
+  }
+
   const entityMatch = queryLower.match(/\b(order|event|user|product|item|inventory|payment|registration|auth|notification|customer|booking)\b/i);
 
   if (entityMatch) {

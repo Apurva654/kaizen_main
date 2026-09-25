@@ -96,7 +96,9 @@ const ALLOWED_EXTENSIONS = new Set([
   '.js',
   '.jsx',
   '.json',
-  '.md'
+  '.md',
+  '.html',
+  '.css'
 ]);
 
 export class GraphifyEngine {
@@ -322,6 +324,32 @@ export class GraphifyEngine {
                 });
               }
             }
+          }
+        }
+      } else if (language === 'html') {
+        const linkRegex = /<link\s+[^>]*href=["']([^"']+)["']/gi;
+        let match: RegExpExecArray | null;
+        while ((match = linkRegex.exec(content)) !== null) {
+          const href = match[1].trim();
+          if (href && !href.startsWith('http://') && !href.startsWith('https://')) {
+            imports.push({
+              importedSymbols: [],
+              moduleSpecifier: href,
+              type: 'unresolved',
+              language: 'html'
+            });
+          }
+        }
+        const scriptRegex = /<script\s+[^>]*src=["']([^"']+)["']/gi;
+        while ((match = scriptRegex.exec(content)) !== null) {
+          const src = match[1].trim();
+          if (src && !src.startsWith('http://') && !src.startsWith('https://')) {
+            imports.push({
+              importedSymbols: [],
+              moduleSpecifier: src,
+              type: 'unresolved',
+              language: 'html'
+            });
           }
         }
       }

@@ -214,7 +214,7 @@ export async function runComprehensiveTests(): Promise<VerificationResult[]> {
   // Test 6: Tier 4 Execution & Safety Sandbox (Permission Gate, MCP, Docker Sandbox)
   try {
     const { permissionGate } = await import('./permissionGate');
-    const { mcpInterface } = await import('./mcpInterface');
+    const { mcpInterface } = await import('../mcp/mcpInterface');
     const { dockerSandbox } = await import('./dockerSandbox');
 
     const highRiskScore = permissionGate.calculateRiskScore('delete_file', { path: 'src/sandbox/test.ts' });
@@ -249,7 +249,7 @@ export async function runComprehensiveTests(): Promise<VerificationResult[]> {
 
   // Tier 4 MCP Git Router & Permission Gate Verification Suite (Tests 1-5)
   try {
-    const { mcpInterface } = await import('./mcpInterface');
+    const { mcpInterface } = await import('../mcp/mcpInterface');
     const { permissionGate } = await import('./permissionGate');
     const { intentAgentNode, isGitQuery } = await import('../agents/intentAgent');
 
@@ -803,7 +803,7 @@ export async function runComprehensiveTests(): Promise<VerificationResult[]> {
     });
     // TEST K: Real MCP Protocol Server/Client Handshake & Dynamic Tool Discovery
     try {
-      const { mcpInterface } = await import('./mcpInterface');
+      const { mcpInterface } = await import('../mcp/mcpInterface');
       await mcpInterface.ensureConnected();
       const tools = await mcpInterface.discoverTools();
       const hasFsRead = tools.some(t => t.name === 'filesystem_read');
@@ -1262,6 +1262,48 @@ button [ref=e175] "Code Editor"
       feature: 'Four-Memory Architecture Verification',
       status: 'FAIL',
       details: memErr?.message || String(memErr),
+      timestamp: new Date()
+    });
+  }
+
+  // 22. Self-Healing Pipeline Bug Fix Regression Suite (Tests A-G)
+  try {
+    const { runSelfHealingRegressionTests } = await import('./pipelineSelfHealingRegressionTest');
+    const regRes = await runSelfHealingRegressionTests();
+    for (const r of regRes.results) {
+      results.push({
+        feature: `Regression: ${r.name}`,
+        status: r.passed ? 'PASS' : 'FAIL',
+        details: r.details,
+        timestamp: new Date()
+      });
+    }
+  } catch (regErr: any) {
+    results.push({
+      feature: 'Self-Healing Pipeline Regression Suite',
+      status: 'FAIL',
+      details: regErr?.message || String(regErr),
+      timestamp: new Date()
+    });
+  }
+
+  // 23. HTML/Web Project Pipeline Regression Suite (Tests A-I)
+  try {
+    const { runWebProjectPipelineRegressionTests } = await import('./webProjectPipelineRegressionTest');
+    const webRegRes = await runWebProjectPipelineRegressionTests();
+    for (const r of webRegRes.results) {
+      results.push({
+        feature: `Web Regression: ${r.name}`,
+        status: r.passed ? 'PASS' : 'FAIL',
+        details: r.details,
+        timestamp: new Date()
+      });
+    }
+  } catch (webRegErr: any) {
+    results.push({
+      feature: 'Web Project Pipeline Regression Suite',
+      status: 'FAIL',
+      details: webRegErr?.message || String(webRegErr),
       timestamp: new Date()
     });
   }

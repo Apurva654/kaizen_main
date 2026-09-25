@@ -217,7 +217,7 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
         postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '⚡ Executing Git MCP operations...' });
 
         const { permissionGate } = await import('./tools/permissionGate');
-        const { mcpInterface } = await import('./tools/mcpInterface');
+        const { mcpInterface } = await import('./mcp/mcpInterface');
 
         const requestedActions = extractGitActions(rawUserInput);
 
@@ -274,7 +274,7 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
         postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '⚡ Executing Terminal MCP operation...' });
 
         const { permissionGate } = await import('./tools/permissionGate');
-        const { mcpInterface } = await import('./tools/mcpInterface');
+        const { mcpInterface } = await import('./mcp/mcpInterface');
 
         const command = extractTerminalCommand(rawUserInput);
         const evalResult = permissionGate.evaluate('terminal_exec', { command });
@@ -328,7 +328,7 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
         postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '🌐 Connecting to External Playwright MCP Server Process...' });
 
         const { permissionGate } = await import('./tools/permissionGate');
-        const { mcpInterface } = await import('./tools/mcpInterface');
+        const { mcpInterface } = await import('./mcp/mcpInterface');
 
         const targetUrl = extractBrowserUrl(rawUserInput);
 
@@ -629,6 +629,16 @@ ${factItemsMarkdown}
           }
 
           while (!testResult.passed && state.retryCount < MAX_SELF_HEAL_RETRIES) {
+            const isToolFailure = testResult.failureType === 'TOOL_EXECUTION_FAILURE' || testResult.structuredFailure?.failureType === 'TOOL_EXECUTION_FAILURE';
+            if (isToolFailure) {
+              postWebviewEvent('AGENT_STEP', {
+                agent: 'TestRunnerAgent',
+                status: 'error',
+                result: { summary: `[TOOL_EXECUTION_FAILURE] ${testResult.summary}. Source code files were preserved untouched.`, passed: false }
+              });
+              break;
+            }
+
             state.retryCount += 1;
 
             const discoveredFiles = extractFailingFilesFromLogs(`${testResult.summary}\n${testResult.stdout}\n${testResult.stderr}`);
@@ -800,6 +810,16 @@ ${factItemsMarkdown}
         const MAX_SELF_HEAL_RETRIES = 3;
         if (!testResult.passed) {
           while (!testResult.passed && state.retryCount < MAX_SELF_HEAL_RETRIES) {
+            const isToolFailure = testResult.failureType === 'TOOL_EXECUTION_FAILURE' || testResult.structuredFailure?.failureType === 'TOOL_EXECUTION_FAILURE';
+            if (isToolFailure) {
+              postWebviewEvent('AGENT_STEP', {
+                agent: 'TestRunnerAgent',
+                status: 'error',
+                result: { summary: `[TOOL_EXECUTION_FAILURE] ${testResult.summary}. Source code files were preserved untouched.`, passed: false }
+              });
+              break;
+            }
+
             state.retryCount += 1;
 
             const discoveredFiles = extractFailingFilesFromLogs(`${testResult.summary}\n${testResult.stdout}\n${testResult.stderr}`);

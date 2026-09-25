@@ -4,7 +4,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
-import { dockerSandbox } from './dockerSandbox';
+import { dockerSandbox } from '../tools/dockerSandbox';
 
 export interface MCPToolDefinition {
   name: string;

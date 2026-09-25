@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { ChatGroq } from '@langchain/groq';
 import * as dotenv from 'dotenv';
 import * as fs from 'fs';
+import * as path from 'path';
 import { KaizenState } from '../state';
 import { langfuseTracer } from '../tools/langfuseTracer';
 
@@ -97,31 +98,70 @@ export function extractGitActions(input: string): Array<'status' | 'diff' | 'com
 }
 
 export function isTerminalQuery(input: string): boolean {
-  const rawPrompt = extractRawUserPrompt(input).toLowerCase();
-  return /\b(terminal|command|exec|shell|rm|rm -rf|del|dir|ls|sudo|chmod|npm run|npm test|node -v|cat|pwd|mkdir|touch)\b/i.test(rawPrompt);
+  const rawPrompt = extractRawUserPrompt(input).trim();
+  if (!rawPrompt) return false;
+
+  // Filter out UI status strings, failure reports, and permission headers
+  if (/^(permission gate|command result|execution|execution error|\[automated test|status:|result:|error:)/i.test(rawPrompt)) {
+    return false;
+  }
+
+  const lower = rawPrompt.toLowerCase();
+
+  // If prompt explicitly requests creating, writing, implementing, modifying, editing, building, refactoring files or code, it's NOT a terminal command
+  const isCodeCreationOrEditing = /^\s*(create|write|implement|add|modify|edit|build|refactor)\b.*?\b(file|function|class|script|module|component|code|python|typescript|ts|py|js)\b/i.test(lower) ||
+    /^\s*(create|write|implement|add|modify|edit|build|refactor)\s+(a\s+)?(python|typescript|js|ts|py|file|code)\b/i.test(lower);
+
+  if (isCodeCreationOrEditing && !/\b(run|execute)\s+(command|terminal|shell|script|pytest|npm|python)\b/i.test(lower)) {
+    return false;
+  }
+
+  // 1. Explicit terminal execution phrasing: "run command pytest...", "use terminal to run...", "execute shell..."
+  const hasTerminalPhrase = /\b(run\s+command|use\s+terminal|terminal\s+command|execute\s+shell|run\s+shell|terminal\s+exec|run\s+in\s+terminal)\b/i.test(lower);
+  if (hasTerminalPhrase) return true;
+
+  // 2. Direct command invocation starting with executable command or having explicit command syntax
+  const startsWithCommand = /^\s*(pytest|python\s+-[a-zA-Z0-9_\-]+|python3?\s+|npm\s+|node\s+|npx\s+|tsc\s+|git\s+|rm\s+|del\s+|dir\b|ls\b|cat\s+|pwd\b|mkdir\s+|docker\s+|cargo\s+|go\s+)/i.test(lower);
+  if (startsWithCommand) return true;
+
+  // 3. Command inside backticks or quotes without code creation context (e.g. `pytest src/...`)
+  if (/^\s*[`'"](pytest|python|npm|node|npx|tsc|git|rm|del|dir|ls|cat|pwd|mkdir|docker|cargo|go)\b/i.test(lower)) {
+    return true;
+  }
+
+  return false;
 }
 
 export function extractTerminalCommand(input: string): string {
   const raw = extractRawUserPrompt(input).trim();
+
+  // 0. If raw matches UI headers / status messages / failure reports, it is NOT a command
+  if (!raw || /^(permission gate|command result|execution|execution error|\[automated test|status:|result:|error:|[a-z]+ error)/i.test(raw)) {
+    return '';
+  }
   
   // 1. If quoted with `...`, "...", or '...', extract inside quote
   const matchQuote = raw.match(/[`'"]([^`'"]+)[`'"]/);
   if (matchQuote && matchQuote[1]) {
-    return matchQuote[1].trim();
+    const extracted = matchQuote[1].trim();
+    if (!/^(execution|permission gate|command result|status|error)/i.test(extracted)) {
+      return extracted;
+    }
   }
 
-  // 2. Check for explicit shell command syntax like rm -rf <path>, del <path>, npm <cmd>, git <cmd>, etc.
-  const explicitCmdMatch = raw.match(/\b(rm\s+-[a-zA-Z]+\s+[^\s,;]+|rm\s+[^\s,;]+|del\s+[^\s,;]+|rmdir\s+[^\s,;]+|npm\s+[^\s,;]+|node\s+[^\s,;]+|dir\b|ls\b|cat\s+[^\s,;]+|pwd\b|mkdir\s+[^\s,;]+)\b/i);
+  // 2. Check for explicit shell command syntax like pytest, python, rm, del, npm, node, dir, ls, etc.
+  const explicitCmdMatch = raw.match(/\b(pytest\s+[^\s,;]+|python\s+-[a-zA-Z0-9_\-\s"'\/\.\\]+|rm\s+-[a-zA-Z]+\s+[^\s,;]+|rm\s+[^\s,;]+|del\s+[^\s,;]+|rmdir\s+[^\s,;]+|npm\s+[^\s,;]+|node\s+[^\s,;]+|dir\b|ls\b|cat\s+[^\s,;]+|pwd\b|mkdir\s+[^\s,;]+)\b/i);
   if (explicitCmdMatch) {
     return explicitCmdMatch[0].trim();
   }
 
   // 3. Match natural language deletion / command intent patterns:
-  // e.g. "deletion of src/sandbox/fake_test_directory", "delete src/sandbox/fake_test_directory", "remove src/sandbox/fake_test_directory"
   const deletionMatch = raw.match(/\b(deletion|delete|remove|cleanup|rm)\s+(of\s+)?([^\s,;]+)/i);
   if (deletionMatch && deletionMatch[3]) {
     const targetPath = deletionMatch[3].trim();
-    return `rm -rf ${targetPath}`;
+    if (targetPath.includes('/') || targetPath.includes('\\') || targetPath.includes('.')) {
+      return `rm -rf ${targetPath}`;
+    }
   }
 
   // 4. Strip common conversational prefixes: "use terminal to run dir", "run command rm -rf src/temp", "execute dir"
@@ -130,8 +170,19 @@ export function extractTerminalCommand(input: string): string {
 
   // Strip trailing sentence junk (e.g. "for Permission Gate testing...", "Do not create...")
   clean = clean.split(/(\bfor\b|\bdo not\b|\bplease\b|\bto test\b|\bwith\b|\band\b)/i)[0].trim();
+
+  if (/^(execution|permission gate|command result|status|error|result|blocked|simulated|denied|approved)/i.test(clean)) {
+    return '';
+  }
+
+  const validCmdPrefixes = ['pytest', 'python', 'npm', 'node', 'npx', 'tsc', 'git', 'rm', 'del', 'dir', 'ls', 'cat', 'pwd', 'mkdir', 'cp', 'mv', 'echo', 'touch', 'docker', 'cargo', 'go'];
+  const firstWord = clean.split(/\s+/)[0].toLowerCase();
   
-  return clean || raw;
+  if (validCmdPrefixes.includes(firstWord) || firstWord.endsWith('.exe') || firstWord.endsWith('.bat') || firstWord.endsWith('.cmd') || firstWord.startsWith('./') || firstWord.startsWith('.\\')) {
+    return clean;
+  }
+  
+  return '';
 }
 
 export function isGeneralQuery(input: string): boolean {
@@ -147,7 +198,8 @@ export function isGeneralQuery(input: string): boolean {
     'implement', 'add', 'modify', 'directory', 'folder', 'npm', 'node', 'run', 'execute',
     'calculator', 'utils', 'main.ts', 'solution', 'import', 'export', 'const', 'let', 'var',
     'git', 'status', 'diff', 'commit', 'push', 'branch', 'repository', 'log', 'checkout', 'stash',
-    'terminal', 'command', 'shell', 'rm', 'del', 'sudo', 'chmod'
+    'terminal', 'command', 'shell', 'rm', 'del', 'sudo', 'chmod',
+    'website', 'webpage', 'web', 'landing', 'page', 'site', 'index.html', 'style.css', 'styles.css', 'script.js', 'frontend'
   ];
 
   const hasCodingKeyword = codingKeywords.some(kw => {
@@ -173,23 +225,47 @@ export function isGeneralQuery(input: string): boolean {
 
 export function isBrowserQuery(input: string): boolean {
   const rawPrompt = extractRawUserPrompt(input).toLowerCase().trim();
+  if (!rawPrompt) return false;
 
-  // 1. Contains a URL or localhost port
-  const hasUrl = /\b(https?:\/\/[^\s]+|localhost:\d+)\b/i.test(rawPrompt);
+  // Do NOT classify as code mutation if prompt contains explicit read-only / execution / non-mutation directives
+  const isExplicitReadOnly = /\b(do\s+not\s+modify|don't\s+modify|read[\s-]*only|existing|without\s+modifying)\b/i.test(rawPrompt);
 
-  // 2. Contains browser UI / inspection keywords
-  const hasBrowserAction = /\b(open|inspect|navigate|visit|browse|login|page|screenshot|snapshot|view\s+page|check\s+page|ui)\b/i.test(rawPrompt);
-  const hasBrowserKeyword = /\b(browser|playwright|chrome|chromium|webpage)\b/i.test(rawPrompt);
+  // Filter out explicit code creation/editing requests (e.g. "Build a landing page", "Create an HTML page", "Modify the webpage", "Edit index.html")
+  const isCodeMutationRequest = !isExplicitReadOnly && (
+    /^\s*(build|create|implement|modify|edit|add|write|make|refactor|fix|update)\b/i.test(rawPrompt) ||
+    /\b(build|create|implement|modify|edit|add|write|make|refactor|fix|update)\s+.*?\b(webpage|website|html|page|site|code|file|component|app|style|script)\b/i.test(rawPrompt)
+  );
 
-  if (hasUrl && (hasBrowserAction || hasBrowserKeyword)) {
+  const hasExplicitUrl = /\b(https?:\/\/[^\s]+|localhost:\d+[^\s]*)\b/i.test(rawPrompt);
+  const hasBrowserToolCall = /\b(browser|playwright|chrome|chromium)\b/i.test(rawPrompt);
+
+  // Normal coding requests containing words like build, create, implement, modify, edit, add must NOT be classified as browser requests
+  if (isCodeMutationRequest && !hasExplicitUrl && !hasBrowserToolCall) {
+    return false;
+  }
+
+  // Explicit browser execution verbs
+  const hasBrowserActionVerb = /\b(run|open|preview|launch|show|test|inspect|view|browse|navigate|visit|check)\b/i.test(rawPrompt);
+
+  // Explicit web target nouns
+  const hasWebTargetNoun = /\b(webpage|website|page|site|app|ui|frontend|url|index\.html)\b/i.test(rawPrompt) ||
+    /\b(src\/sandbox\/[a-zA-Z0-9_\-]+\.html|[a-zA-Z0-9_\-]+\.html)\b/i.test(rawPrompt);
+
+  // 1. Phrasal patterns for browser execution (e.g., "now run the webpage", "run src/sandbox/index.html", "open src/sandbox/index.html and inspect it")
+  if (hasBrowserActionVerb && hasWebTargetNoun) {
     return true;
   }
 
-  if (hasBrowserKeyword && (hasBrowserAction || /\b(open|navigate|visit|goto|inspect)\b/i.test(rawPrompt))) {
+  // 2. Direct browser tool or URL queries
+  if (hasBrowserToolCall && (hasBrowserActionVerb || hasWebTargetNoun || /\b(open|navigate|visit|goto|inspect|run|preview)\b/i.test(rawPrompt))) {
     return true;
   }
 
-  if (/\b(open|inspect|navigate|goto)\s+https?:\/\/[^\s]+/i.test(rawPrompt)) {
+  if (hasExplicitUrl && (hasBrowserActionVerb || hasWebTargetNoun || hasBrowserToolCall)) {
+    return true;
+  }
+
+  if (/\b(open|inspect|navigate|goto|preview|run)\s+https?:\/\/[^\s]+/i.test(rawPrompt)) {
     return true;
   }
 
@@ -198,7 +274,7 @@ export function isBrowserQuery(input: string): boolean {
 
 export function extractBrowserUrl(input: string): string {
   const raw = extractRawUserPrompt(input);
-  const match = raw.match(/\b(https?:\/\/[^\s]+|localhost:\d+)\b/i);
+  const match = raw.match(/\b(https?:\/\/[^\s]+|localhost:\d+[^\s]*)\b/i);
   if (match) {
     let url = match[0];
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
@@ -206,6 +282,37 @@ export function extractBrowserUrl(input: string): string {
     }
     return url;
   }
+
+  // Check for explicit html filename in prompt (e.g. src/sandbox/index.html or index.html)
+  const explicitMatch = raw.match(/\b(src\/sandbox\/[a-zA-Z0-9_\-]+\.html|[a-zA-Z0-9_\-]+\.html)\b/i);
+  if (explicitMatch) {
+    const fileName = path.basename(explicitMatch[0]);
+    return `http://localhost:3000/sandbox/${fileName}`;
+  }
+
+  // Determine existing static webpage file in src/sandbox
+  const rootDir = process.cwd();
+  const sandboxDir = path.resolve(rootDir, 'src/sandbox');
+
+  if (fs.existsSync(path.join(sandboxDir, 'index.html'))) {
+    return 'http://localhost:3000/sandbox/index.html';
+  }
+
+  if (fs.existsSync(sandboxDir)) {
+    try {
+      const list = fs.readdirSync(sandboxDir);
+      const firstHtml = list.find(f => f.endsWith('.html'));
+      if (firstHtml) {
+        return `http://localhost:3000/sandbox/${firstHtml}`;
+      }
+    } catch {}
+  }
+
+  // If prompt is asking for a webpage/website/landing page/html, default to static sandbox index.html
+  if (/\b(webpage|website|landing|page|site|html|frontend)\b/i.test(raw)) {
+    return 'http://localhost:3000/sandbox/index.html';
+  }
+
   return 'http://localhost:3000';
 }
 
@@ -446,11 +553,22 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
         }
 
         const rawFiles = result.targetFiles || result.target_files;
-        let extractedFiles: string[] = (rawFiles && rawFiles.length > 0)
-          ? (rawFiles as string[])
-          : (state.targetFiles.length > 0 ? state.targetFiles : promptExtracted);
+        let extractedFiles: string[] = [];
 
-        if (extractedFiles.length === 0) {
+        if (promptExtracted.length > 0) {
+          extractedFiles = [...promptExtracted];
+          if (rawFiles && rawFiles.length > 0) {
+            for (const rf of rawFiles as string[]) {
+              if (!extractedFiles.includes(rf)) extractedFiles.push(rf);
+            }
+          }
+        } else if (rawFiles && rawFiles.length > 0) {
+          extractedFiles = rawFiles as string[];
+        } else if (/\b(html|website|webpage|landing page|web|frontend)\b/i.test(state.userInput)) {
+          extractedFiles = ['src/sandbox/index.html'];
+        } else if (state.targetFiles.length > 0) {
+          extractedFiles = state.targetFiles;
+        } else {
           extractedFiles = ['src/sandbox/main.ts'];
         }
 
@@ -507,18 +625,16 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
   }
 
   let finalTargets: string[];
-  if (detectedFiles.length > 0) {
+  if (promptExtracted.length > 0) {
+    finalTargets = promptExtracted;
+  } else if (detectedFiles.length > 0) {
     finalTargets = detectedFiles;
+  } else if (/\b(html|website|webpage|landing page|web|frontend)\b/i.test(state.userInput)) {
+    finalTargets = ['src/sandbox/index.html'];
   } else if (state.targetFiles.length > 0) {
     finalTargets = state.targetFiles;
   } else {
-    const slug = state.userInput
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, '_')
-      .replace(/_+/g, '_')
-      .replace(/^_+|_+$/g, '')
-      .slice(0, 20) || 'task';
-    finalTargets = [`src/sandbox/${slug}.ts`];
+    finalTargets = ['src/sandbox/main.ts'];
   }
 
   return {

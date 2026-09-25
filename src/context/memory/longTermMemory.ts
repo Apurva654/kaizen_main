@@ -78,7 +78,7 @@ export class LongTermMemoryManager {
    */
   public findEquivalentFact(category: string, key: string, value: string, workspaceId: string = 'default'): LongTermMemoryRecord | null {
     for (const record of this.records.values()) {
-      const matchWorkspace = record.workspaceId === workspaceId || record.workspaceId === 'default' || workspaceId === 'default' || record.workspaceId === 'global';
+      const matchWorkspace = record.workspaceId === workspaceId || record.workspaceId === 'global' || (workspaceId === 'default' && record.workspaceId === 'default');
       if (matchWorkspace && isEquivalentLongTermFact(record.category, record.key, record.value, category, key, value)) {
         return record;
       }
@@ -141,7 +141,7 @@ export class LongTermMemoryManager {
     const all = Array.from(this.records.values());
     const filtered = (!workspaceId || workspaceId === 'default' || workspaceId === 'global')
       ? all
-      : all.filter(r => r.workspaceId === workspaceId || r.workspaceId === 'global' || r.workspaceId === 'default');
+      : all.filter(r => r.workspaceId === workspaceId || r.workspaceId === 'global');
 
     // Deduplicate on retrieval to guarantee canonical records
     const deduplicated: LongTermMemoryRecord[] = [];

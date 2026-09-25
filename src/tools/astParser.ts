@@ -26,6 +26,11 @@ export class ASTParserTool {
         return 'javascript';
       case 'json':
         return 'json';
+      case 'html':
+      case 'htm':
+        return 'html';
+      case 'css':
+        return 'css';
       default:
         return 'unsupported_language';
     }
@@ -111,6 +116,24 @@ export class ASTParserTool {
         for (const m of tsMatches) {
           const type = m[0].includes('class') ? 'class_declaration' : (m[0].includes('function') ? 'function_declaration' : 'declaration');
           symbols.push({ type, name: m[1], text: m[0], language });
+        }
+      } else if (language === 'html') {
+        const titleMatch = sourceCode.match(/<title>([^<]+)<\/title>/i);
+        if (titleMatch) {
+          symbols.push({ type: 'html_title', name: titleMatch[1].trim(), text: titleMatch[0], language: 'html' });
+        }
+        const idMatches = sourceCode.matchAll(/\bid=["']([^"']+)["']/g);
+        for (const m of idMatches) {
+          symbols.push({ type: 'element_id', name: m[1], text: m[0], language: 'html' });
+        }
+      } else if (language === 'css') {
+        const classMatches = sourceCode.matchAll(/\.([a-zA-Z0-9_\-]+)\s*\{/g);
+        for (const m of classMatches) {
+          symbols.push({ type: 'css_class', name: m[1], text: m[0], language: 'css' });
+        }
+        const idMatches = sourceCode.matchAll(/#([a-zA-Z0-9_\-]+)\s*\{/g);
+        for (const m of idMatches) {
+          symbols.push({ type: 'css_id', name: m[1], text: m[0], language: 'css' });
         }
       }
     } catch (err: any) {

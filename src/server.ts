@@ -16,7 +16,7 @@ import { preprocessUserRequest, saveAgentState, loadAgentState, recordConversati
 import { memoryEngine } from './context/memory/memoryEngine';
 import { ocrService } from './tools/ocrService';
 import { permissionGate, PermissionMode } from './tools/permissionGate';
-import { mcpInterface } from './tools/mcpInterface';
+import { mcpInterface } from './mcp/mcpInterface';
 import { dockerSandbox } from './tools/dockerSandbox';
 import { parseBrowserInspectionResult, formatBrowserInspectionMarkdown, extractRequestedBrowserAction, resolveAccessibilityTarget } from './tools/browserSnapshotParser';
 
@@ -26,6 +26,8 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, '../public')));
+app.use('/sandbox', express.static(path.resolve(process.cwd(), 'src/sandbox')));
+app.use('/src/sandbox', express.static(path.resolve(process.cwd(), 'src/sandbox')));
 
 // Server-Sent Events (SSE) Clients list
 let sseClients: Response[] = [];
@@ -774,6 +776,17 @@ ${factItemsMarkdown}
         }
 
         while (!testResult.passed && state.retryCount < MAX_SELF_HEAL_RETRIES) {
+          const isToolFailure = testResult.failureType === 'TOOL_EXECUTION_FAILURE' || testResult.structuredFailure?.failureType === 'TOOL_EXECUTION_FAILURE';
+          if (isToolFailure) {
+            logDiagnostic('SELF_HEAL', 'TOOL_EXECUTION_FAILURE_STOP', { summary: testResult.summary });
+            emitSSE('agent_step', {
+              agent: 'TestRunnerAgent',
+              status: 'error',
+              result: { summary: `[TOOL_EXECUTION_FAILURE] ${testResult.summary}. Source code files were preserved untouched.`, passed: false }
+            });
+            break;
+          }
+
           state.retryCount += 1;
 
           // Extract failing implementation file paths from test stack traces
@@ -964,6 +977,17 @@ ${factItemsMarkdown}
       const MAX_SELF_HEAL_RETRIES = 3;
       if (!testResult.passed) {
         while (!testResult.passed && state.retryCount < MAX_SELF_HEAL_RETRIES) {
+          const isToolFailure = testResult.failureType === 'TOOL_EXECUTION_FAILURE' || testResult.structuredFailure?.failureType === 'TOOL_EXECUTION_FAILURE';
+          if (isToolFailure) {
+            logDiagnostic('SELF_HEAL', 'TOOL_EXECUTION_FAILURE_STOP', { summary: testResult.summary });
+            emitSSE('agent_step', {
+              agent: 'TestRunnerAgent',
+              status: 'error',
+              result: { summary: `[TOOL_EXECUTION_FAILURE] ${testResult.summary}. Source code files were preserved untouched.`, passed: false }
+            });
+            break;
+          }
+
           state.retryCount += 1;
 
           const discoveredFiles = extractFailingFilesFromLogs(`${testResult.summary}\n${testResult.stdout}\n${testResult.stderr}`);

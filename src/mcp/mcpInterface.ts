@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { permissionGate } from './permissionGate';
+import { permissionGate } from '../tools/permissionGate';
 import { kaizenMCPServer } from './mcpServer';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -51,7 +51,7 @@ export class MCPUnifiedInterface {
       transportType: 'in_process'
     });
 
-    const cliPath = path.resolve(process.cwd(), 'dist/tools/mcpServerCli.js');
+    const cliPath = path.resolve(process.cwd(), 'dist/mcp/mcpServerCli.js');
     this.registerServerConfig({
       id: 'default-stdio',
       name: 'Kaizen External Stdio Process MCP Server',
@@ -619,7 +619,22 @@ export class MCPUnifiedInterface {
     cwd: string = process.cwd(),
     options?: GitActionOptions
   ): Promise<MCPActionResult> {
-    const evalResult = permissionGate.evaluate('terminal_exec', { command });
+    const trimmedCmd = (command || '').trim();
+    if (!trimmedCmd || /^(execution|permission gate|command result|status|error|\[automated test)/i.test(trimmedCmd)) {
+      return {
+        success: false,
+        tool: 'terminal',
+        action: 'terminal_exec',
+        output: '',
+        error: `TOOL_EXECUTION_FAILURE: Invalid shell command '${command}'. Status headers or empty strings cannot be executed as a command.`,
+        riskScore: 100,
+        isSimulated: false,
+        approvalStatus: 'REJECTED',
+        requestedAction: 'terminal_exec'
+      };
+    }
+
+    const evalResult = permissionGate.evaluate('terminal_exec', { command: trimmedCmd });
     const isDryRun = options?.dryRun ?? permissionGate.isDryRunMode();
 
     if (isDryRun || permissionGate.isDryRunMode()) {
