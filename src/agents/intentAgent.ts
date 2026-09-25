@@ -576,7 +576,11 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
       'openai/gpt-oss-20b',
       'qwen/qwen3.8-27b',
       'llama-3.3-70b-versatile',
-      'llama-3.1-8b-instant'
+      'llama-3.1-8b-instant',
+      'llama3-70b-8192',
+      'llama3-8b-8192',
+      'qwen-2.5-coder-32b',
+      'deepseek-r1-distill-llama-70b'
     ];
 
     for (const modelName of modelCandidates) {

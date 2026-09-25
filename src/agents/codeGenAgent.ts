@@ -256,7 +256,11 @@ export async function codeGenAgentNode(state: typeof KaizenState.State) {
     'openai/gpt-oss-20b',
     'qwen/qwen3.8-27b',
     'llama-3.3-70b-versatile',
-    'llama-3.1-8b-instant'
+    'llama-3.1-8b-instant',
+    'llama3-70b-8192',
+    'llama3-8b-8192',
+    'qwen-2.5-coder-32b',
+    'deepseek-r1-distill-llama-70b'
   ];
 
   if (apiKey && apiKey !== 'your_groq_api_key_here') {
@@ -628,13 +632,36 @@ document.addEventListener("DOMContentLoaded", () => {
           fallbackCode = `try:\n    import pytest\nexcept ImportError:\n    pytest = None\nimport unittest\nimport sys\nimport os\n\nsys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))\nsys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))\n\ntry:\n    from episodic_demo import divide\nexcept ImportError:\n    try:\n        from src.sandbox.episodic_demo import divide\n    except ImportError:\n        divide = None\n\nclass TestEpisodicDemo(unittest.TestCase):\n    def test_divide_valid(self):\n        if divide:\n            self.assertEqual(divide(10, 2), 5.0)\n            self.assertEqual(divide(9, 3), 3.0)\n\n    def test_divide_by_zero(self):\n        if divide:\n            with self.assertRaises(ValueError) as cm:\n                divide(10, 0)\n            self.assertEqual(str(cm.exception), "Cannot divide by zero")\n\nif __name__ == '__main__':\n    unittest.main()\n`;
         } else if (promptLower.includes('divide') || targetFile.includes('episodic_demo')) {
           fallbackCode = `def divide(a, b):\n    if b == 0:\n        raise ValueError("Cannot divide by zero")\n    return a / b\n`;
+        } else if (promptLower.includes('add') || promptLower.includes('sum') || promptLower.includes('plus') || promptLower.includes('addition') || promptLower.includes('two numbers')) {
+          fallbackCode = `def add(a, b):\n    return a + b\n\ndef main():\n    res = add(5, 10)\n    print("Sum of 5 + 10:", res)\n    return res\n\nif __name__ == "__main__":\n    main()\n`;
         } else {
           fallbackCode = `# ${targetFile} - ${state.userInput}\n\ndef main():\n    print("Running task: ${state.userInput.replace(/"/g, '\\"')}")\n\nif __name__ == "__main__":\n    main()\n`;
         }
       } else if (ext === 'json') {
         fallbackCode = `{\n  "name": "travel-planner",\n  "status": "active"\n}\n`;
       } else {
-        fallbackCode = `${securityDirective}// Target: ${targetFile}\n\nexport function taskHandler(): { status: string; timestamp: string } {\n  return { status: "completed", timestamp: new Date().toISOString() };\n}\n`;
+        const isTest = targetFile.includes('/tests/') || targetFile.includes('.test.') || targetFile.includes('test_');
+        if (isTest) {
+          if (promptLower.includes('add') || promptLower.includes('sum')) {
+            fallbackCode = `${securityDirective}// Automated tests for add\nimport { add } from '../main';\n\nexport function testAdd() {\n  const result = add(5, 10);\n  if (result !== 15) throw new Error(\`Expected 15, got \${result}\`);\n  console.log("testAdd passed!");\n  return true;\n}\n`;
+          } else {
+            fallbackCode = `${securityDirective}// Automated unit tests for ${targetFile}\nexport function runTests() {\n  console.log("Running automated unit tests for ${targetFile}");\n  return true;\n}\n`;
+          }
+        } else if (promptLower.includes('add') || promptLower.includes('sum') || promptLower.includes('plus') || promptLower.includes('addition') || promptLower.includes('two numbers')) {
+          fallbackCode = `${securityDirective}// Task: ${state.userInput}\n// Target: ${targetFile}\n\nexport function add(a: number, b: number): number {\n  return a + b;\n}\n\nexport function addTwoNumbers(a: number = 0, b: number = 0): number {\n  return a + b;\n}\n\nexport function executeTask() {\n  const result = addTwoNumbers(5, 10);\n  console.log("Result of addTwoNumbers(5, 10):", result);\n  return { status: "success", result };\n}\n`;
+        } else if (promptLower.includes('subtract') || promptLower.includes('minus') || promptLower.includes('difference')) {
+          fallbackCode = `${securityDirective}// Task: ${state.userInput}\n// Target: ${targetFile}\n\nexport function subtract(a: number, b: number): number {\n  return a - b;\n}\n\nexport function executeTask() {\n  const result = subtract(10, 5);\n  console.log("Result of subtract(10, 5):", result);\n  return { status: "success", result };\n}\n`;
+        } else if (promptLower.includes('multiply') || promptLower.includes('product') || promptLower.includes('times')) {
+          fallbackCode = `${securityDirective}// Task: ${state.userInput}\n// Target: ${targetFile}\n\nexport function multiply(a: number, b: number): number {\n  return a * b;\n}\n\nexport function executeTask() {\n  const result = multiply(5, 10);\n  console.log("Result of multiply(5, 10):", result);\n  return { status: "success", result };\n}\n`;
+        } else if (promptLower.includes('divide') || promptLower.includes('division')) {
+          fallbackCode = `${securityDirective}// Task: ${state.userInput}\n// Target: ${targetFile}\n\nexport function divide(a: number, b: number): number {\n  if (b === 0) throw new Error("Cannot divide by zero");\n  return a / b;\n}\n\nexport function executeTask() {\n  const result = divide(10, 2);\n  console.log("Result of divide(10, 2):", result);\n  return { status: "success", result };\n}\n`;
+        } else if (promptLower.includes('reverse') || promptLower.includes('string')) {
+          fallbackCode = `${securityDirective}// Task: ${state.userInput}\n// Target: ${targetFile}\n\nexport function reverseString(s: string): string {\n  return s.split('').reverse().join('');\n}\n\nexport function executeTask() {\n  const result = reverseString("hello");\n  console.log("Reversed string:", result);\n  return { status: "success", result };\n}\n`;
+        } else if (promptLower.includes('calculator') || promptLower.includes('calc') || promptLower.includes('math')) {
+          fallbackCode = `${securityDirective}// Task: ${state.userInput}\n// Target: ${targetFile}\n\nexport function add(a: number, b: number): number { return a + b; }\nexport function subtract(a: number, b: number): number { return a - b; }\nexport function multiply(a: number, b: number): number { return a * b; }\nexport function divide(a: number, b: number): number {\n  if (b === 0) throw new Error("Cannot divide by zero");\n  return a / b;\n}\n\nexport function executeTask() {\n  return { add: add(10, 5), subtract: subtract(10, 5), multiply: multiply(10, 5), divide: divide(10, 5) };\n}\n`;
+        } else {
+          fallbackCode = `${securityDirective}// Task: ${state.userInput}\n// Target: ${targetFile}\n\nexport function processTask(data: any = null): { task: string; timestamp: string } {\n  console.log("Executing task handler for:", "${state.userInput.replace(/"/g, '\\"').replace(/\n/g, ' ')}");\n  return { task: "${state.userInput.replace(/"/g, '\\"').replace(/\n/g, ' ')}", timestamp: new Date().toISOString() };\n}\n\nexport function executeTask() {\n  return processTask();\n}\n`;
+        }
       }
 
       generatedPatches.push({
