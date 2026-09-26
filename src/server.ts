@@ -2,7 +2,10 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
-import { execSync } from 'child_process';
+import { exec, execSync } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 import * as universalValidator from './tools/universalValidator';
 import { KaizenStateType } from './state';
 import { intentAgentNode, extractTerminalCommand, extractGitActions, extractBrowserUrl } from './agents/intentAgent';
@@ -36,9 +39,34 @@ app.use('/src/sandbox', express.static(path.resolve(process.cwd(), 'src/sandbox'
 let sseClients: Response[] = [];
 
 function broadcastSSE(eventType: string, data: any) {
-  const payload = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
-  sseClients.forEach(client => client.write(payload));
+  let payload: string;
+  try {
+    payload = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
+  } catch (err) {
+    console.error('[SSE] Serialization failed for event:', eventType, err);
+    return;
+  }
+  sseClients = sseClients.filter(client => {
+    try {
+      client.write(payload);
+      return true;
+    } catch {
+      return false; // Automatically drop dead connections
+    }
+  });
 }
+
+// Heartbeat to keep SSE alive and automatically prune dead client connections
+setInterval(() => {
+  sseClients = sseClients.filter(client => {
+    try {
+      client.write(': heartbeat\n\n');
+      return true;
+    } catch {
+      return false; // Drop disconnected client
+    }
+  });
+}, 30000);
 
 // SSE Connection Endpoint
 app.get('/api/stream', (req: Request, res: Response) => {
@@ -108,19 +136,45 @@ app.post('/api/mcp/execute', async (req: Request, res: Response) => {
   }
 });
 
-// Pending HITL (Human-In-The-Loop) Promises
+// Session-aware HITL (Human-In-The-Loop) Registry
+const hitlResolvers = new Map<string, (value: { action: 'approve' | 'reject' | 'feedback'; message?: string }) => void>();
 let pendingHitlResolver: ((value: { action: 'approve' | 'reject' | 'feedback'; message?: string }) => void) | null = null;
+
+function registerHitl(sessionId: string, resolve: (val: any) => void, timeoutMs = 300000) {
+  const timer = setTimeout(() => {
+    if (hitlResolvers.has(sessionId)) {
+      hitlResolvers.delete(sessionId);
+      resolve({ action: 'reject', message: 'HITL request timed out after 5 minutes.' });
+    }
+  }, timeoutMs);
+
+  const wrapped = (val: any) => {
+    clearTimeout(timer);
+    hitlResolvers.delete(sessionId);
+    pendingHitlResolver = null;
+    resolve(val);
+  };
+
+  hitlResolvers.set(sessionId, wrapped);
+  pendingHitlResolver = wrapped; // Maintains backward-compatibility
+}
 
 // HITL Response Endpoint
 app.post('/api/hitl/respond', (req: Request, res: Response) => {
-  const { action, message } = req.body;
+  const { sessionId, action, message } = req.body;
+
+  if (sessionId && hitlResolvers.has(sessionId)) {
+    const resolver = hitlResolvers.get(sessionId)!;
+    resolver({ action, message });
+    return res.json({ success: true, message: `HITL response recorded for session ${sessionId}.` });
+  }
+
   if (pendingHitlResolver) {
     pendingHitlResolver({ action, message });
-    pendingHitlResolver = null;
-    res.json({ success: true, message: 'HITL response recorded.' });
-  } else {
-    res.status(400).json({ success: false, error: 'No pending HITL request.' });
+    return res.json({ success: true, message: 'HITL response recorded.' });
   }
+
+  res.status(400).json({ success: false, error: 'No pending HITL request found or request timed out.' });
 });
 
 // Graphify Explorer REST API Endpoints
@@ -169,12 +223,16 @@ app.get('/api/graphify/node', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'Node ID parameter is required' });
       return;
     }
-    const { GraphifyEngine } = await import('./tools/graphifyEngine');
-    const engine = new GraphifyEngine();
-    await engine.scanDirectory('.');
-    const payload = engine.exportGraphData({ scope: 'full' });
-    const targetNode = payload.nodes.find(n => n.id === nodeId || n.path === nodeId);
-    const relatedEdges = payload.edges.filter(e => e.source === nodeId || e.target === nodeId);
+    const cachedGraph = persistenceEngine.getWorkspaceGraphCache('.');
+    let payload = cachedGraph?.structuredPayload;
+    if (!payload) {
+      const { GraphifyEngine } = await import('./tools/graphifyEngine');
+      const engine = new GraphifyEngine();
+      await engine.scanDirectory('.');
+      payload = engine.exportGraphData({ scope: 'full' });
+    }
+    const targetNode = payload.nodes.find((n: any) => n.id === nodeId || n.path === nodeId);
+    const relatedEdges = payload.edges.filter((e: any) => e.source === nodeId || e.target === nodeId);
     res.json({ node: targetNode || null, edges: relatedEdges });
   } catch (err: any) {
     console.error('[GraphifyAPI] Error fetching node details:', err);
@@ -202,19 +260,55 @@ app.post('/api/pipeline/run', async (req: Request, res: Response) => {
     return;
   }
 
+  // Guard against oversized text payloads (50,000 characters limit)
+  if (userInput && userInput.length > 50000) {
+    res.status(400).json({ error: 'userInput exceeds maximum length of 50,000 characters.' });
+    return;
+  }
+
+  // Guard against oversized base64 screenshots (>10MB)
+  if (imagePayload && typeof imagePayload === 'string' && (imagePayload.length * 3) / 4 > 10 * 1024 * 1024) {
+    res.status(400).json({ error: 'imagePayload exceeds maximum allowed size of 10MB.' });
+    return;
+  }
+
   // Send immediate response acknowledging execution
   res.json({ status: 'started', message: 'Pipeline execution initiated.' });
 
-  // Execute pipeline asynchronously and broadcast step updates via SSE
-  runPipeline(userInput || '', imagePayload, reqSessionId);
+  // Execute pipeline asynchronously with unhandled rejection protection
+  runPipeline(userInput || '', imagePayload, reqSessionId).catch((err) => {
+    console.error('[Pipeline Fatal Error]', err);
+    broadcastSSE('pipeline_complete', {
+      sessionId: reqSessionId,
+      status: 'FAILED',
+      error: err?.message || String(err)
+    });
+  });
 });
 
+// Redact passwords, API keys, and sensitive tokens from console logs
+function sanitizeForLogging(data: any): any {
+  if (typeof data !== 'object' || data === null) return data;
+  const sensitiveKeys = ['password', 'token', 'api_key', 'apikey', 'secret', 'authorization'];
+  const result: Record<string, any> = Array.isArray(data) ? [...data] : { ...data };
+  for (const key of Object.keys(result)) {
+    if (sensitiveKeys.some(sk => key.toLowerCase().includes(sk))) {
+      result[key] = '[REDACTED]';
+    } else if (typeof result[key] === 'string' && /^(gsk_|sk-|Bearer\s+)/i.test(result[key])) {
+      result[key] = '[REDACTED]';
+    } else if (typeof result[key] === 'object') {
+      result[key] = sanitizeForLogging(result[key]);
+    }
+  }
+  return result;
+}
+
 function logDiagnostic(category: string, action: string, data: Record<string, any>) {
-  console.log(`[KAIZEN][${category}] ${action}`, JSON.stringify(data));
+  const sanitized = sanitizeForLogging(data);
+  console.log(`[KAIZEN][${category}] ${action}`, JSON.stringify(sanitized));
 }
 
 async function runPipeline(rawUserInput: string, imagePayload?: string, clientSessionId?: string) {
-  memoryEngine.stateMemory.clearState();
   const sessionId = clientSessionId || persistenceEngine.generateSessionId();
   const runId = `run_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
   const createdAt = new Date().toISOString();
@@ -224,36 +318,6 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
   };
 
   setSSEEmitter(emitSSE);
-
-  logDiagnostic('RUN', 'INITIATED', { runId, sessionId, rawUserInput, hasImage: !!imagePayload });
-  emitSSE('pipeline_start', { sessionId, userInput: rawUserInput, timestamp: createdAt });
-
-  let extractedImageText = '';
-  if (imagePayload) {
-    emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: '🔍 Vision OCR: Extracting text from screenshot...' });
-    extractedImageText = await ocrService.extractTextFromImage(imagePayload);
-  }
-
-  let promptToProcess = rawUserInput;
-  if (extractedImageText) {
-    promptToProcess = `[Extracted Text from Screenshot]:\n${extractedImageText}\n\n[User Instructions]:\n${rawUserInput || 'Analyze and process attached screenshot code/instructions.'}`;
-  }
-
-  // Preprocess input with context manager & handle special @ commands
-  const processed = await preprocessUserRequest(promptToProcess);
-  if (processed.isCommand && processed.commandResult) {
-    emitSSE('agent_step', { agent: 'ContextManager', status: 'completed', message: 'Command executed.' });
-    broadcastSSE('pipeline_complete', {
-      sessionId,
-      runId,
-      status: 'GENERAL_COMPLETE',
-      route: 'GENERAL_QUERY',
-      explanation: processed.commandResult,
-      completedStages: ['context'],
-      skippedStages: ['intent', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer']
-    });
-    return;
-  }
 
   const userInput = rawUserInput;
   const originalUserRequest = rawUserInput;
@@ -265,7 +329,7 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
     userInput,
     originalUserRequest,
     targetFiles: [],
-    extractedContext: processed.workspaceContext || "",
+    extractedContext: "",
     plan: [],
     planApprovalStatus: 'NONE',
     generatedPatch: "",
@@ -278,7 +342,7 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
     skippedStages: [],
     generalAnswer: undefined,
     imagePayload,
-    extractedImageText: extractedImageText || undefined,
+    extractedImageText: undefined,
     permissionMode: permissionGate.getMode(),
     riskScore: permissionGate.calculateRiskScore('pipeline_run', { command: userInput }),
     permissionStatus: permissionGate.getMode() === 'auto_mode' ? 'AUTO_APPROVED' : 'APPROVED',
@@ -291,8 +355,6 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
     canRetry: true,
     rejectionReason: undefined
   };
-
-  persistenceEngine.saveCheckpoint(sessionId, 'INITIALIZED', state);
 
   const completedStages: string[] = [];
   const skippedStages: string[] = [];
@@ -346,6 +408,41 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
   };
 
   try {
+    logDiagnostic('RUN', 'INITIATED', { runId, sessionId, rawUserInput, hasImage: !!imagePayload });
+    emitSSE('pipeline_start', { sessionId, userInput: rawUserInput, timestamp: createdAt });
+
+    let extractedImageText = '';
+    if (imagePayload) {
+      emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: '🔍 Vision OCR: Extracting text from screenshot...' });
+      extractedImageText = await ocrService.extractTextFromImage(imagePayload);
+      state.extractedImageText = extractedImageText || undefined;
+    }
+
+    let promptToProcess = rawUserInput;
+    if (extractedImageText) {
+      promptToProcess = `[Extracted Text from Screenshot]:\n${extractedImageText}\n\n[User Instructions]:\n${rawUserInput || 'Analyze and process attached screenshot code/instructions.'}`;
+    }
+
+    // Preprocess input with context manager & handle special @ commands
+    const processed = await preprocessUserRequest(promptToProcess);
+    state.extractedContext = processed.workspaceContext || "";
+
+    if (processed.isCommand && processed.commandResult) {
+      emitSSE('agent_step', { agent: 'ContextManager', status: 'completed', message: 'Command executed.' });
+      broadcastSSE('pipeline_complete', {
+        sessionId,
+        runId,
+        status: 'GENERAL_COMPLETE',
+        route: 'GENERAL_QUERY',
+        explanation: processed.commandResult,
+        completedStages: ['context'],
+        skippedStages: ['intent', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer']
+      });
+      return;
+    }
+
+    persistenceEngine.saveCheckpoint(sessionId, 'INITIALIZED', state);
+
     // 1. Intent Agent
     logDiagnostic('GRAPH', 'ENTER IntentAgent', { userInput });
     emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: 'Classifying user intent...' });
@@ -389,8 +486,8 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
             riskScore: evalResult.riskScore
           });
 
-          let userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve: (value: { action: 'approve' | 'reject' | 'feedback'; message?: string }) => void) => {
-            pendingHitlResolver = resolve;
+          const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
+            registerHitl(sessionId, resolve);
           });
           broadcastSSE('hitl_received', { response: userHitlResponse });
           isApproved = userHitlResponse.action === 'approve';
@@ -438,7 +535,7 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
         });
 
         const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
-          pendingHitlResolver = resolve;
+          registerHitl(sessionId, resolve);
         });
         broadcastSSE('hitl_received', { response: userHitlResponse });
         isApproved = userHitlResponse.action === 'approve';
@@ -477,120 +574,116 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
       // Connect to external Playwright MCP Server via StdioClientTransport
       await mcpInterface.connectServer('playwright-mcp-stdio');
 
-      // Run PermissionGate for browser_navigate
-      const evalNav = permissionGate.evaluate('browser_navigate', { url: targetUrl });
-      let isApproved = true;
-      let hasBlockedAction = false;
+      try {
+        // Run PermissionGate for browser_navigate
+        const evalNav = permissionGate.evaluate('browser_navigate', { url: targetUrl });
+        let isApproved = true;
+        let hasBlockedAction = false;
 
-      if (evalNav.requiresApproval && !evalNav.allowed) {
-        hasBlockedAction = true;
-        broadcastSSE('hitl_request', {
-          type: 'BROWSER_PERMISSION_APPROVAL',
-          title: 'Permission Gate Intercept: Browser Navigation',
-          message: evalNav.reason,
-          url: targetUrl,
-          riskScore: evalNav.riskScore
-        });
-
-        const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
-          pendingHitlResolver = resolve;
-        });
-        broadcastSSE('hitl_received', { response: userHitlResponse });
-        isApproved = userHitlResponse.action === 'approve';
-      }
-
-      // Execute browser_navigate over Playwright MCP StdioClientTransport
-      emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: `🌐 Navigating browser to ${targetUrl}...` });
-      const navRes = await mcpInterface.executeBrowserAction('navigate', { url: targetUrl }, { approved: isApproved });
-
-      // Execute initial browser_snapshot over Playwright MCP StdioClientTransport
-      emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: '🌐 Inspecting page accessibility snapshot...' });
-      const snapRes = await mcpInterface.executeBrowserAction('snapshot', {}, { approved: isApproved });
-
-      const combinedBrowserOutput = [navRes.output, snapRes.output, navRes.error, snapRes.error].filter(Boolean).join('\n') || '(No DOM snapshot output returned)';
-      const executedToolsList = ['browser_navigate', 'browser_snapshot'];
-      let finalInspection = parseBrowserInspectionResult(combinedBrowserOutput, targetUrl, executedToolsList);
-
-      // Detect and execute explicit interactive browser action if requested (e.g. click "Graphify Explorer")
-      const requestedAction = extractRequestedBrowserAction(rawUserInput);
-      if (requestedAction) {
-        emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: `🔍 Resolving target "${requestedAction.target}" against accessibility tree...` });
-        const targetRes = resolveAccessibilityTarget(requestedAction.target, finalInspection);
-
-        if (!targetRes.found) {
-          finalInspection.actionExecuted = {
-            action: requestedAction.action,
-            target: requestedAction.target,
-            success: false,
-            error: targetRes.error
-          };
-        } else {
-          // Independent PermissionGate evaluation for requested browser action
-          const evalAction = permissionGate.evaluate(`browser_${requestedAction.action}`, {
-            target: requestedAction.target,
-            ref: targetRes.elementRef,
-            action: requestedAction.action
+        if (evalNav.requiresApproval && !evalNav.allowed) {
+          hasBlockedAction = true;
+          broadcastSSE('hitl_request', {
+            type: 'BROWSER_PERMISSION_APPROVAL',
+            title: 'Permission Gate Intercept: Browser Navigation',
+            message: evalNav.reason,
+            url: targetUrl,
+            riskScore: evalNav.riskScore
           });
 
-          let isActionApproved = true;
-          if (evalAction.requiresApproval && !evalAction.allowed) {
-            hasBlockedAction = true;
-            broadcastSSE('hitl_request', {
-              type: 'BROWSER_PERMISSION_APPROVAL',
-              title: `Permission Gate Intercept: Browser ${requestedAction.action.toUpperCase()}`,
-              message: evalAction.reason,
-              url: targetUrl,
-              riskScore: evalAction.riskScore
-            });
-
-            const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
-              pendingHitlResolver = resolve;
-            });
-            broadcastSSE('hitl_received', { response: userHitlResponse });
-            isActionApproved = userHitlResponse.action === 'approve';
-          }
-
-          emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: `⚡ Executing browser_${requestedAction.action} on "${requestedAction.target}" (ref: ${targetRes.elementRef})...` });
-          executedToolsList.push(`browser_${requestedAction.action}`);
-
-          const actionRes = await mcpInterface.executeBrowserAction(
-            requestedAction.action,
-            { element: targetRes.elementRef, ref: targetRes.elementRef, name: targetRes.targetName, text: requestedAction.text },
-            { approved: isActionApproved }
-          );
-
-          // Execute post-action browser_snapshot to capture page state AFTER action
-          emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: '🌐 Inspecting post-action page snapshot...' });
-          executedToolsList.push('browser_snapshot');
-          const postSnapRes = await mcpInterface.executeBrowserAction('snapshot', {}, { approved: isActionApproved });
-
-          const postCombinedOutput = [actionRes.output, postSnapRes.output, actionRes.error, postSnapRes.error].filter(Boolean).join('\n') || combinedBrowserOutput;
-          finalInspection = parseBrowserInspectionResult(postCombinedOutput, targetUrl, executedToolsList);
-          finalInspection.actionExecuted = {
-            action: requestedAction.action,
-            target: requestedAction.target,
-            elementRef: targetRes.elementRef,
-            success: actionRes.success,
-            error: actionRes.error
-          };
+          const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
+            registerHitl(sessionId, resolve);
+          });
+          broadcastSSE('hitl_received', { response: userHitlResponse });
+          isApproved = userHitlResponse.action === 'approve';
         }
+
+        emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: `🌐 Navigating browser to ${targetUrl}...` });
+        const navRes = await mcpInterface.executeBrowserAction('navigate', { url: targetUrl }, { approved: isApproved });
+
+        emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: '🌐 Inspecting page accessibility snapshot...' });
+        const snapRes = await mcpInterface.executeBrowserAction('snapshot', {}, { approved: isApproved });
+
+        const combinedBrowserOutput = [navRes.output, snapRes.output, navRes.error, snapRes.error].filter(Boolean).join('\n') || '(No DOM snapshot output returned)';
+        const executedToolsList = ['browser_navigate', 'browser_snapshot'];
+        let finalInspection = parseBrowserInspectionResult(combinedBrowserOutput, targetUrl, executedToolsList);
+
+        const requestedAction = extractRequestedBrowserAction(rawUserInput);
+        if (requestedAction) {
+          emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: `🔍 Resolving target "${requestedAction.target}" against accessibility tree...` });
+          const targetRes = resolveAccessibilityTarget(requestedAction.target, finalInspection);
+
+          if (!targetRes.found) {
+            finalInspection.actionExecuted = {
+              action: requestedAction.action,
+              target: requestedAction.target,
+              success: false,
+              error: targetRes.error
+            };
+          } else {
+            const evalAction = permissionGate.evaluate(`browser_${requestedAction.action}`, {
+              target: requestedAction.target,
+              ref: targetRes.elementRef,
+              action: requestedAction.action
+            });
+
+            let isActionApproved = true;
+            if (evalAction.requiresApproval && !evalAction.allowed) {
+              hasBlockedAction = true;
+              broadcastSSE('hitl_request', {
+                type: 'BROWSER_PERMISSION_APPROVAL',
+                title: `Permission Gate Intercept: Browser ${requestedAction.action.toUpperCase()}`,
+                message: evalAction.reason,
+                url: targetUrl,
+                riskScore: evalAction.riskScore
+              });
+
+              const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
+                registerHitl(sessionId, resolve);
+              });
+              broadcastSSE('hitl_received', { response: userHitlResponse });
+              isActionApproved = userHitlResponse.action === 'approve';
+            }
+
+            emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: `⚡ Executing browser_${requestedAction.action} on "${requestedAction.target}"...` });
+            executedToolsList.push(`browser_${requestedAction.action}`);
+
+            const actionRes = await mcpInterface.executeBrowserAction(
+              requestedAction.action,
+              { element: targetRes.elementRef, ref: targetRes.elementRef, name: targetRes.targetName, text: requestedAction.text },
+              { approved: isActionApproved }
+            );
+
+            emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: '🌐 Inspecting post-action page snapshot...' });
+            executedToolsList.push('browser_snapshot');
+            const postSnapRes = await mcpInterface.executeBrowserAction('snapshot', {}, { approved: isActionApproved });
+
+            const postCombinedOutput = [actionRes.output, postSnapRes.output, actionRes.error, postSnapRes.error].filter(Boolean).join('\n') || combinedBrowserOutput;
+            finalInspection = parseBrowserInspectionResult(postCombinedOutput, targetUrl, executedToolsList);
+            finalInspection.actionExecuted = {
+              action: requestedAction.action,
+              target: requestedAction.target,
+              elementRef: targetRes.elementRef,
+              success: actionRes.success,
+              error: actionRes.error
+            };
+          }
+        }
+
+        const formattedMarkdown = formatBrowserInspectionMarkdown(finalInspection);
+        state.targetFiles = [];
+
+        await finalizeExecution(hasBlockedAction ? 'HITL_REQUIRED' : 'GENERAL_COMPLETE', {
+          route: 'MCP_BROWSER',
+          targetFiles: [],
+          filePatches: [],
+          explanation: formattedMarkdown
+        });
+        return;
+      } finally {
+        // Guaranteed cleanup: never leak child browser processes
+        await mcpInterface.disconnectServer().catch(() => { });
+        await mcpInterface.connectServer('default-inprocess').catch(() => { });
       }
-
-      const formattedMarkdown = formatBrowserInspectionMarkdown(finalInspection);
-
-      // Cleanly disconnect from Playwright MCP and reconnect to default-inprocess
-      await mcpInterface.disconnectServer();
-      await mcpInterface.connectServer('default-inprocess');
-
-      state.targetFiles = [];
-
-      await finalizeExecution(hasBlockedAction ? 'HITL_REQUIRED' : 'GENERAL_COMPLETE', {
-        route: 'MCP_BROWSER',
-        targetFiles: [],
-        filePatches: [],
-        explanation: formattedMarkdown
-      });
-      return;
     }
 
     // Routing Logic for File Deletion & Sandbox Clearing (Permission Gate HITL)
@@ -622,14 +715,12 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
         targetFilesToDelete = getFilesRecursively(sandboxDir);
       }
 
-      // --- START OF FIX FOR ISSUE #1 ---
       // Parse exclusion patterns from the raw user prompt
       const exceptMatch = rawUserInput.match(/\b(except|exclude|keep|don't delete|save)\s+([a-zA-Z0-9_\-\.\/]+)/i);
       if (exceptMatch) {
         const excludedFile = exceptMatch[2].toLowerCase();
         targetFilesToDelete = targetFilesToDelete.filter(f => !f.toLowerCase().includes(excludedFile));
       }
-      // --- END OF FIX FOR ISSUE #1 ---
 
       if (targetFilesToDelete.length === 0) {
         await finalizeExecution('GENERAL_COMPLETE', {
@@ -654,7 +745,7 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
         });
 
         const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
-          pendingHitlResolver = resolve;
+          registerHitl(sessionId, resolve);
         });
         broadcastSSE('hitl_received', { response: userHitlResponse });
         isApproved = userHitlResponse.action === 'approve';
@@ -680,21 +771,24 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
         if (fs.existsSync(sandboxDir)) {
           try {
             const cleanEmptyDirs = (dir: string) => {
-              const items = fs.readdirSync(dir);
-              for (const item of items) {
-                const p = path.join(dir, item);
-                if (fs.statSync(p).isDirectory()) {
-                  cleanEmptyDirs(p);
-                  if (fs.readdirSync(p).length === 0) {
-                    fs.rmdirSync(p);
-                  }
+              try {
+                const items = fs.readdirSync(dir);
+                for (const item of items) {
+                  const p = path.join(dir, item);
+                  try {
+                    if (fs.statSync(p).isDirectory()) {
+                      cleanEmptyDirs(p);
+                      if (fs.readdirSync(p).length === 0) {
+                        fs.rmdirSync(p);
+                      }
+                    }
+                  } catch { }
                 }
-              }
+              } catch { }
             };
             cleanEmptyDirs(sandboxDir);
           } catch { }
         }
-        state.targetFiles = (state.targetFiles || []).filter(f => !deletedFiles.includes(f));
         explanation = `### 🗑️ File Deletion Completed\n\nSuccessfully deleted ${deletedCount} files from workspace:\n${deletedFiles.map(f => `- \`${f}\``).join('\n')}`;
       } else {
         explanation = `### 🛑 File Deletion Cancelled\n\nFile deletion request was cancelled by the user. No files were modified or deleted.`;
@@ -702,7 +796,6 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
 
       await finalizeExecution(hasBlockedAction ? 'HITL_REQUIRED' : 'GENERAL_COMPLETE', {
         route: 'DELETE_FILES',
-        targetFiles: state.targetFiles,
         explanation
       });
       return;
@@ -721,28 +814,25 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
         const langStr = langMatch ? langMatch[1].toUpperCase() : 'your specified language';
         answer = `I'd be happy to help you create code files in ${langStr}! Could you please clarify what specific program, feature, or logic you'd like to build?\n\nFor example:\n- File Read/Write Operations & Data Persistence\n- Object-Oriented Class Structures & Inheritance\n- Data Structures & Algorithms (e.g. Trees, Graphs, Sorting)\n- CLI Utility Tool or Math Calculator`;
       } else {
-
-        // --- START OF FIX FOR ISSUE #4 ---
         const now = new Date();
         const istTime = now.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true });
         const jstTime = now.toLocaleTimeString('en-JP', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', hour12: true });
 
         const systemPromptClockExtension = `
-Current Context:
-- Current Date/Time: ${now.toISOString()}
-- India (IST): ${istTime}
-- Japan (JST): ${jstTime}
-`;
+  Current Context:
+  - Current Date/Time: ${now.toISOString()}
+  - India (IST): ${istTime}
+  - Japan (JST): ${jstTime}
+  `;
 
-        // Check if user query requires live web search (e.g. unknown people, news, external topics)
+        // Check if user query requires live web search
         let webSearchResultsText = '';
         const isSearchQuery = /\b(who is|nole|djokovic|news|today|latest|tell me about|what happened|search|google|company|openai|time|cricket|schedule|tour|visiting|match|weather|current|now)\b/i.test(rawUserInput);
         const isMemoryQuery = /\b(my name|what is my name|whats my name|who am i)\b/i.test(rawUserInput);
-        // --- END OF FIX FOR ISSUE #4 ---
 
         if (isSearchQuery && !isMemoryQuery) {
           emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: '🌐 Performing live web search (DuckDuckGo / Google)...' });
-          const results = await performWebSearch(rawUserInput);
+          const results = await performWebSearch(rawUserInput, emitSSE);
           if (results.length > 0) {
             webSearchResultsText = `\n\n=== LIVE WEB SEARCH RESULTS ===\n` +
               results.map((r, i) => `[${i + 1}] Title: ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet}`).join('\n\n');
@@ -763,16 +853,16 @@ Current Context:
               const { ChatGroq } = await import('@langchain/groq');
               const model = new ChatGroq({ apiKey, model: modelName, temperature: 0.3 });
               const systemContent = `You are Kaizen, a helpful AI assistant.
-${systemPromptClockExtension}
-Always check the USER PROFILE & KNOWN FACTS, CONVERSATION HISTORY, and LIVE WEB SEARCH RESULTS provided below to answer user queries:
+  ${systemPromptClockExtension}
+  Always check the USER PROFILE & KNOWN FACTS, CONVERSATION HISTORY, and LIVE WEB SEARCH RESULTS provided below to answer user queries:
 
-${state.extractedContext || userInput}
-${webSearchResultsText}
+  ${state.extractedContext || userInput}
+  ${webSearchResultsText}
 
-Directives:
-- If LIVE WEB SEARCH RESULTS are provided above, use them to answer facts, current events, or people queries directly.
-- If the user asks for their name or identity, state their name/identity from the KNOWN FACTS and CONVERSATION HISTORY.
-- Provide concise, friendly, and direct answers without generating code unless explicitly requested.`;
+  Directives:
+  - If LIVE WEB SEARCH RESULTS are provided above, use them to answer facts, current events, or people queries directly.
+  - If the user asks for their name or identity, state their name/identity from the KNOWN FACTS and CONVERSATION HISTORY.
+  - Provide concise, friendly, and direct answers without generating code unless explicitly requested.`;
 
               const res: any = await model.invoke([
                 { role: 'system', content: systemContent },
@@ -794,126 +884,6 @@ Directives:
       });
       return;
     }
-
-    // Routing Logic for Memory Write Operations
-    if (state.status === "ROUTED_MEMORY_WRITE") {
-      skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
-      state.targetFiles = [];
-      state.plan = [];
-
-      const { memoryEngine } = await import('./context/memory/memoryEngine');
-      memoryEngine.consolidator.consolidateTurn(rawUserInput, 'Acknowledged memory preference.');
-
-      const factsAdded: { key: string; value: string; category: string }[] = [];
-
-      if (/typescript/i.test(rawUserInput) && /strict/i.test(rawUserInput)) {
-        const f1 = memoryEngine.longTermMemory.addFact('coding_convention', 'TypeScript Strict Mode', 'Enabled / Preferred', 'user_explicit');
-        factsAdded.push({ key: f1.key, value: f1.value, category: f1.category });
-      }
-
-      if (/typescript/i.test(rawUserInput) && /backend/i.test(rawUserInput)) {
-        const f2 = memoryEngine.longTermMemory.addFact('project_fact', 'Backend Language', 'TypeScript', 'user_explicit');
-        factsAdded.push({ key: f2.key, value: f2.value, category: f2.category });
-      }
-
-      if (/tailwind/i.test(rawUserInput)) {
-        const f3 = memoryEngine.longTermMemory.addFact('coding_convention', 'UI Styling Framework', 'Tailwind CSS', 'user_explicit');
-        factsAdded.push({ key: f3.key, value: f3.value, category: f3.category });
-      }
-
-      if (factsAdded.length === 0) {
-        const keyMatch = rawUserInput.match(/(?:remember|preference|convention|we use|we prefer)\s+([^:.]+)/i);
-        const key = keyMatch && keyMatch[1] ? keyMatch[1].trim() : 'Project Preference';
-        const fGen = memoryEngine.longTermMemory.addFact('project_fact', key, rawUserInput, 'user_explicit');
-        factsAdded.push({ key: fGen.key, value: fGen.value, category: fGen.category });
-      }
-
-      const factItemsMarkdown = factsAdded.map(f => `✓ **${f.key}**: ${f.value}`).join('\n');
-      const explanation = `### 🧠 Memory Updated
-
-${factItemsMarkdown}
-
-- **Memory Type**: Long-Term Project Memory
-- **Files Modified**: 0
-- **Plan Steps**: 0
-- **Persistence**: \`.kaizen/storage/memory/long-term.json\`
-- **Route**: Memory Write`;
-
-      completedStages.push('response');
-      await finalizeExecution('COMPLETED', {
-        route: 'ROUTED_MEMORY_WRITE',
-        memoryUpdated: true,
-        targetFiles: [],
-        plan: [],
-        filePatches: [],
-        memoryRecordsUpdated: factsAdded.length,
-        memory: {
-          type: 'long_term',
-          records: factsAdded,
-          persisted: true
-        },
-        explanation
-      });
-      return;
-    }
-
-    // Routing Logic for Memory Read Operations
-    if (state.status === "ROUTED_MEMORY_READ") {
-      skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
-      state.targetFiles = [];
-      state.plan = [];
-
-      const { memoryEngine } = await import('./context/memory/memoryEngine');
-      const queryRes = memoryEngine.retrieveRelevant({ prompt: rawUserInput });
-
-      const longTermFacts = queryRes.longTermMemory;
-      const episodicEpisodes = queryRes.episodicMemory;
-
-      let explanation = `### 🧠 Memory Recall\n\n`;
-
-      if (longTermFacts.length > 0) {
-        explanation += `#### 📌 Relevant Project Memories\n`;
-        for (const f of longTermFacts) {
-          explanation += `- **${f.key}**: ${f.value} *(Category: ${f.category})*\n`;
-        }
-        explanation += `\n`;
-      } else {
-        explanation += `*(No long-term project facts match this query)*\n\n`;
-      }
-
-      if (episodicEpisodes.length > 0) {
-        explanation += `#### 📜 Previous Experience Episodes\n`;
-        for (const ep of episodicEpisodes) {
-          explanation += `- **Task**: ${ep.task}\n`;
-          explanation += `  - **Outcome**: ${ep.outcome.toUpperCase()}\n`;
-          explanation += `  - **Tests Passed**: ${ep.testsPassed}\n`;
-          explanation += `  - **Affected Files**: ${ep.affectedFiles.join(', ') || 'N/A'}\n`;
-          explanation += `  - **Solution / Resolution**: ${ep.solution}\n`;
-          if (ep.errors && ep.errors.length > 0) {
-            explanation += `  - **Errors Encountered**: ${ep.errors.join('; ')}\n`;
-          }
-          if (ep.lessons && ep.lessons.length > 0) {
-            explanation += `  - **Lessons**: ${ep.lessons.join('; ')}\n`;
-          }
-          explanation += `\n`;
-        }
-      } else {
-        explanation += `*(No episodic experience episodes match this query)*\n\n`;
-      }
-
-      explanation += `- **Files Modified**: 0\n- **Plan Steps**: 0\n- **Route**: Memory Read`;
-
-      completedStages.push('response');
-      await finalizeExecution('COMPLETED', {
-        route: 'ROUTED_MEMORY_READ',
-        targetFiles: [],
-        plan: [],
-        filePatches: [],
-        explanation
-      });
-      return;
-    }
-
 
     // 2. Context Retrieval Agent
     logDiagnostic('GRAPH', 'ENTER ContextRetrievalAgent', { targetFiles: state.targetFiles });
@@ -969,20 +939,8 @@ ${factItemsMarkdown}
         }
 
         while (!testResult.passed && state.retryCount < MAX_SELF_HEAL_RETRIES) {
-          const isToolFailure = testResult.failureType === 'TOOL_EXECUTION_FAILURE' || testResult.structuredFailure?.failureType === 'TOOL_EXECUTION_FAILURE';
-          if (isToolFailure) {
-            logDiagnostic('SELF_HEAL', 'TOOL_EXECUTION_FAILURE_STOP', { summary: testResult.summary });
-            emitSSE('agent_step', {
-              agent: 'TestRunnerAgent',
-              status: 'error',
-              result: { summary: `[TOOL_EXECUTION_FAILURE] ${testResult.summary}. Source code files were preserved untouched.`, passed: false }
-            });
-            break;
-          }
-
           state.retryCount += 1;
 
-          // Extract failing implementation file paths from test stack traces
           const discoveredFiles = extractFailingFilesFromLogs(`${testResult.summary}\n${testResult.stdout}\n${testResult.stderr}`);
           if (discoveredFiles.length > 0) {
             state.targetFiles = Array.from(new Set([...state.targetFiles, ...discoveredFiles]));
@@ -1010,17 +968,13 @@ ${factItemsMarkdown}
           const validPatches = (debugResult.filePatches || []).filter(p => !isTestFile(p.filePath));
 
           if (validPatches.length > 0) {
-            const diffCards = await prepareDiffCards(validPatches);
-            const writeResult = saveFilePatchesToServerDiskWithVerification(validPatches, emitSSE);
-            console.log(`[Debugger] Files written: ${writeResult.successCount}/${validPatches.length}`);
-            if (writeResult.successCount > 0) {
-              completedStages.push('coder');
-              emitSSE('agent_step', {
-                agent: 'CoderAgent',
-                status: 'completed',
-                result: { filePatches: validPatches, diffCards }
-              });
-            }
+            saveFilePatchesToServerDisk(validPatches);
+            completedStages.push('coder');
+            emitSSE('agent_step', {
+              agent: 'CoderAgent',
+              status: 'completed',
+              result: { filePatches: validPatches, diffCards: await prepareDiffCards(validPatches) }
+            });
           }
           persistenceEngine.saveCheckpoint(sessionId, `DebuggerAgent_Retry_${state.retryCount}`, state);
 
@@ -1100,7 +1054,7 @@ ${factItemsMarkdown}
         result: { plan: state.plan, status: state.status, planApprovalStatus: 'PENDING_APPROVAL' }
       });
 
-      // 4. Human-In-The-Loop (HITL) Plan Approval Request Widget (Pauses Graph Execution)
+      // 4. Human-In-The-Loop (HITL) Plan Approval Request Widget
       emitSSE('hitl_request', {
         type: 'PLAN_APPROVAL',
         title: 'Plan Approval Required',
@@ -1111,12 +1065,11 @@ ${factItemsMarkdown}
       });
 
       let userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
-        pendingHitlResolver = resolve;
+        registerHitl(sessionId, resolve);
       });
 
       emitSSE('hitl_received', { response: userHitlResponse });
 
-      // --- START OF FIX FOR ISSUE #2 ---
       while (userHitlResponse.action === 'reject') {
         state.retryCount = (state.retryCount || 0) + 1;
         if (state.retryCount <= 3) {
@@ -1139,7 +1092,7 @@ ${factItemsMarkdown}
           });
 
           userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
-            pendingHitlResolver = resolve;
+            registerHitl(sessionId, resolve);
           });
 
           emitSSE('hitl_received', { response: userHitlResponse });
@@ -1150,7 +1103,6 @@ ${factItemsMarkdown}
           return;
         }
       }
-      // --- END OF FIX FOR ISSUE #2 ---
 
       if (userHitlResponse.action === 'feedback' && userHitlResponse.message) {
         state.planApprovalStatus = 'FEEDBACK_SUBMITTED';
@@ -1179,41 +1131,26 @@ ${factItemsMarkdown}
       persistenceEngine.saveCheckpoint(sessionId, 'CoderAgent', state);
 
       const diffCards = await prepareDiffCards(coderOutput.filePatches || []);
+
+      // Auto-persist verified patches to disk so tests can validate them
+      if (coderOutput.filePatches && coderOutput.filePatches.length > 0) {
+        saveFilePatchesToServerDiskWithVerification(coderOutput.filePatches, emitSSE);
+      }
+
       emitSSE('agent_step', {
         agent: 'CoderAgent',
         status: 'completed',
         result: { filePatches: coderOutput.filePatches, diffCards }
       });
 
-      // Code patches are rendered in UI diff cards and written to disk ONLY when the user clicks "Apply Patch"
-
       // 6. Test Runner & Self-Healing Debugger Loop
       logDiagnostic('GRAPH', 'ENTER TestRunnerAgent', {});
       emitSSE('agent_step', { agent: 'TestRunnerAgent', status: 'running', message: 'Executing workspace automated unit test suite...' });
       let testResult = await runWorkspaceTests(state.targetFiles);
-      completedStages.push('testrunner');
-      persistenceEngine.saveCheckpoint(sessionId, 'TestRunnerAgent', state);
-
-      emitSSE('agent_step', {
-        agent: 'TestRunnerAgent',
-        status: 'completed',
-        result: { summary: testResult.summary, passed: testResult.passed }
-      });
 
       const MAX_SELF_HEAL_RETRIES = 3;
       if (!testResult.passed) {
         while (!testResult.passed && state.retryCount < MAX_SELF_HEAL_RETRIES) {
-          const isToolFailure = testResult.failureType === 'TOOL_EXECUTION_FAILURE' || testResult.structuredFailure?.failureType === 'TOOL_EXECUTION_FAILURE';
-          if (isToolFailure) {
-            logDiagnostic('SELF_HEAL', 'TOOL_EXECUTION_FAILURE_STOP', { summary: testResult.summary });
-            emitSSE('agent_step', {
-              agent: 'TestRunnerAgent',
-              status: 'error',
-              result: { summary: `[TOOL_EXECUTION_FAILURE] ${testResult.summary}. Source code files were preserved untouched.`, passed: false }
-            });
-            break;
-          }
-
           state.retryCount += 1;
 
           const discoveredFiles = extractFailingFilesFromLogs(`${testResult.summary}\n${testResult.stdout}\n${testResult.stderr}`);
@@ -1232,9 +1169,7 @@ ${factItemsMarkdown}
           const debugResult = await debuggerAgentNode(state);
           completedStages.push('debugger');
           if (debugResult.filePatches && debugResult.filePatches.length > 0) {
-            const diffCards = await prepareDiffCards(debugResult.filePatches);
-            const writeResult = saveFilePatchesToServerDiskWithVerification(debugResult.filePatches, emitSSE);
-            console.log(`[CoderAgent] Verified write: ${writeResult.successCount}/${debugResult.filePatches.length} files`);
+            saveFilePatchesToServerDisk(debugResult.filePatches);
           }
           persistenceEngine.saveCheckpoint(sessionId, `DebuggerAgent_Retry_${state.retryCount}`, state);
 
@@ -1265,23 +1200,24 @@ ${factItemsMarkdown}
         result: reviewResult
       });
 
-      // --- START OF FIX FOR ISSUE #3 ---
       try {
-        // Option A: Use custom validator if available
         if (typeof (universalValidator as any)?.validateWorkspace === 'function') {
           await (universalValidator as any).validateWorkspace(state.targetFiles);
         } else {
-          // Option B: Fallback to a zero-emit syntax/type check
-          execSync('npx tsc --noEmit', { cwd: './src/sandbox' });
+          const sandboxTsConfig = path.resolve(process.cwd(), 'src/sandbox/tsconfig.json');
+          const rootTsConfig = path.resolve(process.cwd(), 'tsconfig.json');
+          if (fs.existsSync(sandboxTsConfig)) {
+            await execAsync('npx tsc --noEmit', { cwd: './src/sandbox' });
+          } else if (fs.existsSync(rootTsConfig)) {
+            await execAsync('npx tsc --noEmit', { cwd: process.cwd() });
+          }
         }
       } catch (error: any) {
-        // Feed errors straight to the self-healing loop
-        (state as any).compilerError = error.message || String(error);
+        (state as any).compilerError = error.stdout || error.message || String(error);
         if (typeof debuggerAgentNode === 'function') {
           await debuggerAgentNode(state);
         }
       }
-      // --- END OF FIX FOR ISSUE #3 ---
 
       await finalizeExecution('SUCCESS', {
         filePatches: coderOutput.filePatches,
@@ -1304,12 +1240,12 @@ async function prepareDiffCards(filePatches: GeneratedFilePatch[]) {
     let originalCode = "";
     const fullPath = path.resolve(process.cwd(), patch.filePath);
     if (fs.existsSync(fullPath)) {
-      originalCode = fs.readFileSync(fullPath, 'utf-8').replace(/\r\n/g, '\n');
+      originalCode = fs.readFileSync(fullPath, 'utf-8');
     }
     cards.push({
       filePath: patch.filePath,
       originalCode,
-      generatedCode: (patch.code || '').replace(/\r\n/g, '\n')
+      generatedCode: patch.code
     });
   }
   return cards;
@@ -1325,8 +1261,9 @@ function saveFilePatchesToServerDisk(patches: GeneratedFilePatch[]) {
           fs.mkdirSync(dir, { recursive: true });
         }
         let cleanCode = patch.code || '';
-        if (cleanCode.includes('\\n')) {
-          cleanCode = cleanCode.replace(/\\n/g, '\n').replace(/\\"/g, '"');
+        // Only unescape if code is literally wrapped as a serialized JSON string
+        if (cleanCode.startsWith('"') && cleanCode.endsWith('"') && cleanCode.includes('\\n')) {
+          try { cleanCode = JSON.parse(cleanCode); } catch { }
         }
         fs.writeFileSync(fullPath, cleanCode, 'utf-8');
       } catch (err) {
@@ -1341,27 +1278,43 @@ function getSandboxFilesRecursively(dir: string, baseDir: string = dir): { name:
   let results: { name: string; path: string; isDir: boolean }[] = [];
   if (!fs.existsSync(dir)) return results;
 
-  const list = fs.readdirSync(dir);
-  for (const item of list) {
-    if (/^test[1-5]$/i.test(item)) continue; // hide benchmark test folders
+  try {
+    const list = fs.readdirSync(dir);
+    for (const item of list) {
+      if (/^test[1-5]$/i.test(item)) continue; // hide benchmark test folders
 
-    const fullPath = path.join(dir, item);
-    const stat = fs.statSync(fullPath);
-    const relativePath = path.relative(process.cwd(), fullPath).replace(/\\/g, '/');
-    const relativeFromSandbox = path.relative(baseDir, fullPath).replace(/\\/g, '/');
+      const fullPath = path.join(dir, item);
+      try {
+        const stat = fs.statSync(fullPath);
+        const relativePath = path.relative(process.cwd(), fullPath).replace(/\\/g, '/');
+        const relativeFromSandbox = path.relative(baseDir, fullPath).replace(/\\/g, '/');
 
-    if (stat.isDirectory()) {
-      results = results.concat(getSandboxFilesRecursively(fullPath, baseDir));
-    } else {
-      results.push({
-        name: relativeFromSandbox,
-        path: relativePath,
-        isDir: false
-      });
+        if (stat.isDirectory()) {
+          results = results.concat(getSandboxFilesRecursively(fullPath, baseDir));
+        } else {
+          results.push({
+            name: relativeFromSandbox,
+            path: relativePath,
+            isDir: false
+          });
+        }
+      } catch {
+        continue; // Safely skip broken links or transient files
+      }
     }
+  } catch (err) {
+    console.warn(`[Workspace] Could not read directory ${dir}:`, err);
   }
 
   return results;
+}
+
+// Helper: Enforce canonical boundary inside src/sandbox
+function isSafeSandboxPath(relPath: string): boolean {
+  if (!relPath) return false;
+  const sandboxRoot = path.resolve(process.cwd(), 'src/sandbox');
+  const resolved = path.resolve(process.cwd(), relPath);
+  return resolved.startsWith(sandboxRoot) && !isProtectedFile(relPath);
 }
 
 // Workspace File Explorer API
@@ -1375,14 +1328,16 @@ app.get('/api/workspace/files', (req: Request, res: Response) => {
 app.get('/api/workspace/file', (req: Request, res: Response) => {
   const relPath = req.query.path as string;
   if (!relPath) {
-    res.status(400).json({ error: 'path query parameter is required' });
-    return;
+    return res.status(400).json({ error: 'path query parameter is required' });
+  }
+
+  if (!isSafeSandboxPath(relPath)) {
+    return res.status(403).json({ error: `Access to '${relPath}' is forbidden. All files must stay inside src/sandbox/` });
   }
 
   const fullPath = path.resolve(process.cwd(), relPath);
   if (!fs.existsSync(fullPath)) {
-    res.status(404).json({ error: 'File not found' });
-    return;
+    return res.status(404).json({ error: 'File not found' });
   }
 
   const stat = fs.statSync(fullPath);
@@ -1392,11 +1347,9 @@ app.get('/api/workspace/file', (req: Request, res: Response) => {
     if (childFiles.length > 0) {
       const firstFile = childFiles[0];
       const content = fs.readFileSync(path.resolve(process.cwd(), firstFile.path), 'utf-8');
-      res.json({ path: firstFile.path, content, isDirectory: true });
-      return;
+      return res.json({ path: firstFile.path, content, isDirectory: true });
     }
-    res.status(400).json({ error: `'${relPath}' is a directory with no files` });
-    return;
+    return res.status(400).json({ error: `'${relPath}' is a directory with no files` });
   }
 
   const content = fs.readFileSync(fullPath, 'utf-8');
@@ -1407,13 +1360,11 @@ app.get('/api/workspace/file', (req: Request, res: Response) => {
 app.post('/api/workspace/file', (req: Request, res: Response) => {
   const { path: relPath, content } = req.body;
   if (!relPath || content === undefined) {
-    res.status(400).json({ error: 'path and content are required' });
-    return;
+    return res.status(400).json({ error: 'path and content are required' });
   }
 
-  if (isProtectedFile(relPath)) {
-    res.status(403).json({ error: `Cannot save to protected file '${relPath}'. All user files must reside in src/sandbox/` });
-    return;
+  if (!isSafeSandboxPath(relPath)) {
+    return res.status(403).json({ error: `Cannot save to '${relPath}'. Path escapes sandbox or is protected.` });
   }
 
   const fullPath = path.resolve(process.cwd(), relPath);
@@ -1422,12 +1373,7 @@ app.post('/api/workspace/file', (req: Request, res: Response) => {
     fs.mkdirSync(dir, { recursive: true });
   }
 
-  let cleanContent = content;
-  if (typeof cleanContent === 'string' && cleanContent.includes('\\n')) {
-    cleanContent = cleanContent.replace(/\\n/g, '\n').replace(/\\"/g, '"');
-  }
-
-  fs.writeFileSync(fullPath, cleanContent, 'utf-8');
+  fs.writeFileSync(fullPath, content, 'utf-8');
   res.json({ success: true, message: `Saved changes to ${relPath}` });
 });
 
@@ -1435,13 +1381,11 @@ app.post('/api/workspace/file', (req: Request, res: Response) => {
 app.delete('/api/workspace/file', (req: Request, res: Response) => {
   const relPath = req.query.path as string;
   if (!relPath) {
-    res.status(400).json({ error: 'path parameter is required' });
-    return;
+    return res.status(400).json({ error: 'path parameter is required' });
   }
 
-  if (isProtectedFile(relPath)) {
-    res.status(403).json({ error: `Cannot delete protected file '${relPath}'` });
-    return;
+  if (!isSafeSandboxPath(relPath)) {
+    return res.status(403).json({ error: `Cannot delete protected or non-sandbox file '${relPath}'` });
   }
 
   const fullPath = path.resolve(process.cwd(), relPath);
@@ -1461,15 +1405,26 @@ app.delete('/api/workspace/file', (req: Request, res: Response) => {
 // Clear All User Sandbox Files API
 app.post('/api/workspace/clear-sandbox', (req: Request, res: Response) => {
   const sandboxDir = path.resolve(process.cwd(), 'src/sandbox');
+  const skipped: string[] = [];
   if (fs.existsSync(sandboxDir)) {
     const list = fs.readdirSync(sandboxDir);
     for (const item of list) {
       if (/^test[1-5]$/i.test(item)) continue; // preserve benchmark dirs
       const fullPath = path.join(sandboxDir, item);
-      fs.rmSync(fullPath, { recursive: true, force: true });
+      try {
+        fs.rmSync(fullPath, { recursive: true, force: true });
+      } catch (err: any) {
+        skipped.push(item);
+        console.warn(`[ClearSandbox] Could not remove ${item}:`, err?.message);
+      }
     }
   }
-  res.json({ success: true, message: 'All user sandbox files cleared' });
+  res.json({
+    success: true,
+    message: skipped.length > 0
+      ? `Sandbox cleared (skipped locked items: ${skipped.join(', ')})`
+      : 'All user sandbox files cleared'
+  });
 });
 
 // Storage Tier Endpoints
@@ -1508,38 +1463,54 @@ async function validateGroqApiKey() {
   const API_KEY = process.env.GROQ_API_KEY;
 
   if (!API_KEY || API_KEY === 'your_groq_api_key_here') {
-    console.error("❌ FATAL: GROQ_API_KEY not found in .env");
-    process.exit(1);
+    console.warn("⚠️ Warning: GROQ_API_KEY is missing or default. AI features will be disabled.");
+    return false;
   }
 
   try {
     console.log("🔍 Validating Groq API key on startup...");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
     const response = await fetch('https://api.groq.com/openai/v1/models', {
-      headers: { 'Authorization': `Bearer ${API_KEY}` }
+      headers: { 'Authorization': `Bearer ${API_KEY}` },
+      signal: controller.signal
     });
+    clearTimeout(timeout);
 
     if (response.status === 200) {
       console.log("✅ Groq API Key validated successfully on startup");
       return true;
     } else {
-      const error = await response.text();
-      console.error(`❌ Groq API returned ${response.status}: ${error}`);
-      process.exit(1);
+      console.warn(`⚠️ Warning: Groq API returned status ${response.status}. AI features may be degraded.`);
+      return false;
     }
   } catch (error: any) {
-    console.error("❌ Failed to validate Groq API Key:", error?.message || error);
-    process.exit(1);
+    console.warn("⚠️ Warning: Could not reach Groq API (offline mode active):", error?.message || error);
+    return false;
   }
 }
 
-// Execute startup validation before starting Express server listener
+// Execute startup validation before starting Express server listener with graceful shutdown
 validateGroqApiKey().then(() => {
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`\n==================================================`);
     console.log(`🚀 Kaizen AI Client Tier & Generative UI Server`);
     console.log(`   Running at: http://localhost:${PORT}`);
     console.log(`==================================================\n`);
   });
+
+  const handleShutdown = (signal: string) => {
+    console.log(`\n[Server] Received ${signal}. Closing HTTP and SSE connections...`);
+    sseClients.forEach(c => {
+      try { c.end(); } catch { }
+    });
+    server.close(() => {
+      console.log('[Server] HTTP listener closed cleanly. Exiting.');
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 3000);
+  };
+
+  process.on('SIGINT', () => handleShutdown('SIGINT'));
+  process.on('SIGTERM', () => handleShutdown('SIGTERM'));
 });
-
-

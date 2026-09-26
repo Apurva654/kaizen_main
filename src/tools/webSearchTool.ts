@@ -177,7 +177,10 @@ async function searchDuckDuckGo(query: string): Promise<WebSearchResult[]> {
  * Main Web Search Function
  * Tries multiple search engines in order until one returns results
  */
-export async function performWebSearch(query: string): Promise<WebSearchResult[]> {
+export async function performWebSearch(query: string, customEmitter?: (eventType: string, data: any) => void): Promise<WebSearchResult[]> {
+  if (customEmitter) {
+    setSSEEmitter(customEmitter);
+  }
   if (!query || query.trim().length === 0) {
     return [];
   }
