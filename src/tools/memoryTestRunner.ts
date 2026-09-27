@@ -294,7 +294,7 @@ export async function runMemoryTests(): Promise<VerificationResult[]> {
 
     if (
       enriched.includes('PROJECT CONTEXT:') &&
-      enriched.includes('=== KAIZEN FOUR-MEMORY SYSTEM ===') &&
+      enriched.includes('KAIZEN FOUR-MEMORY SYSTEM') &&
       enriched.includes('STATE MEMORY') &&
       enriched.includes('SHORT-TERM MEMORY') &&
       enriched.includes('EPISODIC MEMORY')
@@ -480,7 +480,11 @@ export async function runMemoryTests(): Promise<VerificationResult[]> {
       lastPlan: undefined,
       planTimestamp: undefined,
       canRetry: true,
-      rejectionReason: undefined
+      rejectionReason: undefined,
+      requestedLanguage: undefined,
+      languageInfo: undefined,
+      generationSource: undefined,
+      generationFailureReason: undefined
     };
 
     const intent = await intentAgentNode(state);
@@ -585,7 +589,11 @@ export async function runMemoryTests(): Promise<VerificationResult[]> {
       lastPlan: undefined,
       planTimestamp: undefined,
       canRetry: true,
-      rejectionReason: undefined
+      rejectionReason: undefined,
+      requestedLanguage: undefined,
+      languageInfo: undefined,
+      generationSource: undefined,
+      generationFailureReason: undefined
     };
 
     const intent1 = await intentAgentNode(state1);
@@ -634,7 +642,11 @@ export async function runMemoryTests(): Promise<VerificationResult[]> {
       lastPlan: undefined,
       planTimestamp: undefined,
       canRetry: true,
-      rejectionReason: undefined
+      rejectionReason: undefined,
+      requestedLanguage: undefined,
+      languageInfo: undefined,
+      generationSource: undefined,
+      generationFailureReason: undefined
     };
 
     const intent2 = await intentAgentNode(state2);

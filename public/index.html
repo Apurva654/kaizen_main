@@ -194,6 +194,10 @@
           <div class="editor-toolbar">
             <div class="file-path-breadcrumb" id="editor-file-path">src/sandbox/main.ts</div>
             <div class="toolbar-actions">
+              <button id="run-code-btn" class="btn-success-sm" title="Execute Code File in Sandbox">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                ▶ Run Code
+              </button>
               <button id="save-file-btn" class="btn-primary-sm">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
                 Save File
@@ -204,6 +208,32 @@
           <div class="editor-body">
             <div class="line-numbers" id="line-numbers">1</div>
             <textarea id="code-editor" class="code-area" spellcheck="false" placeholder="// Select or edit code inside src/sandbox/..."></textarea>
+          </div>
+
+          <!-- Execution Console Output Drawer -->
+          <div id="code-output-console" class="code-output-console hidden">
+            <div id="console-resizer-top" class="console-resizer-top" title="Drag to resize console height"></div>
+            <div id="console-header" class="console-header">
+              <div class="console-title-group">
+                <span class="console-drag-handle" title="Drag with mouse to move console window">⣿</span>
+                <span class="console-icon">💻</span>
+                <span class="console-title">Execution Console Output</span>
+                <span id="console-status-badge" class="badge-pill success">Exit Code: 0</span>
+                <span id="console-time-badge" class="console-time-text">0ms</span>
+              </div>
+              <div class="console-window-actions">
+                <button id="dock-console-btn" class="icon-btn-secondary console-action-btn" title="Toggle Docked / Floating Terminal Mode">
+                  <span id="dock-icon">📌</span> <span id="dock-label" class="dock-btn-label">Float</span>
+                </button>
+                <button id="close-console-btn" class="icon-btn-secondary" title="Close Console">&times;</button>
+              </div>
+            </div>
+            <pre id="console-output-body" class="console-output-body">Executing code...</pre>
+            <div class="console-stdin-bar">
+              <span class="stdin-label">⌨️ Stdin Input:</span>
+              <input type="text" id="console-stdin-input" class="stdin-input-field" placeholder="Enter values (e.g., 10 20 or multiple lines)..." />
+              <button id="send-stdin-btn" class="btn-success-xs" title="Execute file with these input values">▶ Run with Input</button>
+            </div>
           </div>
         </div>
 

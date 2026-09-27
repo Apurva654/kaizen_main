@@ -66,7 +66,11 @@ async function executeAgentPipeline(userInput: string) {
     lastPlan: undefined,
     planTimestamp: undefined,
     canRetry: true,
-    rejectionReason: undefined
+    rejectionReason: undefined,
+    requestedLanguage: undefined,
+    languageInfo: undefined,
+    generationSource: undefined,
+    generationFailureReason: undefined
   };
 
   persistenceEngine.saveCheckpoint(sessionId, 'INITIALIZED', state);

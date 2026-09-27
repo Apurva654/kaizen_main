@@ -739,29 +739,33 @@ export class GraphifyEngine {
         });
       }
 
+      const shouldIncludeSymbolSubNodes = scope === 'current-task' || scope === 'generated' || getFileStatus(filePath) === 'active' || getFileStatus(filePath) === 'generated' || getFileStatus(filePath) === 'modified' || relevantFilePaths.size <= 5;
+
       for (const sym of node.symbols) {
         totalSymbolsCount++;
-        const symNodeId = `symbol:${filePath}:${sym.name}`;
-        if (!addedNodeIds.has(symNodeId)) {
-          addedNodeIds.add(symNodeId);
-          nodes.push({
-            id: symNodeId,
-            label: `${sym.name}()`,
-            type: 'symbol',
-            symbolType: sym.type,
-            declaredIn: filePath,
-            isExported: sym.isExported,
-            status: 'normal'
+        if (shouldIncludeSymbolSubNodes) {
+          const symNodeId = `symbol:${filePath}:${sym.name}`;
+          if (!addedNodeIds.has(symNodeId)) {
+            addedNodeIds.add(symNodeId);
+            nodes.push({
+              id: symNodeId,
+              label: `${sym.name}()`,
+              type: 'symbol',
+              symbolType: sym.type,
+              declaredIn: filePath,
+              isExported: sym.isExported,
+              status: 'normal'
+            });
+          }
+
+          edges.push({
+            id: `edge:${fileNodeId}:defines:${symNodeId}`,
+            source: fileNodeId,
+            target: symNodeId,
+            type: 'DEFINES',
+            label: 'DEFINES'
           });
         }
-
-        edges.push({
-          id: `edge:${fileNodeId}:defines:${symNodeId}`,
-          source: fileNodeId,
-          target: symNodeId,
-          type: sym.isExported ? 'EXPORTS' : 'DEFINES',
-          label: sym.isExported ? 'EXPORTS' : 'DEFINES'
-        });
       }
 
       for (const imp of node.imports) {

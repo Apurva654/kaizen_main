@@ -5,6 +5,7 @@ export interface PlanStep {
   description: string;
   status: 'pending' | 'in_progress' | 'completed' | 'failed';
   targetFile?: string;
+  language?: string;
   action?: string;
   isNewFile?: boolean;
   dependencies?: string[];
@@ -26,6 +27,26 @@ export const KaizenState = Annotation.Root({
   }),
 
   userInput: Annotation<string>(),
+
+  requestedLanguage: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
+
+  languageInfo: Annotation<{ requested?: string; source?: string; confidence?: string } | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
+
+  generationSource: Annotation<'llm' | 'fallback' | 'retry' | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
+
+  generationFailureReason: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
 
   targetFiles: Annotation<string[]>({
     reducer: (x, y) => Array.from(new Set([...x, ...y])),

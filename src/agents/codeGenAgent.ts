@@ -286,7 +286,8 @@ Your task is to generate precise, production-ready source code patches in each t
 6. MULTI-FILE EDITS: Return a patch for EACH target file inside the 'files' array field. Target Files:\n${fileLangSummary}
 7. CODE FORMAT: Do NOT wrap code in markdown code blocks (\`\`\`python ... \`\`\` or \`\`\`typescript ... \`\`\`) inside the 'code' string fields. Return pure executable raw source code matching the target file extension.
 8. ZERO TEMPLATE BOILERPLATE MANDATE: NEVER output generic 'export function taskHandler()' boilerplate or TypeScript syntax for .html, .css, or .js files. For .html files, output valid HTML (<!DOCTYPE html><html>...). For .css files, output valid CSS rules (body { ... }). For .js files, output valid JavaScript code.
-9. In 'explanations', summarize how functions, classes, and imports were implemented.`;
+9. NON-INTERACTIVE AUTOMATED RUNNER COMPATIBILITY: The code will be executed in a non-interactive automated IDE execution runner. Do NOT block on raw interactive input (e.g. Python input(), Node readline) without fallback values or non-blocking command-line args (sys.argv / process.argv). Always include a non-blocking main demo block (e.g. if __name__ == "__main__": using sample inputs or sys.argv) so the file executes immediately and outputs results without timing out.
+10. In 'explanations', summarize how functions, classes, and imports were implemented.`;
 
         const truncatedContext = (state.extractedContext || "").slice(-3000);
         const userContextPrompt = `User Request: "${state.userInput}"
@@ -659,9 +660,18 @@ document.addEventListener("DOMContentLoaded", () => {
           fallbackCode = `${securityDirective}// Task: ${state.userInput}\n// Target: ${targetFile}\n\nexport function reverseString(s: string): string {\n  return s.split('').reverse().join('');\n}\n\nexport function executeTask() {\n  const result = reverseString("hello");\n  console.log("Reversed string:", result);\n  return { status: "success", result };\n}\n`;
         } else if (promptLower.includes('calculator') || promptLower.includes('calc') || promptLower.includes('math')) {
           fallbackCode = `${securityDirective}// Task: ${state.userInput}\n// Target: ${targetFile}\n\nexport function add(a: number, b: number): number { return a + b; }\nexport function subtract(a: number, b: number): number { return a - b; }\nexport function multiply(a: number, b: number): number { return a * b; }\nexport function divide(a: number, b: number): number {\n  if (b === 0) throw new Error("Cannot divide by zero");\n  return a / b;\n}\n\nexport function executeTask() {\n  return { add: add(10, 5), subtract: subtract(10, 5), multiply: multiply(10, 5), divide: divide(10, 5) };\n}\n`;
+        } else if (promptLower.includes('hello') || promptLower.includes('name') || promptLower.includes('say hello')) {
+          fallbackCode = `${securityDirective}// Task: ${state.userInput}\n// Target: ${targetFile}\n\nexport function sayHello(name: string = "World"): string {\n  return \`Hello \${name}!\`;\n}\n\nconsole.log(sayHello("Alex"));\n`;
         } else {
-          fallbackCode = `${securityDirective}// Task: ${state.userInput}\n// Target: ${targetFile}\n\nexport function processTask(data: any = null): { task: string; timestamp: string } {\n  console.log("Executing task handler for:", "${state.userInput.replace(/"/g, '\\"').replace(/\n/g, ' ')}");\n  return { task: "${state.userInput.replace(/"/g, '\\"').replace(/\n/g, ' ')}", timestamp: new Date().toISOString() };\n}\n\nexport function executeTask() {\n  return processTask();\n}\n`;
+          fallbackCode = `${securityDirective}// Task: ${state.userInput}\n// Target: ${targetFile}\n\nexport function runSolution(): void {\n  console.log("Executing solution for: ${state.userInput.replace(/"/g, '\\"').replace(/\n/g, ' ')}");\n}\n\nrunSolution();\n`;
         }
+      }
+
+      // Syntax Validation check on fallback code
+      const { validateCodeSyntax } = require('../tools/languageResolver');
+      const synVal = validateCodeSyntax(fallbackCode, ext || 'typescript', targetFile);
+      if (!synVal.isValid) {
+        console.warn(`[CodeGen][SYNTAX_WARN] Pre-write syntax validation failed for ${targetFile}: ${synVal.error}`);
       }
 
       generatedPatches.push({
@@ -672,8 +682,24 @@ document.addEventListener("DOMContentLoaded", () => {
     explanations = "Generated language-aware implementation.";
   }
 
+  // Pre-patch syntax validation across all generated patches
+  const { validateCodeSyntax } = require('../tools/languageResolver');
+  const validPatches: GeneratedFilePatch[] = [];
+  let failureReason: string | undefined = undefined;
+
+  for (const patch of generatedPatches) {
+    const ext = patch.filePath.split('.').pop()?.toLowerCase();
+    const synVal = validateCodeSyntax(patch.code, state.requestedLanguage || ext || 'typescript', patch.filePath);
+    if (synVal.isValid) {
+      validPatches.push(patch);
+    } else {
+      console.error(`[CodeGen][SYNTAX_REJECT] Rejected patch for ${patch.filePath}: ${synVal.error}`);
+      failureReason = synVal.error;
+    }
+  }
+
   // Filter out any protected file patch outputs
-  generatedPatches = generatedPatches.filter(p => !isProtectedFile(p.filePath));
+  generatedPatches = (validPatches.length > 0 ? validPatches : generatedPatches).filter(p => !isProtectedFile(p.filePath));
 
   const updatedPlan: PlanStep[] = state.plan.map((step) => {
     if (step.id === 2) {
@@ -693,6 +719,8 @@ document.addEventListener("DOMContentLoaded", () => {
     plan: updatedPlan,
     filePatches: generatedPatches,
     generatedPatch: generatedPatches[0]?.code || "",
+    generationSource: (explanations && explanations.includes("language-aware")) ? "fallback" : "llm",
+    generationFailureReason: failureReason,
     extractedContext: state.extractedContext 
       ? `${state.extractedContext}\n\nGenerated Multi-File Patches:\n${patchSummaries}\nExplanations:\n${explanations}` 
       : `Generated Code:\n${patchSummaries}`,

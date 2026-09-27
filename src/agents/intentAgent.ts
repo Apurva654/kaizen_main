@@ -502,12 +502,19 @@ export function extractTargetFilesFromPrompt(prompt: string): string[] {
   return foundFiles;
 }
 
-export async function intentAgentNode(state: typeof KaizenState.State): Promise<{ status: string; targetFiles: string[] }> {
+export async function intentAgentNode(state: typeof KaizenState.State): Promise<{ status: string; targetFiles: string[]; requestedLanguage: string; languageInfo: any }> {
+  const { resolveLanguage, deriveTargetFile } = await import('../tools/languageResolver');
+  const langRes = resolveLanguage(state.userInput, state.targetFiles);
+  const requestedLanguage = langRes.requestedLanguage;
+  const languageInfo = { requested: langRes.requestedLanguage, source: langRes.source, confidence: langRes.confidence };
+
   // Fast-track heuristic for File Deletion queries
   if (isDeleteQuery(state.userInput)) {
     return {
       status: 'ROUTED_DELETE_FILES',
-      targetFiles: []
+      targetFiles: [],
+      requestedLanguage,
+      languageInfo
     };
   }
 
@@ -515,7 +522,9 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
   if (isBrowserQuery(state.userInput)) {
     return {
       status: 'ROUTED_MCP_BROWSER',
-      targetFiles: []
+      targetFiles: [],
+      requestedLanguage,
+      languageInfo
     };
   }
 
@@ -523,7 +532,9 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
   if (isGitQuery(state.userInput)) {
     return {
       status: 'ROUTED_MCP_GIT',
-      targetFiles: []
+      targetFiles: [],
+      requestedLanguage,
+      languageInfo
     };
   }
 
@@ -531,7 +542,9 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
   if (isTerminalQuery(state.userInput)) {
     return {
       status: 'ROUTED_MCP_TERMINAL',
-      targetFiles: []
+      targetFiles: [],
+      requestedLanguage,
+      languageInfo
     };
   }
 
@@ -539,7 +552,9 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
   if (isMemoryWriteQuery(state.userInput)) {
     return {
       status: 'ROUTED_MEMORY_WRITE',
-      targetFiles: []
+      targetFiles: [],
+      requestedLanguage,
+      languageInfo
     };
   }
 
@@ -547,7 +562,9 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
   if (isMemoryReadQuery(state.userInput)) {
     return {
       status: 'ROUTED_MEMORY_READ',
-      targetFiles: []
+      targetFiles: [],
+      requestedLanguage,
+      languageInfo
     };
   }
 
@@ -555,7 +572,9 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
   if (isAmbiguousQuery(state.userInput)) {
     return {
       status: 'ROUTED_GENERAL_QUERY',
-      targetFiles: []
+      targetFiles: [],
+      requestedLanguage,
+      languageInfo
     };
   }
 
@@ -563,7 +582,9 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
   if (isGeneralQuery(state.userInput)) {
     return {
       status: 'ROUTED_GENERAL_QUERY',
-      targetFiles: []
+      targetFiles: [],
+      requestedLanguage,
+      languageInfo
     };
   }
 
@@ -595,7 +616,7 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
 
         const systemPrompt = `You are an intent classification and target file selector agent. Respond in valid json format.
 Analyze the user's prompt and classify their intent into one of:
-- GENERAL_QUERY: General knowledge, greetings, chit-chat, or questions unrelated to code implementation or editing (e.g. "hello", "who is nole?", "who is roger federer?", "what is the capital of France?").
+- GENERAL_QUERY: General knowledge, greetings, chit-chat, or questions unrelated to code implementation or editing.
 - GENERATE_CODE: Creating new features, boilerplate, or implementing requested functionality.
 - DEBUG_ERROR: Fixing bugs, addressing runtime errors, broken builds, or troubleshooting code.
 - EXPLAIN_CODE: Explaining how codebase code works, answering architecture/codebase questions.
@@ -630,7 +651,9 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
         if (intent === 'GENERAL_QUERY') {
           return {
             status: 'ROUTED_GENERAL_QUERY',
-            targetFiles: []
+            targetFiles: [],
+            requestedLanguage,
+            languageInfo
           };
         }
 
@@ -646,12 +669,10 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
           }
         } else if (rawFiles && rawFiles.length > 0) {
           extractedFiles = rawFiles as string[];
-        } else if (/\b(html|website|webpage|landing page|web|frontend)\b/i.test(state.userInput)) {
-          extractedFiles = ['src/sandbox/index.html'];
-        } else if (state.targetFiles.length > 0) {
+        } else if (state.targetFiles && state.targetFiles.length > 0) {
           extractedFiles = state.targetFiles;
         } else {
-          extractedFiles = ['src/sandbox/main.ts'];
+          extractedFiles = [deriveTargetFile(state.userInput, langRes)];
         }
 
         extractedFiles = extractedFiles.map((f: string) => {
@@ -669,7 +690,9 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
 
         return {
           status: `ROUTED_${intent}`,
-          targetFiles: Array.from(new Set<string>(extractedFiles))
+          targetFiles: Array.from(new Set<string>(extractedFiles)),
+          requestedLanguage,
+          languageInfo
         };
       } 
       catch (error: any) {
@@ -684,7 +707,9 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
   if (isGeneralQuery(state.userInput)) {
     return {
       status: 'ROUTED_GENERAL_QUERY',
-      targetFiles: []
+      targetFiles: [],
+      requestedLanguage,
+      languageInfo
     };
   }
 
@@ -698,29 +723,19 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
     intent = 'REFACTOR';
   }
 
-  const detectedFiles: string[] = [...promptExtracted];
-  if (input.includes('utils.ts') || input.includes('utils')) {
-    if (!detectedFiles.includes('src/sandbox/utils.ts')) detectedFiles.push('src/sandbox/utils.ts');
-  }
-  if (input.includes('main.ts') || input.includes('main')) {
-    if (!detectedFiles.includes('src/sandbox/main.ts')) detectedFiles.push('src/sandbox/main.ts');
-  }
-
   let finalTargets: string[];
   if (promptExtracted.length > 0) {
     finalTargets = promptExtracted;
-  } else if (detectedFiles.length > 0) {
-    finalTargets = detectedFiles;
-  } else if (/\b(html|website|webpage|landing page|web|frontend)\b/i.test(state.userInput)) {
-    finalTargets = ['src/sandbox/index.html'];
-  } else if (state.targetFiles.length > 0) {
+  } else if (state.targetFiles && state.targetFiles.length > 0) {
     finalTargets = state.targetFiles;
   } else {
-    finalTargets = ['src/sandbox/main.ts'];
+    finalTargets = [deriveTargetFile(state.userInput, langRes)];
   }
 
   return {
     status: `ROUTED_${intent}`,
-    targetFiles: Array.from(new Set<string>(finalTargets))
+    targetFiles: Array.from(new Set<string>(finalTargets)),
+    requestedLanguage,
+    languageInfo
   };
 }

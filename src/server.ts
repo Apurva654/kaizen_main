@@ -2,7 +2,7 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
-import { exec, execSync } from 'child_process';
+import { exec, execSync, spawn, ChildProcess } from 'child_process';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
@@ -25,6 +25,7 @@ import { mcpInterface } from './mcp/mcpInterface';
 import { dockerSandbox } from './tools/dockerSandbox';
 import { parseBrowserInspectionResult, formatBrowserInspectionMarkdown, extractRequestedBrowserAction, resolveAccessibilityTarget } from './tools/browserSnapshotParser';
 import { performWebSearch, setSSEEmitter } from './tools/webSearchTool';
+import { GraphifyEngine } from './tools/graphifyEngine';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -112,6 +113,171 @@ app.post('/api/permission/dryrun', (req: Request, res: Response) => {
     res.json({ success: true, isDryRunMode: permissionGate.isDryRunMode() });
   } else {
     res.status(400).json({ error: "Invalid payload. 'enabled' boolean is required." });
+  }
+});
+
+let activeLiveProcess: {
+  child: ChildProcess;
+  filePath: string;
+  startTime: number;
+} | null = null;
+
+// Direct Code File Execution Endpoint
+app.post('/api/code/run', async (req: Request, res: Response) => {
+  const { filePath, content } = req.body;
+  const targetFile = filePath || 'src/sandbox/main.ts';
+  const fullPath = path.resolve(process.cwd(), targetFile);
+
+  if (typeof content === 'string' && content.trim() && fs.existsSync(path.dirname(fullPath))) {
+    try {
+      fs.writeFileSync(fullPath, content, 'utf-8');
+    } catch (e) {
+      console.warn('[RunAPI] Failed to auto-sync buffer to file disk:', e);
+    }
+  }
+
+  if (!fs.existsSync(fullPath)) {
+    res.status(404).json({ success: false, error: `File not found: ${targetFile}` });
+    return;
+  }
+
+  const ext = path.extname(targetFile).toLowerCase();
+  const startTime = Date.now();
+
+  try {
+    if (ext === '.html') {
+      const fileName = path.basename(targetFile);
+      const browserUrl = `http://localhost:3000/sandbox/${fileName}`;
+      res.json({
+        success: true,
+        filePath: targetFile,
+        language: 'html',
+        output: `Webpage hosted statically at ${browserUrl}. Opening live preview...`,
+        executionTimeMs: Date.now() - startTime,
+        exitCode: 0,
+        browserUrl
+      });
+      return;
+    }
+
+    if (activeLiveProcess && activeLiveProcess.child) {
+      try {
+        activeLiveProcess.child.kill();
+      } catch {}
+      activeLiveProcess = null;
+    }
+
+    const stdinPayload = typeof req.body.stdin === 'string' ? req.body.stdin : (typeof req.body.input === 'string' ? req.body.input : '');
+
+    let executable = 'node';
+    let args: string[] = [targetFile];
+
+    if (ext === '.py') {
+      executable = 'python';
+      args = ['-u', targetFile];
+    } else if (ext === '.ts' || ext === '.js') {
+      executable = 'npx';
+      args = ['ts-node', '--transpile-only', targetFile];
+    }
+
+    const child = spawn(executable, args, {
+      cwd: process.cwd(),
+      shell: true,
+      env: { ...process.env, PYTHONUNBUFFERED: '1' }
+    });
+
+    activeLiveProcess = {
+      child,
+      filePath: targetFile,
+      startTime
+    };
+
+    if (stdinPayload && child.stdin) {
+      try {
+        child.stdin.write(stdinPayload.replace(/\\n/g, '\n') + '\n');
+      } catch {}
+    }
+
+    child.stdout?.on('data', (chunk) => {
+      const text = chunk.toString('utf-8');
+      broadcastSSE('code_chunk', { text, filePath: targetFile });
+    });
+
+    child.stderr?.on('data', (chunk) => {
+      const text = chunk.toString('utf-8');
+      broadcastSSE('code_chunk', { text, filePath: targetFile });
+    });
+
+    child.on('close', (exitCode) => {
+      const durationMs = activeLiveProcess ? Date.now() - activeLiveProcess.startTime : Date.now() - startTime;
+      broadcastSSE('code_exit', {
+        exitCode: exitCode ?? 0,
+        executionTimeMs: durationMs,
+        filePath: targetFile
+      });
+      activeLiveProcess = null;
+    });
+
+    child.on('error', (err) => {
+      broadcastSSE('code_chunk', { text: `\n[Process Error]: ${err.message}\n`, filePath: targetFile });
+      broadcastSSE('code_exit', { exitCode: 1, executionTimeMs: Date.now() - startTime, filePath: targetFile });
+      activeLiveProcess = null;
+    });
+
+    res.json({
+      success: true,
+      isLiveStream: true,
+      filePath: targetFile,
+      language: ext === '.py' ? 'python' : 'typescript'
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      filePath: targetFile,
+      output: err?.message || String(err),
+      executionTimeMs: Date.now() - startTime,
+      exitCode: 1
+    });
+  }
+});
+
+// Live Interactive Process Stdin Endpoint
+app.post('/api/code/input', (req: Request, res: Response) => {
+  const { input, text } = req.body;
+  const inputText = String(input !== undefined ? input : (text !== undefined ? text : ''));
+
+  if (!activeLiveProcess || !activeLiveProcess.child || activeLiveProcess.child.killed) {
+    res.status(400).json({ success: false, error: 'No active running process waiting for input.' });
+    return;
+  }
+
+  try {
+    if (activeLiveProcess.child.stdin && !activeLiveProcess.child.stdin.destroyed) {
+      activeLiveProcess.child.stdin.write(inputText + '\n');
+      broadcastSSE('code_chunk', { text: inputText + '\n', isUserStdin: true });
+      res.json({ success: true, message: 'Input sent to process stdin' });
+    } else {
+      res.status(400).json({ success: false, error: 'Process stdin stream is closed' });
+    }
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to write to process stdin' });
+  }
+});
+
+// Terminate Live Running Process Endpoint
+app.post('/api/code/kill', (req: Request, res: Response) => {
+  if (activeLiveProcess && activeLiveProcess.child) {
+    try {
+      activeLiveProcess.child.kill();
+      broadcastSSE('code_chunk', { text: '\n[Process Terminated by User]\n' });
+      broadcastSSE('code_exit', { exitCode: 130, executionTimeMs: Date.now() - activeLiveProcess.startTime });
+      activeLiveProcess = null;
+      res.json({ success: true, message: 'Process terminated.' });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Failed to terminate process' });
+    }
+  } else {
+    res.json({ success: true, message: 'No process currently running.' });
   }
 });
 
@@ -353,7 +519,11 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
     lastPlan: undefined,
     planTimestamp: undefined,
     canRetry: true,
-    rejectionReason: undefined
+    rejectionReason: undefined,
+    requestedLanguage: undefined,
+    languageInfo: undefined,
+    generationSource: undefined,
+    generationFailureReason: undefined
   };
 
   const completedStages: string[] = [];
@@ -449,6 +619,10 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
     const intentOutput = await intentAgentNode(state);
     state.status = intentOutput.status;
     state.targetFiles = intentOutput.targetFiles;
+    if (intentOutput.requestedLanguage) {
+      state.requestedLanguage = intentOutput.requestedLanguage;
+      state.languageInfo = intentOutput.languageInfo;
+    }
     completedStages.push('intent');
     logDiagnostic('GRAPH', 'EXIT IntentAgent', { status: state.status, targetFiles: state.targetFiles });
     persistenceEngine.saveCheckpoint(sessionId, 'IntentAgent', state);
@@ -1425,6 +1599,35 @@ app.post('/api/workspace/clear-sandbox', (req: Request, res: Response) => {
       ? `Sandbox cleared (skipped locked items: ${skipped.join(', ')})`
       : 'All user sandbox files cleared'
   });
+});
+
+// Live Graphify Knowledge Graph API Endpoint
+app.get('/api/graphify/current', async (req: Request, res: Response) => {
+  const scope = (req.query.scope as string) || 'current-task';
+  const activeFile = (req.query.activeFile as string) || 'src/sandbox/main.ts';
+
+  try {
+    const sandboxDir = path.resolve(process.cwd(), 'src/sandbox');
+    const engine = new GraphifyEngine();
+    if (fs.existsSync(sandboxDir)) {
+      await engine.scanDirectory(sandboxDir);
+    }
+
+    const sandboxFiles = getSandboxFilesRecursively(sandboxDir, sandboxDir).map(f => f.path);
+    const targetFiles = sandboxFiles.length > 0 ? sandboxFiles : ['src/sandbox/main.ts'];
+
+    const graphPayload = engine.exportGraphData({
+      scope,
+      targetFiles,
+      generatedFiles: targetFiles,
+      activeFile
+    });
+
+    res.json(graphPayload);
+  } catch (err: any) {
+    console.error('[API][Graphify] Error generating graph payload:', err);
+    res.status(500).json({ error: 'Failed to generate Graphify graph payload', message: err?.message || String(err) });
+  }
 });
 
 // Storage Tier Endpoints

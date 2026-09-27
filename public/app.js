@@ -15,6 +15,14 @@ document.addEventListener('DOMContentLoaded', () => {
   const telemetryModal = document.getElementById('telemetry-modal');
   const closeModalBtn = document.getElementById('close-modal-btn');
   const telemetryBody = document.getElementById('telemetry-body');
+  const runCodeBtn = document.getElementById('run-code-btn');
+  const codeOutputConsole = document.getElementById('code-output-console');
+  const consoleStatusBadge = document.getElementById('console-status-badge');
+  const consoleTimeBadge = document.getElementById('console-time-badge');
+  const consoleOutputBody = document.getElementById('console-output-body');
+  const closeConsoleBtn = document.getElementById('close-console-btn');
+  const consoleStdinInput = document.getElementById('console-stdin-input');
+  const sendStdinBtn = document.getElementById('send-stdin-btn');
 
   let activeFilePath = 'src/sandbox/main.ts';
   let isReadOnlyBrowserSession = false;
@@ -605,6 +613,139 @@ document.addEventListener('DOMContentLoaded', () => {
   if (codeEditor) codeEditor.addEventListener('input', updateLineNumbers);
   if (saveFileBtn) saveFileBtn.addEventListener('click', saveActiveFile);
   if (refreshFilesBtn) refreshFilesBtn.addEventListener('click', loadSandboxFiles);
+  let isCodeExecuting = false;
+
+  async function sendStdinInputToProcess() {
+    if (!consoleStdinInput) return;
+    const val = consoleStdinInput.value;
+
+    if (isCodeExecuting) {
+      try {
+        await fetch('/api/code/input', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ input: val })
+        });
+        consoleStdinInput.value = '';
+      } catch (err) {
+        console.warn('[RunAPI] Failed to send stdin to live process:', err);
+      }
+    } else {
+      runActiveCode(val);
+      consoleStdinInput.value = '';
+    }
+  }
+
+  if (runCodeBtn) runCodeBtn.addEventListener('click', () => runActiveCode());
+  if (sendStdinBtn) sendStdinBtn.addEventListener('click', sendStdinInputToProcess);
+  if (consoleStdinInput) {
+    consoleStdinInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        sendStdinInputToProcess();
+      }
+    });
+  }
+  if (closeConsoleBtn) closeConsoleBtn.addEventListener('click', () => {
+    if (codeOutputConsole) codeOutputConsole.classList.add('hidden');
+    if (isCodeExecuting) {
+      fetch('/api/code/kill', { method: 'POST' }).catch(() => {});
+    }
+  });
+
+  async function runActiveCode(customStdin = '') {
+    if (!activeFilePath) {
+      showToast('No active file selected to run', 'warning');
+      return;
+    }
+
+    if (saveFileBtn && !isReadOnlyBrowserSession) {
+      await saveActiveFile();
+    }
+
+    if (codeOutputConsole) codeOutputConsole.classList.remove('hidden');
+    if (consoleStatusBadge) {
+      consoleStatusBadge.className = 'badge-pill running';
+      consoleStatusBadge.textContent = 'Running...';
+    }
+    if (consoleTimeBadge) consoleTimeBadge.textContent = '0ms';
+
+    if (consoleOutputBody) consoleOutputBody.textContent = '';
+    if (runCodeBtn) runCodeBtn.disabled = true;
+    isCodeExecuting = true;
+
+    const startTime = Date.now();
+
+    if (isVsCodeEnv && vscode) {
+      vscode.postMessage({ type: 'RUN_CODE', filePath: activeFilePath, stdin: customStdin });
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/code/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filePath: activeFilePath,
+          content: codeEditor ? codeEditor.value : '',
+          approved: true,
+          stdin: customStdin
+        })
+      });
+      const data = await res.json();
+      if (!data.isLiveStream) {
+        renderExecutionOutput(data);
+      }
+    } catch (err) {
+      renderExecutionOutput({
+        success: false,
+        filePath: activeFilePath,
+        output: `Error executing code: ${err?.message || err}`,
+        executionTimeMs: Date.now() - startTime,
+        exitCode: 1
+      });
+    }
+  }
+
+  function renderExecutionOutput(data) {
+    if (runCodeBtn) runCodeBtn.disabled = false;
+    if (codeOutputConsole) codeOutputConsole.classList.remove('hidden');
+
+    const exitCode = data.exitCode !== undefined ? data.exitCode : (data.success ? 0 : 1);
+    const isSuccess = data.success && exitCode === 0;
+
+    if (consoleStatusBadge) {
+      consoleStatusBadge.className = `badge-pill ${isSuccess ? 'success' : 'error'}`;
+      consoleStatusBadge.textContent = `Exit Code: ${exitCode}`;
+    }
+
+    if (consoleTimeBadge) {
+      consoleTimeBadge.textContent = `${data.executionTimeMs || data.durationMs || 0}ms`;
+    }
+
+    if (data.output !== undefined) {
+      let outText = data.output || '(No output produced)';
+      if (data.browserUrl) {
+        outText += `\n\n🌐 Live Preview URL: ${data.browserUrl}`;
+      }
+      if (consoleOutputBody) {
+        consoleOutputBody.textContent = outText;
+      }
+    } else {
+      if (consoleOutputBody && !consoleOutputBody.textContent.trim()) {
+        consoleOutputBody.textContent = '(No output produced)';
+      }
+      if (data.browserUrl && consoleOutputBody) {
+        consoleOutputBody.textContent += `\n\n🌐 Live Preview URL: ${data.browserUrl}`;
+      }
+    }
+
+    if (consoleOutputBody) {
+      consoleOutputBody.scrollTop = consoleOutputBody.scrollHeight;
+    }
+
+    showToast(isSuccess ? `✓ Code executed cleanly (${data.executionTimeMs || 0}ms)` : `❌ Code execution failed with exit code ${exitCode}`, isSuccess ? 'success' : 'error');
+  }
 
   let currentRunId = null;
   const ALL_STEPS = ['intent', 'context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer'];
@@ -627,6 +768,8 @@ document.addEventListener('DOMContentLoaded', () => {
       sseSource.addEventListener('hitl_request', (e) => handleIncomingEvent('HITL_REQUEST', JSON.parse(e.data)));
       sseSource.addEventListener('pipeline_complete', (e) => handleIncomingEvent('PIPELINE_COMPLETE', JSON.parse(e.data)));
       sseSource.addEventListener('pipeline_error', (e) => handleIncomingEvent('PIPELINE_ERROR', JSON.parse(e.data)));
+      sseSource.addEventListener('code_chunk', (e) => handleIncomingEvent('CODE_CHUNK', JSON.parse(e.data)));
+      sseSource.addEventListener('code_exit', (e) => handleIncomingEvent('CODE_EXIT', JSON.parse(e.data)));
     }
   }
 
@@ -742,6 +885,23 @@ document.addEventListener('DOMContentLoaded', () => {
           if (codeEditor) codeEditor.value = data.content;
           updateLineNumbers();
         }
+        break;
+
+      case 'CODE_EXECUTION_RESULT':
+        renderExecutionOutput(data);
+        break;
+
+      case 'CODE_CHUNK':
+        if (codeOutputConsole) codeOutputConsole.classList.remove('hidden');
+        if (consoleOutputBody) {
+          consoleOutputBody.textContent += (data.text || '');
+          consoleOutputBody.scrollTop = consoleOutputBody.scrollHeight;
+        }
+        break;
+
+      case 'CODE_EXIT':
+        isCodeExecuting = false;
+        renderExecutionOutput(data);
         break;
     }
   }
@@ -1797,18 +1957,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const visNodes = data.nodes.map(n => {
       let color = { background: '#1e293b', border: '#475569', highlight: { background: '#334155', border: '#818cf8' } };
       let shape = 'box';
-      let font = { color: '#f8fafc', face: 'Inter, sans-serif' };
+      let font = { color: '#f8fafc', face: 'Inter, sans-serif', size: 12 };
 
       if (n.type === 'file') {
         shape = 'box';
         if (n.status === 'active') {
-          color = { background: '#312e81', border: '#818cf8', highlight: { background: '#4338ca', border: '#a5b4fc' } };
+          color = { background: '#1e1b4b', border: '#818cf8', highlight: { background: '#312e81', border: '#a5b4fc' } };
         } else if (n.status === 'generated') {
-          color = { background: '#064e3b', border: '#10b981', highlight: { background: '#047857', border: '#34d399' } };
+          color = { background: '#022c22', border: '#10b981', highlight: { background: '#064e3b', border: '#34d399' } };
         } else if (n.status === 'modified') {
-          color = { background: '#78350f', border: '#f59e0b', highlight: { background: '#92400e', border: '#fbbf24' } };
+          color = { background: '#451a03', border: '#f59e0b', highlight: { background: '#78350f', border: '#fbbf24' } };
         } else if (n.status === 'test') {
-          color = { background: '#581c87', border: '#c084fc', highlight: { background: '#6b21a8', border: '#e879f9' } };
+          color = { background: '#3b0764', border: '#c084fc', highlight: { background: '#581c87', border: '#e879f9' } };
         }
       } else if (n.type === 'symbol') {
         shape = 'ellipse';
@@ -1816,8 +1976,8 @@ document.addEventListener('DOMContentLoaded', () => {
         font.color = '#7dd3fc';
       } else if (n.type === 'external') {
         shape = 'hexagon';
-        color = { background: '#27272a', border: '#a1a1aa', highlight: { background: '#3f3f46', border: '#e4e4e7' } };
-        font.color = '#a1a1aa';
+        color = { background: '#18181b', border: '#a1a1aa', highlight: { background: '#27272a', border: '#e4e4e7' } };
+        font.color = '#e4e4e7';
       } else if (n.type === 'unresolved') {
         shape = 'diamond';
         color = { background: '#450a0a', border: '#ef4444', highlight: { background: '#7f1d1d', border: '#f87171' } };
@@ -1830,7 +1990,9 @@ document.addEventListener('DOMContentLoaded', () => {
         shape,
         color,
         font,
-        margin: 10,
+        margin: 12,
+        borderWidth: 2,
+        shadow: { enabled: true, color: 'rgba(0,0,0,0.5)', size: 8, x: 2, y: 3 },
         rawNode: n
       };
     });
@@ -1838,19 +2000,51 @@ document.addEventListener('DOMContentLoaded', () => {
     const visEdges = data.edges.map(e => {
       let color = '#475569';
       let dashes = false;
-      if (e.type === 'IMPORTS') color = '#818cf8';
-      else if (e.type === 'EXPORTS' || e.type === 'DEFINES') { color = '#38bdf8'; dashes = true; }
-      else if (e.type === 'DEPENDS_ON') color = '#a1a1aa';
+      let labelText = e.label || e.type || '';
+
+      if (e.type === 'IMPORTS') {
+        color = '#818cf8';
+        labelText = 'IMPORTS';
+      } else if (e.type === 'DEFINES') {
+        color = '#38bdf8';
+        dashes = true;
+        labelText = 'DEFINES';
+      } else if (e.type === 'EXPORTS') {
+        color = '#34d399';
+        dashes = true;
+        labelText = 'EXPORTS';
+      } else if (e.type === 'DEPENDS_ON') {
+        color = '#a1a1aa';
+        dashes = true;
+        labelText = 'DEPENDS_ON';
+      }
+
+      // If imported symbols exist and differ from target node label, display symbol name
+      if (e.symbols && e.symbols.length > 0) {
+        const symStr = e.symbols.join(', ');
+        if (symStr !== e.label && symStr !== e.target && !e.target.endsWith(`:${symStr}`)) {
+          labelText = `${labelText} (${symStr})`;
+        }
+      }
 
       return {
         id: e.id,
         from: e.source,
         to: e.target,
-        arrows: 'to',
-        label: e.symbols && e.symbols.length > 0 ? e.symbols.join(', ') : e.label,
+        arrows: { to: { enabled: true, scaleFactor: 0.8 } },
+        label: labelText,
         color: { color, highlight: '#c084fc' },
-        font: { color: '#94a3b8', size: 10, align: 'top' },
-        dashes
+        font: {
+          color: '#cbd5e1',
+          size: 10,
+          face: 'Inter, sans-serif',
+          align: 'middle',
+          background: '#090a10',
+          strokeWidth: 2,
+          strokeColor: '#090a10'
+        },
+        dashes,
+        smooth: { type: 'cubicBezier', forceDirection: 'none', roundness: 0.35 }
       };
     });
 
@@ -1859,25 +2053,48 @@ document.addEventListener('DOMContentLoaded', () => {
       edges: new vis.DataSet(visEdges)
     };
 
+    const isLargeGraph = visNodes.length > 50 || visEdges.length > 100;
+
     const options = {
       physics: {
-        solver: 'forceAtlas2Based',
+        solver: isLargeGraph ? 'forceAtlas2Based' : 'barnesHut',
+        barnesHut: {
+          gravitationalConstant: -2500,
+          centralGravity: 0.12,
+          springLength: 160,
+          springConstant: 0.04,
+          damping: 0.09,
+          avoidOverlap: 0.8
+        },
         forceAtlas2Based: {
-          gravitationalConstant: -50,
+          gravitationalConstant: -40,
           centralGravity: 0.01,
-          springLength: 100,
+          springLength: 120,
           springConstant: 0.08
         },
         maxVelocity: 50,
+        minVelocity: 0.75,
         timestep: 0.35,
-        stabilization: { iterations: 150 }
+        stabilization: {
+          enabled: true,
+          iterations: isLargeGraph ? 60 : 180,
+          updateInterval: 25
+        }
+      },
+      nodes: {
+        borderWidth: 2
+      },
+      edges: {
+        selectionWidth: 2
       },
       interaction: {
         hover: true,
-        tooltipDelay: 200,
+        tooltipDelay: 150,
         zoomView: true,
         dragNodes: true,
-        dragView: true
+        dragView: true,
+        navigationButtons: true,
+        keyboard: true
       }
     };
 
@@ -1918,20 +2135,38 @@ document.addEventListener('DOMContentLoaded', () => {
     let content = `
       <div class="drawer-section">
         <div class="drawer-section-label">Node Metadata</div>
-        <div class="drawer-fact-row"><span class="drawer-fact-key">ID:</span> <span>${node.id}</span></div>
-        <div class="drawer-fact-row"><span class="drawer-fact-key">Type:</span> <span>${node.type}</span></div>
-        ${node.path ? `<div class="drawer-fact-row"><span class="drawer-fact-key">Path:</span> <span>${node.path}</span></div>` : ''}
-        ${node.language ? `<div class="drawer-fact-row"><span class="drawer-fact-key">Language:</span> <span>${node.language}</span></div>` : ''}
-        ${node.status ? `<div class="drawer-fact-row"><span class="drawer-fact-key">Status:</span> <span>${node.status.toUpperCase()}</span></div>` : ''}
+        <div class="drawer-fact-row">
+          <span class="drawer-fact-key">ID:</span>
+          <span class="drawer-fact-value code-wrap">${escapeHtml(node.id)}</span>
+        </div>
+        <div class="drawer-fact-row">
+          <span class="drawer-fact-key">Type:</span>
+          <span class="drawer-fact-value">${node.type}</span>
+        </div>
+        ${node.path ? `
+        <div class="drawer-fact-row">
+          <span class="drawer-fact-key">Path:</span>
+          <span class="drawer-fact-value code-wrap">${escapeHtml(node.path)}</span>
+        </div>` : ''}
+        ${node.language ? `
+        <div class="drawer-fact-row">
+          <span class="drawer-fact-key">Language:</span>
+          <span class="drawer-fact-value">${node.language}</span>
+        </div>` : ''}
+        ${node.status ? `
+        <div class="drawer-fact-row">
+          <span class="drawer-fact-key">Status:</span>
+          <span class="drawer-fact-value">${node.status.toUpperCase()}</span>
+        </div>` : ''}
       </div>
     `;
 
     if (node.type === 'file') {
       content += `
         <div class="drawer-section">
-          <div class="drawer-section-label">Facts</div>
-          <div class="drawer-fact-row"><span class="drawer-fact-key">Declared Symbols:</span> <span>${node.symbolsCount || 0}</span></div>
-          <div class="drawer-fact-row"><span class="drawer-fact-key">Imports:</span> <span>${node.importsCount || 0}</span></div>
+          <div class="drawer-section-label">AST Facts</div>
+          <div class="drawer-fact-row"><span class="drawer-fact-key">Declared Symbols:</span> <span class="drawer-fact-value">${node.symbolsCount || 0}</span></div>
+          <div class="drawer-fact-row"><span class="drawer-fact-key">Imports:</span> <span class="drawer-fact-value">${node.importsCount || 0}</span></div>
         </div>
       `;
       if (node.contentSnippet) {
@@ -1946,9 +2181,9 @@ document.addEventListener('DOMContentLoaded', () => {
       content += `
         <div class="drawer-section">
           <div class="drawer-section-label">Symbol Details</div>
-          <div class="drawer-fact-row"><span class="drawer-fact-key">Symbol Type:</span> <span>${node.symbolType || 'symbol'}</span></div>
-          <div class="drawer-fact-row"><span class="drawer-fact-key">Declared In:</span> <span>${node.declaredIn || 'N/A'}</span></div>
-          <div class="drawer-fact-row"><span class="drawer-fact-key">Exported:</span> <span>${node.isExported ? 'Yes' : 'No'}</span></div>
+          <div class="drawer-fact-row"><span class="drawer-fact-key">Symbol Type:</span> <span class="drawer-fact-value">${node.symbolType || 'symbol'}</span></div>
+          <div class="drawer-fact-row"><span class="drawer-fact-key">Declared In:</span> <span class="drawer-fact-value code-wrap">${escapeHtml(node.declaredIn || 'N/A')}</span></div>
+          <div class="drawer-fact-row"><span class="drawer-fact-key">Exported:</span> <span class="drawer-fact-value">${node.isExported ? 'Yes' : 'No'}</span></div>
         </div>
       `;
     }
@@ -1961,9 +2196,148 @@ document.addEventListener('DOMContentLoaded', () => {
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
+  // Movable & Resizable Execution Console Terminal Engine
+  function initMovableConsoleEngine() {
+    const consoleEl = document.getElementById('code-output-console');
+    const consoleHeader = document.getElementById('console-header');
+    const consoleResizer = document.getElementById('console-resizer-top');
+    const dockBtn = document.getElementById('dock-console-btn');
+    const dockIcon = document.getElementById('dock-icon');
+    const dockLabel = document.getElementById('dock-label');
+
+    if (!consoleEl || !consoleHeader) return;
+
+    let isMovable = false;
+    let isDragging = false;
+    let isResizing = false;
+    let startX = 0, startY = 0;
+    let initialLeft = 0, initialTop = 0;
+    let initialHeight = 0;
+
+    function toggleFloatMode(forceFloat = null) {
+      isMovable = forceFloat !== null ? forceFloat : !isMovable;
+      if (isMovable) {
+        // Switch to Floating Movable Mode
+        const rect = consoleEl.getBoundingClientRect();
+        consoleEl.classList.add('movable');
+        const defaultWidth = Math.max(rect.width, 580);
+        const defaultHeight = Math.max(rect.height, 260);
+        consoleEl.style.width = defaultWidth + 'px';
+        consoleEl.style.height = defaultHeight + 'px';
+
+        // Position fixed relative to viewport
+        if (!consoleEl.style.top || consoleEl.style.top === 'auto' || consoleEl.style.top === '') {
+          const topPos = Math.max(60, window.innerHeight - defaultHeight - 60);
+          const leftPos = Math.max(20, (window.innerWidth - defaultWidth) / 2);
+          consoleEl.style.top = topPos + 'px';
+          consoleEl.style.left = leftPos + 'px';
+        }
+        if (dockIcon) dockIcon.textContent = '⚓';
+        if (dockLabel) dockLabel.textContent = 'Dock';
+        if (dockBtn) dockBtn.title = 'Dock console back to bottom of editor';
+      } else {
+        // Switch back to Docked Mode
+        consoleEl.classList.remove('movable');
+        consoleEl.style.position = '';
+        consoleEl.style.left = '';
+        consoleEl.style.top = '';
+        consoleEl.style.width = '';
+        consoleEl.style.height = '';
+        if (dockIcon) dockIcon.textContent = '📌';
+        if (dockLabel) dockLabel.textContent = 'Float';
+        if (dockBtn) dockBtn.title = 'Float console terminal window';
+      }
+    }
+
+    if (dockBtn) {
+      dockBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleFloatMode();
+      });
+    }
+
+    // Header Dragging Logic
+    consoleHeader.addEventListener('mousedown', (e) => {
+      // Don't trigger drag when clicking on action buttons/inputs
+      if (e.target.closest('.console-window-actions') || e.target.closest('button') || e.target.closest('input')) {
+        return;
+      }
+
+      // Automatically enable floating mode on first header drag if docked
+      if (!isMovable) {
+        toggleFloatMode(true);
+      }
+
+      isDragging = true;
+      startX = e.clientX;
+      startY = e.clientY;
+
+      const rect = consoleEl.getBoundingClientRect();
+      initialLeft = rect.left;
+      initialTop = rect.top;
+
+      document.body.style.userSelect = 'none';
+      e.preventDefault();
+    });
+
+    // Top Border Resizing Logic (Works in both Docked and Floating mode!)
+    if (consoleResizer) {
+      consoleResizer.addEventListener('mousedown', (e) => {
+        isResizing = true;
+        startY = e.clientY;
+        const rect = consoleEl.getBoundingClientRect();
+        initialHeight = rect.height;
+        initialTop = rect.top;
+
+        document.body.style.userSelect = 'none';
+        e.preventDefault();
+        e.stopPropagation();
+      });
+    }
+
+    // Global Mousemove & Mouseup handlers
+    window.addEventListener('mousemove', (e) => {
+      if (isDragging && isMovable) {
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+
+        let newLeft = initialLeft + dx;
+        let newTop = initialTop + dy;
+
+        // Viewport boundary constraints
+        const maxLeft = window.innerWidth - consoleEl.offsetWidth;
+        const maxTop = window.innerHeight - 50;
+
+        newLeft = Math.max(0, Math.min(newLeft, maxLeft));
+        newTop = Math.max(0, Math.min(newTop, maxTop));
+
+        consoleEl.style.left = newLeft + 'px';
+        consoleEl.style.top = newTop + 'px';
+      } else if (isResizing) {
+        const dy = startY - e.clientY; // dragging upward increases height
+        const newHeight = Math.max(120, Math.min(initialHeight + dy, window.innerHeight * 0.85));
+
+        consoleEl.style.height = newHeight + 'px';
+        if (isMovable) {
+          const newTop = Math.max(0, initialTop - dy);
+          consoleEl.style.top = Math.max(0, newTop) + 'px';
+        }
+      }
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (isDragging || isResizing) {
+        isDragging = false;
+        isResizing = false;
+        document.body.style.userSelect = '';
+      }
+    });
+  }
+
   // Init
   loadSandboxFiles();
   openFileInEditor('src/sandbox/main.ts');
   initStreamAndListeners();
   initMousePointerResizers();
+  initMovableConsoleEngine();
 });

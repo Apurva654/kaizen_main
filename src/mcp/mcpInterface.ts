@@ -702,7 +702,7 @@ export class MCPUnifiedInterface {
     try {
       const result: any = await this.mcpClient!.callTool({
         name: 'terminal_exec',
-        arguments: { command, cwd }
+        arguments: { command, cwd, stdin: (options as any)?.stdin }
       });
 
       const textOutput = result.content?.map((c: any) => typeof c === 'string' ? c : (c.text || JSON.stringify(c))).join('\n') || '';

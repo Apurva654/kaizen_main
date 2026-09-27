@@ -77,6 +77,55 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
           }
           break;
         }
+
+        case 'RUN_CODE': {
+          const targetFile = message.filePath || 'src/sandbox/main.ts';
+          const fullPath = path.resolve(process.cwd(), targetFile);
+          const startTime = Date.now();
+
+          if (!fs.existsSync(fullPath)) {
+            this.postMessageToWebview('CODE_EXECUTION_RESULT', {
+              success: false,
+              filePath: targetFile,
+              output: `File not found: ${targetFile}`,
+              executionTimeMs: 0,
+              exitCode: 1
+            });
+            break;
+          }
+
+          const ext = path.extname(targetFile).toLowerCase();
+          if (ext === '.html') {
+            const fileName = path.basename(targetFile);
+            const browserUrl = `http://localhost:3000/sandbox/${fileName}`;
+            this.postMessageToWebview('CODE_EXECUTION_RESULT', {
+              success: true,
+              filePath: targetFile,
+              language: 'html',
+              output: `Webpage hosted statically at ${browserUrl}. Opening live preview...`,
+              executionTimeMs: Date.now() - startTime,
+              exitCode: 0,
+              browserUrl
+            });
+            break;
+          }
+
+          const command = ext === '.py' ? `python "${targetFile}"` : (ext === '.ts' || ext === '.js' ? `npx ts-node --transpile-only "${targetFile}"` : `node "${targetFile}"`);
+          const cp = require('child_process');
+          cp.exec(command, { cwd: process.cwd() }, (err: any, stdout: string, stderr: string) => {
+            const durationMs = Date.now() - startTime;
+            const outputStr = (stdout + (stderr ? '\n' + stderr : '')).trim() || err?.message || '(Clean execution output)';
+            this.postMessageToWebview('CODE_EXECUTION_RESULT', {
+              success: !err,
+              filePath: targetFile,
+              language: ext === '.py' ? 'python' : 'typescript',
+              output: outputStr,
+              executionTimeMs: durationMs,
+              exitCode: err ? (err.code || 1) : 0
+            });
+          });
+          break;
+        }
       }
     });
   }
@@ -159,11 +208,14 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
       dockerSandboxActive: false,
       structuredFailures: [],
       errorsEncountered: 0,
-      // ✅ ADD THESE 4 FIELDS:
       lastPlan: undefined,
       planTimestamp: undefined,
       canRetry: true,
-      rejectionReason: undefined
+      rejectionReason: undefined,
+      requestedLanguage: undefined,
+      languageInfo: undefined,
+      generationSource: undefined,
+      generationFailureReason: undefined
     };
 
     const completedStages: string[] = [];
@@ -208,6 +260,10 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
       const intentOutput = await intentAgentNode(state);
       state.status = intentOutput.status;
       state.targetFiles = intentOutput.targetFiles;
+      if (intentOutput.requestedLanguage) {
+        state.requestedLanguage = intentOutput.requestedLanguage;
+        state.languageInfo = intentOutput.languageInfo;
+      }
       completedStages.push('intent');
 
       postWebviewEvent('AGENT_STEP', {

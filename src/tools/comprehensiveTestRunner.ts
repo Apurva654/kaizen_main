@@ -1299,11 +1299,132 @@ button [ref=e175] "Code Editor"
         timestamp: new Date()
       });
     }
-  } catch (webRegErr: any) {
+  } catch (webErr: any) {
     results.push({
       feature: 'Web Project Pipeline Regression Suite',
       status: 'FAIL',
-      details: webRegErr?.message || String(webRegErr),
+      details: webErr?.message || String(webErr),
+      timestamp: new Date()
+    });
+  }
+
+  // 24. Pipeline Stabilization & Multi-Language End-to-End Regression Suite
+  try {
+    const { resolveLanguage } = await import('./languageResolver');
+    const { plannerAgentNode } = await import('../agents/plannerAgent');
+
+    // TEST 1: "Generate code to add two numbers in Python"
+    const pyState: Partial<KaizenStateType> = {
+      userInput: "Generate code to add two numbers in Python.",
+      targetFiles: [],
+      plan: []
+    };
+    const pyIntentRes = await intentAgentNode(pyState as KaizenStateType);
+    const pyTargets = pyIntentRes?.targetFiles || [];
+    const pyLangRes = resolveLanguage(pyState.userInput!, pyTargets);
+    
+    const pyPass = pyLangRes.requestedLanguage === 'python' && 
+      pyTargets.some(f => f.endsWith('.py')) &&
+      !pyTargets.some(f => f.endsWith('.ts'));
+
+    results.push({
+      feature: 'Language Regression Test 1: Python Add Two Numbers Pipeline',
+      status: pyPass ? 'PASS' : 'FAIL',
+      details: pyPass 
+        ? `Successfully resolved requestedLanguage=python and target .py file (${pyTargets.join(', ')}) without defaulting to TypeScript.`
+        : `Failed Python resolution: requestedLanguage=${pyLangRes.requestedLanguage}, targets=[${pyTargets.join(', ')}]`,
+      timestamp: new Date()
+    });
+
+    // TEST 2: Simple Task Scope ("Create a simple function to take user name and say hello")
+    const simpleState: Partial<KaizenStateType> = {
+      userInput: "Create a simple function to take user name and say hello.",
+      targetFiles: ['src/sandbox/say_hello.ts'],
+      plan: []
+    };
+    const simplePlanRes = await plannerAgentNode(simpleState as KaizenStateType);
+    const simplePass = (simplePlanRes.plan || []).length <= 2 && !(simplePlanRes.plan || []).some(s => (s.targetFile || '').includes('models/User.ts'));
+
+    results.push({
+      feature: 'Scope Regression Test 2: Simple Task Non-CRUD Inference',
+      status: simplePass ? 'PASS' : 'FAIL',
+      details: simplePass
+        ? `Planner correctly generated minimal plan (${(simplePlanRes.plan || []).length} steps) without inflating to User model/CRUD architecture.`
+        : `Failed simple scope: steps=${(simplePlanRes.plan || []).length}, targets=[${(simplePlanRes.plan || []).map(s => s.targetFile).join(', ')}]`,
+      timestamp: new Date()
+    });
+
+    // TEST 3: TypeScript Multiply Function
+    const tsState: Partial<KaizenStateType> = {
+      userInput: "Generate a TypeScript function to multiply two numbers.",
+      targetFiles: [],
+      plan: []
+    };
+    const tsIntentRes = await intentAgentNode(tsState as KaizenStateType);
+    const tsTargets = tsIntentRes?.targetFiles || [];
+    const tsPass = tsTargets.some(f => f.endsWith('.ts'));
+    results.push({
+      feature: 'Language Regression Test 3: TypeScript Target Resolution',
+      status: tsPass ? 'PASS' : 'FAIL',
+      details: tsPass ? `TypeScript request correctly mapped to .ts target (${tsTargets.join(', ')})` : `Failed TS resolution: ${tsTargets.join(', ')}`,
+      timestamp: new Date()
+    });
+
+    // TEST 4: JavaScript Reverse String
+    const jsState: Partial<KaizenStateType> = {
+      userInput: "Write a JavaScript function to reverse a string.",
+      targetFiles: [],
+      plan: []
+    };
+    const jsIntentRes = await intentAgentNode(jsState as KaizenStateType);
+    const jsTargets = jsIntentRes?.targetFiles || [];
+    const jsLangRes = resolveLanguage(jsState.userInput!, jsTargets);
+    const jsPass = jsLangRes.requestedLanguage === 'javascript' && jsTargets.some(f => f.endsWith('.js'));
+    results.push({
+      feature: 'Language Regression Test 4: JavaScript Target Resolution',
+      status: jsPass ? 'PASS' : 'FAIL',
+      details: jsPass ? `JavaScript request correctly resolved to .js target (${jsTargets.join(', ')})` : `Failed JS resolution`,
+      timestamp: new Date()
+    });
+
+    // TEST 5: Explicit Architecture Request ("Build a User REST API with controller, service, repository and database.")
+    const archState: Partial<KaizenStateType> = {
+      userInput: "Build a User REST API with controller, service, repository and database.",
+      targetFiles: [],
+      plan: []
+    };
+    const archPlanRes = await plannerAgentNode(archState as KaizenStateType);
+    const archPass = (archPlanRes.plan || []).length >= 3;
+    results.push({
+      feature: 'Scope Regression Test 5: Explicit Architecture Multi-File Preservation',
+      status: archPass ? 'PASS' : 'FAIL',
+      details: archPass 
+        ? `Explicit architecture request correctly produced multi-file plan across ${(archPlanRes.plan || []).length} steps.`
+        : `Failed architecture preservation: steps=${(archPlanRes.plan || []).length}`,
+      timestamp: new Date()
+    });
+
+    // TEST 6: Exact Target Path Preservation ("Create src/sandbox/calculator.py")
+    const pathState: Partial<KaizenStateType> = {
+      userInput: "Create src/sandbox/calculator.py with functions add, subtract and multiply.",
+      targetFiles: ['src/sandbox/calculator.py'],
+      plan: []
+    };
+    const pathIntentRes = await intentAgentNode(pathState as KaizenStateType);
+    const pathTargets = pathIntentRes?.targetFiles || [];
+    const pathPass = pathTargets.includes('src/sandbox/calculator.py') && !pathTargets.includes('src/sandbox/main.ts');
+    results.push({
+      feature: 'Path Regression Test 6: Exact Target Path Preservation',
+      status: pathPass ? 'PASS' : 'FAIL',
+      details: pathPass ? `Exact target path 'src/sandbox/calculator.py' preserved cleanly without main.ts default.` : `Failed target path preservation: ${pathTargets.join(', ')}`,
+      timestamp: new Date()
+    });
+
+  } catch (stabErr: any) {
+    results.push({
+      feature: 'Pipeline Stabilization & Multi-Language End-to-End Suite',
+      status: 'FAIL',
+      details: stabErr?.message || String(stabErr),
       timestamp: new Date()
     });
   }

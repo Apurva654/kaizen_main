@@ -271,7 +271,7 @@ export class KaizenMCPServer {
             }
 
             return new Promise((resolve) => {
-              exec(command, { cwd, timeout: 15000 }, (error, stdout, stderr) => {
+              const child = exec(command, { cwd, timeout: 15000, env: { ...process.env, PYTHONUNBUFFERED: '1' } }, (error, stdout, stderr) => {
                 const combined = (stdout + '\n' + stderr).trim();
                 if (error) {
                   resolve({ isError: true, content: [{ type: 'text', text: combined || error.message }] });
@@ -279,6 +279,17 @@ export class KaizenMCPServer {
                   resolve({ content: [{ type: 'text', text: combined || 'Command completed successfully.' }] });
                 }
               });
+              if (child.stdin) {
+                try {
+                  const stdinPayload = typeof args?.stdin === 'string' ? args.stdin : '';
+                  if (stdinPayload) {
+                    child.stdin.write(stdinPayload.replace(/\\n/g, '\n') + '\n');
+                  }
+                  child.stdin.end();
+                } catch {
+                  // Ignore stdin close errors
+                }
+              }
             });
           }
 

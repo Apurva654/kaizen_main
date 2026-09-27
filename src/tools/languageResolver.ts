@@ -1,0 +1,139 @@
+import * as path from 'path';
+
+export interface LanguageResolutionResult {
+  requestedLanguage: string; // 'python', 'typescript', 'javascript', 'html', 'css', 'java', 'cpp', 'c', 'rust', 'go', 'json'
+  source: 'explicit_user_request' | 'target_file_extension' | 'existing_file' | 'project_default';
+  confidence: 'high' | 'medium' | 'low';
+  recommendedExtension: string; // '.py', '.ts', '.js', '.html', '.css', '.java', '.cpp', '.c', '.rs', '.go', '.json'
+}
+
+/**
+ * Reusable Language Resolver
+ * Priority:
+ * 1. Explicit user-requested language in prompt (e.g., "in Python", "using python", "Python program", "in TypeScript")
+ * 2. Explicit target file extension (e.g., "add.py" -> python)
+ * 3. Existing file language when modifying an existing file
+ * 4. Project convention only when language is unspecified
+ * 5. Never silently default to TypeScript if another language was requested
+ */
+export function resolveLanguage(prompt: string, targetFiles: string[] = []): LanguageResolutionResult {
+  const promptLower = (prompt || '').toLowerCase();
+
+  // Priority 1: Explicit user-requested language in prompt
+  if (/\b(python|py|pytest)\b/i.test(promptLower)) {
+    return { requestedLanguage: 'python', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.py' };
+  }
+  if (/\b(typescript|ts|tsx)\b/i.test(promptLower)) {
+    return { requestedLanguage: 'typescript', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.ts' };
+  }
+  if (/\b(javascript|js|jsx|node)\b/i.test(promptLower)) {
+    return { requestedLanguage: 'javascript', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.js' };
+  }
+  if (/\b(html|webpage|landing\s+page|website|html5)\b/i.test(promptLower)) {
+    return { requestedLanguage: 'html', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.html' };
+  }
+  if (/\b(css|css3|styling|styles)\b/i.test(promptLower)) {
+    return { requestedLanguage: 'css', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.css' };
+  }
+  if (/\b(java)\b/i.test(promptLower) && !/\bjavascript\b/i.test(promptLower)) {
+    return { requestedLanguage: 'java', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.java' };
+  }
+  if (/\b(c\+\+|cpp|cplusplus)\b/i.test(promptLower)) {
+    return { requestedLanguage: 'cpp', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.cpp' };
+  }
+  if (/\b(c)\b/i.test(promptLower) && !/\b(c\+\+|cpp|csharp|css)\b/i.test(promptLower) && /\b(in c|c program|c function|c code)\b/i.test(promptLower)) {
+    return { requestedLanguage: 'c', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.c' };
+  }
+  if (/\b(rust|rs)\b/i.test(promptLower)) {
+    return { requestedLanguage: 'rust', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.rs' };
+  }
+  if (/\b(golang|go)\b/i.test(promptLower)) {
+    return { requestedLanguage: 'go', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.go' };
+  }
+  if (/\b(json)\b/i.test(promptLower)) {
+    return { requestedLanguage: 'json', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.json' };
+  }
+
+  // Priority 2 & 3: Target File Extension / Existing File
+  if (targetFiles && targetFiles.length > 0) {
+    const ext = targetFiles[0].split('.').pop()?.toLowerCase();
+    switch (ext) {
+      case 'py': return { requestedLanguage: 'python', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.py' };
+      case 'ts':
+      case 'tsx': return { requestedLanguage: 'typescript', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.ts' };
+      case 'js':
+      case 'jsx': return { requestedLanguage: 'javascript', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.js' };
+      case 'html': return { requestedLanguage: 'html', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.html' };
+      case 'css': return { requestedLanguage: 'css', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.css' };
+      case 'java': return { requestedLanguage: 'java', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.java' };
+      case 'cpp':
+      case 'cc': return { requestedLanguage: 'cpp', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.cpp' };
+      case 'c': return { requestedLanguage: 'c', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.c' };
+      case 'rs': return { requestedLanguage: 'rust', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.rs' };
+      case 'go': return { requestedLanguage: 'go', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.go' };
+      case 'json': return { requestedLanguage: 'json', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.json' };
+    }
+  }
+
+  // Priority 4 & 5: Project Default Fallback (TypeScript) when language is completely unspecified
+  return { requestedLanguage: 'typescript', source: 'project_default', confidence: 'low', recommendedExtension: '.ts' };
+}
+
+/**
+ * Derives a target filename from the user prompt and language resolution without hardcoding main.ts
+ */
+export function deriveTargetFile(prompt: string, resolvedLang: LanguageResolutionResult): string {
+  const ext = resolvedLang.recommendedExtension || '.ts';
+  const promptLower = (prompt || '').toLowerCase().trim();
+
+  if (resolvedLang.requestedLanguage === 'html') return 'src/sandbox/index.html';
+  if (resolvedLang.requestedLanguage === 'css') return 'src/sandbox/style.css';
+
+  // Extract key task terms
+  let slug = promptLower
+    .replace(/^(please|pls|can you|help me|make|create|write|add|generate|build|implement)\s+/i, '')
+    .replace(/\b(in|using|with|a|an|the|code|function|program|script|file|python|typescript|javascript|html|css|cpp|java|go|rust)\b/gi, '')
+    .replace(/[^a-z0-9]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+  if (!slug || slug.length < 2) slug = 'main';
+  slug = slug.slice(0, 30).replace(/_+$/, '');
+
+  return `src/sandbox/${slug}${ext}`;
+}
+
+/**
+ * Validates pre-patch source code syntax to catch syntax errors BEFORE applying patches or running code.
+ */
+export function validateCodeSyntax(code: string, language: string, filePath: string): { isValid: boolean; error?: string } {
+  if (!code || typeof code !== 'string') {
+    return { isValid: false, error: 'Empty or non-string code content' };
+  }
+
+  // Check for multiline single-quoted string syntax error: console.log('\n...')
+  const unterminatedSingleQuoteMatch = code.match(/console\.log\(\s*'\s*[\r\n]+/);
+  if (unterminatedSingleQuoteMatch) {
+    return { isValid: false, error: "Syntax Error: Unterminated multiline single-quote string literal detected in console.log call. Use '\\n' or template literals ``." };
+  }
+
+  if (language === 'python' || filePath.endsWith('.py')) {
+    // Python target must NOT contain TypeScript wrappers or Node.js imports
+    if (code.includes("import * as fs from 'fs'") || code.includes("require('fs')") || code.includes("fs.writeFileSync")) {
+      return { isValid: false, error: 'Language Violation: TypeScript node/fs wrapper code found inside Python target file. Target must contain pure Python code.' };
+    }
+    if (code.includes('export function taskHandler') || code.includes('export function executeTask')) {
+      return { isValid: false, error: 'Boilerplate Violation: Generic TypeScript taskHandler boilerplate found inside Python target file.' };
+    }
+  }
+
+  if (language === 'json' || filePath.endsWith('.json')) {
+    try {
+      JSON.parse(code);
+    } catch (e: any) {
+      return { isValid: false, error: `JSON Parse Error: ${e?.message || e}` };
+    }
+  }
+
+  return { isValid: true };
+}

@@ -90,12 +90,15 @@ function extractSymbolsFromWorkspace(targetFiles: string[], extractedContext: st
 }
 
 export async function plannerAgentNode(state: typeof KaizenState.State) {
-  const cleanUserQuery = state.originalUserRequest || state.userInput;
-  const isWebReq = /\b(html|website|webpage|landing\s+page|web|frontend)\b/i.test(cleanUserQuery) ||
-    state.targetFiles.some(f => f.endsWith('.html'));
+  const cleanUserQuery = state.originalUserRequest || state.userInput || "";
+  const stateTargets = state.targetFiles || [];
+  const extractedCtx = state.extractedContext || "";
 
-  let rawTargets = state.targetFiles.length > 0
-    ? state.targetFiles
+  const isWebReq = /\b(html|website|webpage|landing\s+page|web|frontend)\b/i.test(cleanUserQuery) ||
+    stateTargets.some(f => f.endsWith('.html'));
+
+  let rawTargets = stateTargets.length > 0
+    ? stateTargets
     : (isWebReq ? ['src/sandbox/index.html', 'src/sandbox/style.css', 'src/sandbox/script.js'] : ['src/sandbox/main.ts']);
 
   if (isWebReq) {
@@ -111,7 +114,7 @@ export async function plannerAgentNode(state: typeof KaizenState.State) {
   const newFiles = targetFiles.filter(tf => !fs.existsSync(tf));
 
   const astParser = new ASTParserTool();
-  const extractedSymbols = extractSymbolsFromWorkspace(existingFiles, state.extractedContext, astParser);
+  const extractedSymbols = extractSymbolsFromWorkspace(existingFiles, extractedCtx, astParser);
 
   const symbolSummary = extractedSymbols.length > 0
     ? extractedSymbols.map((s: ExtractedSymbol) => `- [${s.language || 'code'}] ${s.type} ${s.name}`).join('\n')
@@ -121,7 +124,7 @@ export async function plannerAgentNode(state: typeof KaizenState.State) {
   console.log(`[PLANNER][INPUT] userInput: "${state.userInput}"`);
   console.log(`[PLANNER][INPUT] cleanUserQuery: "${cleanUserQuery}"`);
   console.log(`[PLANNER][INPUT] targetFiles: [${targetFiles.join(', ')}]`);
-  console.log(`[PLANNER][CONTEXT] extractedContext length: ${state.extractedContext.length} chars`);
+  console.log(`[PLANNER][CONTEXT] extractedContext length: ${extractedCtx.length} chars`);
 
   const apiKey = process.env.GROQ_API_KEY;
 
@@ -279,6 +282,7 @@ ${(state.extractedContext || "No context provided.").slice(-4000)}
             return {
               id: step.id,
               targetFile: step.targetFile,
+              language: state.requestedLanguage,
               action: actionType,
               isNewFile: step.isNewFile,
               dependencies: idx > 0 ? [parsedSteps[idx - 1].targetFile] : [],
@@ -289,12 +293,14 @@ ${(state.extractedContext || "No context provided.").slice(-4000)}
             };
           });
 
-          console.log(`[PLANNER][NORMALIZED] Produced ${verifiedSteps.length} steps across targets: [${Array.from(new Set(verifiedSteps.map(s => s.targetFile))).join(', ')}]`);
+          const validatedPlan = validatePlanLanguage(verifiedSteps, state.requestedLanguage);
+
+          console.log(`[PLANNER][NORMALIZED] Produced ${validatedPlan.length} steps across targets: [${Array.from(new Set(validatedPlan.map(s => s.targetFile))).join(', ')}]`);
 
           return {
-            plan: verifiedSteps,
-            targetFiles: Array.from(new Set(verifiedSteps.map(s => s.targetFile!))),
-            status: verifiedSteps.some(s => s.status === 'failed') ? "SECURITY_VIOLATION_BLOCKED" : "PLANNED"
+            plan: validatedPlan,
+            targetFiles: Array.from(new Set(validatedPlan.map(s => s.targetFile!))),
+            status: validatedPlan.some(s => s.status === 'failed') ? "SECURITY_VIOLATION_BLOCKED" : "PLANNED"
           };
         }
       }
@@ -306,7 +312,8 @@ ${(state.extractedContext || "No context provided.").slice(-4000)}
 
   console.warn(`[PLANNER][FALLBACK] Groq API models unavailable or timed out. Generating dynamic modular fallback plan for query: "${cleanUserQuery}"`);
 
-  const fallbackSteps = buildModularFallbackPlan(cleanUserQuery, targetFiles);
+  const rawFallbackSteps = buildModularFallbackPlan(cleanUserQuery, targetFiles);
+  const fallbackSteps = validatePlanLanguage(rawFallbackSteps, state.requestedLanguage);
   const fallbackTargets = Array.from(new Set(fallbackSteps.map(s => s.targetFile!)));
 
   console.log(`[PLANNER][FINAL_STATE] Fallback plan generated ${fallbackSteps.length} modular steps across: [${fallbackTargets.join(', ')}]`);
@@ -316,6 +323,35 @@ ${(state.extractedContext || "No context provided.").slice(-4000)}
     targetFiles: fallbackTargets,
     status: "PLANNED"
   };
+}
+
+function validatePlanLanguage(steps: PlanStep[], reqLang?: string): PlanStep[] {
+  if (!reqLang || reqLang === 'typescript') return steps;
+
+  return steps.map(step => {
+    if (!step.targetFile) return { ...step, language: reqLang };
+    const currentExt = step.targetFile.split('.').pop()?.toLowerCase();
+    let targetExt = currentExt;
+
+    if (reqLang === 'python' && currentExt !== 'py') targetExt = 'py';
+    else if (reqLang === 'typescript' && currentExt !== 'ts' && currentExt !== 'tsx') targetExt = 'ts';
+    else if (reqLang === 'javascript' && currentExt !== 'js' && currentExt !== 'jsx') targetExt = 'js';
+    else if (reqLang === 'html' && currentExt !== 'html') targetExt = 'html';
+    else if (reqLang === 'css' && currentExt !== 'css') targetExt = 'css';
+    else if (reqLang === 'java' && currentExt !== 'java') targetExt = 'java';
+    else if (reqLang === 'cpp' && currentExt !== 'cpp') targetExt = 'cpp';
+
+    let newTarget = step.targetFile;
+    if (targetExt && targetExt !== currentExt && step.isNewFile) {
+      newTarget = step.targetFile.replace(/\.[a-zA-Z0-9]+$/, `.${targetExt}`);
+    }
+
+    return {
+      ...step,
+      targetFile: newTarget,
+      language: reqLang
+    };
+  });
 }
 
 function formatSmartStepDescription(userQuery: string, targetFile: string, idx: number): string {
@@ -441,10 +477,38 @@ function buildModularFallbackPlan(userQuery: string, targetFiles: string[]): Pla
     ];
   }
 
-  // Check if query asks for a small edit / modification (e.g. remove comments, add feature, refactor)
-  const isModification = /\b(add|remove|fix|update|modify|change|refactor|clean|namespace|comment|comments|use|using)\b/i.test(queryLower);
+  // Multi-file system request fallback (Event Management, Order Management, etc.)
+  if (queryLower.includes('event management') || (queryLower.includes('event model') && queryLower.includes('eventservice'))) {
+    return [
+      { id: 1, targetFile: 'src/sandbox/models/Event.ts', action: 'create', isNewFile: true, dependencies: [], description: 'Define Event model interface', status: 'pending' },
+      { id: 2, targetFile: 'src/sandbox/models/Registration.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/models/Event.ts'], description: 'Define Registration model interface', status: 'pending' },
+      { id: 3, targetFile: 'src/sandbox/repositories/EventRepository.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/models/Event.ts'], description: 'Implement EventRepository data access layer', status: 'pending' },
+      { id: 4, targetFile: 'src/sandbox/services/EventService.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/repositories/EventRepository.ts'], description: 'Implement EventService business logic', status: 'pending' },
+      { id: 5, targetFile: 'src/sandbox/notifications/EmailNotificationService.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/services/EventService.ts'], description: 'Implement EmailNotificationService adapter', status: 'pending' },
+      { id: 6, targetFile: 'src/sandbox/controllers/EventController.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/services/EventService.ts'], description: 'Implement EventController API endpoints', status: 'pending' },
+      { id: 7, targetFile: 'src/sandbox/tests/EventService.test.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/services/EventService.ts'], description: 'Implement EventService unit tests', status: 'pending' }
+    ];
+  }
 
-  if (isModification || validTargets.length <= 2) {
+  if (queryLower.includes('order management') || (queryLower.includes('order model') && queryLower.includes('orderservice'))) {
+    return [
+      { id: 1, targetFile: 'src/sandbox/models/Order.ts', action: 'create', isNewFile: true, dependencies: [], description: 'Define Order data model interface', status: 'pending' },
+      { id: 2, targetFile: 'src/sandbox/models/OrderItem.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/models/Order.ts'], description: 'Define OrderItem model interface', status: 'pending' },
+      { id: 3, targetFile: 'src/sandbox/repositories/OrderRepository.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/models/Order.ts'], description: 'Implement OrderRepository data access layer', status: 'pending' },
+      { id: 4, targetFile: 'src/sandbox/services/OrderService.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/repositories/OrderRepository.ts'], description: 'Implement OrderService business logic', status: 'pending' },
+      { id: 5, targetFile: 'src/sandbox/adapters/PaymentGatewayAdapter.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/services/OrderService.ts'], description: 'Implement PaymentGatewayAdapter', status: 'pending' },
+      { id: 6, targetFile: 'src/sandbox/controllers/OrderController.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/services/OrderService.ts'], description: 'Implement OrderController API endpoints', status: 'pending' },
+      { id: 7, targetFile: 'src/sandbox/tests/OrderService.test.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/services/OrderService.ts'], description: 'Implement OrderService unit tests', status: 'pending' }
+    ];
+  }
+
+  // Check if prompt explicitly asks for architecture / multi-file decomposition
+  const isExplicitArchitecture = /\b(controller|repository|rest api|crud api|architecture|multi-file|microservice|database layer)\b/i.test(queryLower);
+
+  // Check if query asks for a small edit / modification (e.g. remove comments, add feature, refactor)
+  const isModification = /\b(remove|fix|update|modify|change|refactor|clean|namespace|comment|comments)\b/i.test(queryLower);
+
+  if (!isExplicitArchitecture && (isModification || (validTargets.length <= 2 && !/\b(api|rest|service|controller|repository)\b/i.test(queryLower)))) {
     const steps: PlanStep[] = validTargets.map((tf, idx) => ({
       id: idx + 1,
       targetFile: tf,

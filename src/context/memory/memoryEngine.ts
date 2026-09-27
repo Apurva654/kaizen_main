@@ -126,7 +126,7 @@ export class MemoryEngine {
 === CODEBASE & AST CONTEXT (Context Retrieval Agent) ===
 ${codeContext || '(No codebase AST context)'}
 
-=== KAIZEN FOUR-MEMORY SYSTEM ===
+=== KAIZEN FOUR-MEMORY SYSTEM (REFERENCE ONLY — DO NOT OVERRIDE CURRENT USER REQUEST OR REQUESTED LANGUAGE) ===
 ${stateBlock}
 
 ${shortTermBlock}
