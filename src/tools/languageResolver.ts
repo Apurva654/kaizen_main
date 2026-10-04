@@ -1,4 +1,5 @@
 import * as path from 'path';
+import * as fs from 'fs';
 
 export interface LanguageResolutionResult {
   requestedLanguage: string; // 'python', 'typescript', 'javascript', 'html', 'css', 'java', 'cpp', 'c', 'rust', 'go', 'json'
@@ -81,26 +82,34 @@ export function resolveLanguage(prompt: string, targetFiles: string[] = []): Lan
 
 /**
  * Derives a target filename from the user prompt and language resolution without hardcoding main.ts
+ * Reuses existing sandbox files or canonical main.<ext> instead of slugifying arbitrary user prompt text.
  */
 export function deriveTargetFile(prompt: string, resolvedLang: LanguageResolutionResult): string {
   const ext = resolvedLang.recommendedExtension || '.ts';
-  const promptLower = (prompt || '').toLowerCase().trim();
 
   if (resolvedLang.requestedLanguage === 'html') return 'src/sandbox/index.html';
   if (resolvedLang.requestedLanguage === 'css') return 'src/sandbox/style.css';
 
-  // Extract key task terms
-  let slug = promptLower
-    .replace(/^(please|pls|can you|help me|make|create|write|add|generate|build|implement)\s+/i, '')
-    .replace(/\b(in|using|with|a|an|the|code|function|program|script|file|python|typescript|javascript|html|css|cpp|java|go|rust)\b/gi, '')
-    .replace(/[^a-z0-9]/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '');
+  const canonicalPath = `src/sandbox/main${ext}`;
+  const sandboxDir = path.resolve(process.cwd(), 'src/sandbox');
 
-  if (!slug || slug.length < 2) slug = 'main';
-  slug = slug.slice(0, 30).replace(/_+$/, '');
+  if (fs.existsSync(sandboxDir)) {
+    // 1. If main.<ext> already exists in src/sandbox/, reuse it!
+    const canonicalAbs = path.resolve(process.cwd(), canonicalPath);
+    if (fs.existsSync(canonicalAbs)) {
+      return canonicalPath;
+    }
+    // 2. If any existing implementation file matching <ext> exists in src/sandbox/, reuse it!
+    try {
+      const existingFiles = fs.readdirSync(sandboxDir).filter(f => f.endsWith(ext) && !f.startsWith('test_') && !f.includes('_test.') && !f.includes('.test.'));
+      if (existingFiles.length > 0) {
+        return `src/sandbox/${existingFiles[0]}`;
+      }
+    } catch { }
+  }
 
-  return `src/sandbox/${slug}${ext}`;
+  // 3. Fall back to canonical main.<ext>
+  return canonicalPath;
 }
 
 /**

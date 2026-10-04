@@ -7,7 +7,7 @@ export interface WebSearchResult {
   snippet: string;
   url: string;
   timestamp: string; // ISO timestamp of when result was fetched
-  source: 'google' | 'bing' | 'duckduckgo'; // Which search engine provided this
+  source: 'google' | 'duckduckgo'; // Which search engine provided this
 }
 
 // SSE emitter callback - will be set by server.ts
@@ -28,94 +28,86 @@ function emitSearchProgress(message: string) {
 }
 
 /**
- * Search using Google Custom Search API (if available)
- * Requires: GOOGLE_SEARCH_API_KEY and GOOGLE_SEARCH_ENGINE_ID in .env
+ * Search using Google Gemini API with Google Search Grounding enabled
+ * Requires: GEMINI_API_KEY or GOOGLE_GEMINI_API_KEY in .env
  */
-async function searchGoogle(query: string): Promise<WebSearchResult[]> {
-  const apiKey = process.env.GOOGLE_SEARCH_API_KEY;
-  const engineId = process.env.GOOGLE_SEARCH_ENGINE_ID;
-
-  if (!apiKey || !engineId) {
-    return [];
-  }
-
-  try {
-    emitSearchProgress(`🔍 Searching Google for "${query}"...`);
-
-    const searchUrl = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(query)}&key=${apiKey}&cx=${engineId}&num=5`;
-    const response = await fetch(searchUrl);
-
-    if (!response.ok) {
-      console.warn(`[WebSearch] Google API returned ${response.status}`);
-      return [];
-    }
-
-    const data: any = await response.json();
-    const timestamp = new Date().toISOString();
-
-    if (!data.items || data.items.length === 0) {
-      return [];
-    }
-
-    emitSearchProgress(`📄 Found ${data.items.length} results from Google`);
-
-    return data.items.slice(0, 5).map((item: any) => ({
-      title: item.title || '',
-      snippet: item.snippet || '',
-      url: item.link || '',
-      timestamp,
-      source: 'google' as const
-    }));
-  } catch (err) {
-    console.warn('[WebSearch] Google search failed:', err);
-    return [];
-  }
-}
-
-/**
- * Search using Bing Search API (if available)
- * Requires: BING_SEARCH_API_KEY in .env
- */
-async function searchBing(query: string): Promise<WebSearchResult[]> {
-  const apiKey = process.env.BING_SEARCH_API_KEY;
+async function searchGemini(query: string): Promise<WebSearchResult[]> {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_GEMINI_API_KEY;
 
   if (!apiKey) {
     return [];
   }
 
   try {
-    emitSearchProgress(`🔍 Searching Bing for "${query}"...`);
+    emitSearchProgress(`🔍 Searching Google via Gemini AI Grounding for "${query}"...`);
 
-    const searchUrl = `https://api.bing.microsoft.com/v7.0/search?q=${encodeURIComponent(query)}&count=5`;
-    const response = await fetch(searchUrl, {
-      headers: {
-        'Ocp-Apim-Subscription-Key': apiKey
-      }
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                text: `Perform a web search and return standard search findings for query: "${query}". Format response clearly.`
+              }
+            ]
+          }
+        ],
+        tools: [
+          {
+            google_search: {}
+          }
+        ]
+      })
     });
 
     if (!response.ok) {
-      console.warn(`[WebSearch] Bing API returned ${response.status}`);
+      console.warn(`[WebSearch] Gemini API returned ${response.status}`);
       return [];
     }
 
     const data: any = await response.json();
     const timestamp = new Date().toISOString();
+    const results: WebSearchResult[] = [];
 
-    if (!data.webPages || data.webPages.value.length === 0) {
-      return [];
+    const candidate = data.candidates?.[0];
+    const groundingChunks = candidate?.groundingMetadata?.groundingChunks;
+
+    if (Array.isArray(groundingChunks) && groundingChunks.length > 0) {
+      for (const chunk of groundingChunks) {
+        if (chunk.web) {
+          results.push({
+            title: chunk.web.title || 'Google Search Result',
+            snippet: chunk.web.title ? `Web source: ${chunk.web.title}` : '',
+            url: chunk.web.uri || '',
+            timestamp,
+            source: 'google' as const
+          });
+        }
+      }
     }
 
-    emitSearchProgress(`📄 Found ${data.webPages.value.length} results from Bing`);
+    if (results.length === 0 && candidate?.content?.parts?.[0]?.text) {
+      const textResponse = candidate.content.parts[0].text;
+      results.push({
+        title: `Google Gemini Grounded Search Summary`,
+        snippet: textResponse.slice(0, 300),
+        url: 'https://google.com',
+        timestamp,
+        source: 'google' as const
+      });
+    }
 
-    return data.webPages.value.slice(0, 5).map((item: any) => ({
-      title: item.name || '',
-      snippet: item.snippet || '',
-      url: item.url || '',
-      timestamp,
-      source: 'bing' as const
-    }));
+    if (results.length > 0) {
+      emitSearchProgress(`📄 Found ${results.length} results from Google Gemini Search Grounding`);
+    }
+
+    return results.slice(0, 5);
   } catch (err) {
-    console.warn('[WebSearch] Bing search failed:', err);
+    console.warn('[WebSearch] Gemini search failed:', err);
     return [];
   }
 }
@@ -175,7 +167,7 @@ async function searchDuckDuckGo(query: string): Promise<WebSearchResult[]> {
 
 /**
  * Main Web Search Function
- * Tries multiple search engines in order until one returns results
+ * Uses Gemini Search Grounding (with DuckDuckGo as keyless fallback)
  */
 export async function performWebSearch(query: string, customEmitter?: (eventType: string, data: any) => void): Promise<WebSearchResult[]> {
   if (customEmitter) {
@@ -189,11 +181,10 @@ export async function performWebSearch(query: string, customEmitter?: (eventType
 
   emitSearchProgress(`🌐 Initiating web search for: "${cleanQuery}"`);
 
-  // Try search engines in order
+  // Try search strategies in order
   const searchStrategies = [
-    { name: 'Google', fn: () => searchGoogle(cleanQuery) },
-    { name: 'Bing', fn: () => searchBing(cleanQuery) },
-    { name: 'DuckDuckGo', fn: () => searchDuckDuckGo(cleanQuery) }
+    { name: 'Gemini Search Grounding', fn: () => searchGemini(cleanQuery) },
+    { name: 'DuckDuckGo Fallback', fn: () => searchDuckDuckGo(cleanQuery) }
   ];
 
   for (const strategy of searchStrategies) {

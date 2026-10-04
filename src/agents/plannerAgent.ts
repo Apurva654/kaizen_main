@@ -340,6 +340,9 @@ function validatePlanLanguage(steps: PlanStep[], reqLang?: string): PlanStep[] {
     else if (reqLang === 'css' && currentExt !== 'css') targetExt = 'css';
     else if (reqLang === 'java' && currentExt !== 'java') targetExt = 'java';
     else if (reqLang === 'cpp' && currentExt !== 'cpp') targetExt = 'cpp';
+    else if (reqLang === 'go' && currentExt !== 'go') targetExt = 'go';
+    else if (reqLang === 'rust' && currentExt !== 'rs') targetExt = 'rs';
+    else if (reqLang === 'c' && currentExt !== 'c') targetExt = 'c';
 
     let newTarget = step.targetFile;
     if (targetExt && targetExt !== currentExt && step.isNewFile) {
@@ -406,31 +409,41 @@ function buildModularFallbackPlan(userQuery: string, targetFiles: string[]): Pla
 
   if (isCpp || isPython || isJava || isRust || isGo || (targetFiles.length > 0 && !targetFiles[0].endsWith('.ts'))) {
     let mainTarget = targetFiles[0];
-    if (!mainTarget || mainTarget.endsWith('.ts')) {
-      const ext = isCpp ? '.cpp' : (isPython ? '.py' : (isJava ? '.java' : (isRust ? '.rs' : (isGo ? '.go' : '.cpp'))));
-      const slug = userQuery.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '').slice(0, 20) || 'solution';
-      mainTarget = `src/sandbox/${slug}${ext}`;
+    const ext = isCpp ? '.cpp' : (isPython ? '.py' : (isJava ? '.java' : (isRust ? '.rs' : (isGo ? '.go' : '.cpp'))));
+
+    if (!mainTarget || (mainTarget.endsWith('.ts') && (ext as string) !== '.ts')) {
+      const canonicalPath = `src/sandbox/main${ext}`;
+      const sandboxDir = path.resolve(process.cwd(), 'src/sandbox');
+      if (fs.existsSync(sandboxDir)) {
+        if (fs.existsSync(path.resolve(process.cwd(), canonicalPath))) {
+          mainTarget = canonicalPath;
+        } else {
+          try {
+            const existing = fs.readdirSync(sandboxDir).filter(f => f.endsWith(ext) && !f.startsWith('test_') && !f.includes('_test.') && !f.includes('.test.'));
+            if (existing.length > 0) {
+              mainTarget = `src/sandbox/${existing[0]}`;
+            } else {
+              mainTarget = canonicalPath;
+            }
+          } catch {
+            mainTarget = canonicalPath;
+          }
+        }
+      } else {
+        mainTarget = canonicalPath;
+      }
     }
 
-    const steps: PlanStep[] = targetFiles.length > 0 ? targetFiles.map((tf, idx) => ({
+    const effectiveTargets = targetFiles.length > 0 ? targetFiles : [mainTarget];
+    const steps: PlanStep[] = effectiveTargets.map((tf, idx) => ({
       id: idx + 1,
       targetFile: tf,
       action: fs.existsSync(tf) ? 'modify' : 'create',
       isNewFile: !fs.existsSync(tf),
-      dependencies: idx > 0 ? [targetFiles[idx - 1]] : [],
+      dependencies: idx > 0 ? [effectiveTargets[idx - 1]] : [],
       description: formatSmartStepDescription(userQuery, tf, idx),
       status: 'pending'
-    })) : [
-      {
-        id: 1,
-        targetFile: mainTarget,
-        action: 'create',
-        isNewFile: !fs.existsSync(mainTarget),
-        dependencies: [],
-        description: formatSmartStepDescription(userQuery, mainTarget, 0),
-        status: 'pending'
-      }
-    ];
+    }));
 
     return steps;
   }

@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { ASTParserTool, ExtractedSymbol } from './astParser';
+import { ASTParserTool, ExtractedSymbol, ExtractedSymbolParameter } from './astParser';
 
 export interface SymbolFact {
   name: string;
@@ -9,6 +9,20 @@ export interface SymbolFact {
   isExported: boolean;
   language?: string;
   text?: string;
+  startLine?: number;
+  endLine?: number;
+  startColumn?: number;
+  endColumn?: number;
+  signature?: string;
+  parameters?: ExtractedSymbolParameter[];
+  returnType?: string;
+  returnTypeInferred?: boolean;
+  documentation?: string;
+  loc?: number;
+  complexity?: number;
+  branches?: number;
+  parameterCount?: number;
+  bodyText?: string;
 }
 
 export interface ImportFact {
@@ -41,6 +55,7 @@ export interface GraphifyNode {
   path?: string;
   language?: string;
   status?: 'generated' | 'modified' | 'test' | 'dependency' | 'active' | 'normal';
+  statusExplanation?: string;
   symbolsCount?: number;
   symbolType?: string;
   declaredIn?: string;
@@ -48,13 +63,41 @@ export interface GraphifyNode {
   importedBy?: string[];
   importsCount?: number;
   contentSnippet?: string;
+
+  // Rich Symbol Metadata
+  startLine?: number;
+  endLine?: number;
+  startColumn?: number;
+  endColumn?: number;
+  signature?: string;
+  parameters?: ExtractedSymbolParameter[];
+  returnType?: string;
+  returnTypeInferred?: boolean;
+  documentation?: string;
+  loc?: number;
+  complexity?: number;
+  branches?: number;
+  parameterCount?: number;
+  callers?: Array<{ id: string; name: string; file: string; line?: number }>;
+  callees?: Array<{ id: string; name: string; file: string; line?: number }>;
+
+  // Rich File Metadata
+  importCount?: number;
+  internalDependencyCount?: number;
+  externalDependencyCount?: number;
+  containedSymbols?: Array<{ id: string; name: string; type: string; startLine?: number }>;
+  relatedTests?: Array<{ id: string; name: string; path: string; isTestFile: boolean; startLine?: number }>;
+  taskRelevance?: {
+    isRelevant: boolean;
+    reasons: string[];
+  };
 }
 
 export interface GraphifyEdge {
   id: string;
   source: string;
   target: string;
-  type: 'IMPORTS' | 'IMPORTED_BY' | 'DEFINES' | 'EXPORTS' | 'DEPENDS_ON';
+  type: 'IMPORTS' | 'IMPORTED_BY' | 'DEFINES' | 'EXPORTS' | 'DEPENDS_ON' | 'CALLS' | 'USES' | 'INHERITS' | 'IMPLEMENTS' | 'TESTS';
   label?: string;
   symbols?: string[];
 }
@@ -225,7 +268,21 @@ export class GraphifyEngine {
             filePath: normPath,
             isExported,
             language,
-            text: s.text
+            text: s.text,
+            startLine: s.startLine,
+            endLine: s.endLine,
+            startColumn: s.startColumn,
+            endColumn: s.endColumn,
+            signature: s.signature,
+            parameters: s.parameters,
+            returnType: s.returnType,
+            returnTypeInferred: s.returnTypeInferred,
+            documentation: s.documentation,
+            loc: s.loc,
+            complexity: s.complexity,
+            branches: s.branches,
+            parameterCount: s.parameterCount,
+            bodyText: s.bodyText
           };
         });
       } catch (err: any) {
@@ -292,7 +349,6 @@ export class GraphifyEngine {
           const line = rawLine.trim();
           if (line.startsWith('#')) continue;
 
-          // e.g. from service import TaskService or from .service import TaskService
           const fromMatch = line.match(/^from\s+([\w.]+)\s+import\s+([\w.,\s*()]+)/);
           if (fromMatch) {
             const moduleSpecifier = fromMatch[1].trim();
@@ -310,7 +366,6 @@ export class GraphifyEngine {
             continue;
           }
 
-          // e.g. import service or import task as t
           const importMatch = line.match(/^import\s+([\w.,\s]+)/);
           if (importMatch) {
             const modules = importMatch[1].split(',').map(m => m.trim().split(/\s+as\s+/)[0]);
@@ -384,7 +439,6 @@ export class GraphifyEngine {
           let candidates: string[] = [];
 
           if (dots > 0) {
-            // Python relative import (.service, ..service, ...module)
             let targetDir = fileDir;
             for (let i = 1; i < dots; i++) {
               targetDir = path.dirname(targetDir);
@@ -404,7 +458,6 @@ export class GraphifyEngine {
               ];
             }
           } else {
-            // Python non-relative import (e.g., service, task, sys, argparse)
             candidates = [
               path.join(fileDir, `${modName}.py`),
               path.join(fileDir, modName, '__init__.py'),
@@ -424,12 +477,11 @@ export class GraphifyEngine {
             imp.resolvedPath = matchedKey;
             imp.type = 'internal';
           } else if (dots > 0) {
-            imp.type = 'unresolved'; // Relative import that couldn't be resolved
+            imp.type = 'unresolved';
           } else {
-            imp.type = 'external'; // Non-relative import not in workspace = standard library / external
+            imp.type = 'external';
           }
         } else {
-          // JS/TS import resolution
           if (imp.moduleSpecifier.startsWith('.')) {
             const resolvedBase = this.normalizePath(path.resolve(fileDir, imp.moduleSpecifier));
             const possibleExts = ['', '.ts', '.js', '.tsx', '.jsx', '/index.ts', '/index.js'];
@@ -488,7 +540,6 @@ export class GraphifyEngine {
           return;
         }
         if (visited.has(currFile)) {
-          // Cycle detected - stop branch traversal safely
           return;
         }
         visited.add(currFile);
@@ -623,7 +674,6 @@ export class GraphifyEngine {
       }
     }
 
-    // Include other files in workspace if not already processed
     for (const [filePath, node] of this.fileFactsMap.entries()) {
       if (!processedFiles.has(filePath)) {
         factsList.push(`\n--- AVAILABLE WORKSPACE MODULE: ${filePath} ---`);
@@ -641,11 +691,13 @@ export class GraphifyEngine {
     targetFiles?: string[];
     generatedFiles?: string[];
     activeFile?: string;
+    edgeTypeFilter?: string;
   }): GraphifyGraphPayload {
     const scope = options?.scope || 'current-task';
     const rawTargets = options?.targetFiles || [];
     const generatedFiles = (options?.generatedFiles || []).map(f => this.normalizePath(f));
     const activeFile = options?.activeFile ? this.normalizePath(options.activeFile) : undefined;
+    const edgeTypeFilter = (options?.edgeTypeFilter || 'all').toLowerCase();
 
     const expandedTargets = this.expandTargetFiles(rawTargets).map(f => this.normalizePath(f));
 
@@ -667,6 +719,27 @@ export class GraphifyEngine {
       if (expandedTargets.includes(norm)) return 'modified';
       return 'normal';
     };
+
+    const getStatusExplanation = (status: string): string => {
+      switch (status) {
+        case 'active': return 'Currently open file in code editor';
+        case 'modified': return 'Target file for current task changes';
+        case 'generated': return 'Generated or updated file during session';
+        case 'test': return 'Automated test suite module';
+        case 'dependency': return 'Workspace internal/external dependency module';
+        case 'normal': return 'Standard workspace source file or symbol';
+        default: return 'Workspace graph node';
+      }
+    };
+
+    // Detect related test files in workspace
+    const testFiles: Array<{ path: string; name: string; node: FileNodeFacts }> = [];
+    for (const [fPath, fNode] of this.fileFactsMap.entries()) {
+      const base = path.basename(fPath).toLowerCase();
+      if (base.includes('test') || base.startsWith('test_')) {
+        testFiles.push({ path: fPath, name: path.basename(fPath), node: fNode });
+      }
+    }
 
     const relevantFilePaths = new Set<string>();
 
@@ -719,9 +792,39 @@ export class GraphifyEngine {
       for (const f of this.fileFactsMap.keys()) relevantFilePaths.add(f);
     }
 
+    // Map of symbol ID to symbol facts & nodes
+    const allSymbolNodesMap = new Map<string, { fact: SymbolFact; file: string; id: string }>();
+
     for (const filePath of relevantFilePaths) {
       const node = this.fileFactsMap.get(filePath);
       if (!node) continue;
+
+      const fileStatus = getFileStatus(filePath);
+
+      // Find related tests for this file
+      const fileRelatedTests: Array<{ id: string; name: string; path: string; isTestFile: boolean; startLine?: number }> = [];
+      const baseName = path.basename(filePath).toLowerCase().replace(/\.[^/.]+$/, '');
+
+      for (const tf of testFiles) {
+        if (tf.path === filePath) continue;
+        const tfContent = tf.node.content.toLowerCase();
+        if (tf.path.toLowerCase().includes(baseName) || tfContent.includes(baseName) || tf.node.imports.some(i => i.resolvedPath === filePath)) {
+          fileRelatedTests.push({
+            id: tf.path,
+            name: tf.name,
+            path: tf.path,
+            isTestFile: true
+          });
+        }
+      }
+
+      // Compute Task Relevance for file
+      const fileReasons: string[] = [];
+      if (activeFile && filePath === activeFile) fileReasons.push('Currently active file open in editor');
+      if (expandedTargets.includes(filePath)) fileReasons.push('Target file specified for current task requested changes');
+      if (generatedFiles.includes(filePath)) fileReasons.push('Generated or modified during current task workflow');
+      if (fileRelatedTests.length > 0) fileReasons.push(`Covered by related test suite (${fileRelatedTests.map(t => t.name).join(', ')})`);
+      if (node.imports.some(i => i.resolvedPath && expandedTargets.includes(i.resolvedPath))) fileReasons.push('Imports target task module');
 
       const fileNodeId = filePath;
       if (!addedNodeIds.has(fileNodeId)) {
@@ -732,19 +835,48 @@ export class GraphifyEngine {
           type: 'file',
           path: filePath,
           language: node.language,
-          status: getFileStatus(filePath),
+          status: fileStatus,
+          statusExplanation: getStatusExplanation(fileStatus),
           symbolsCount: node.symbols.length,
           importsCount: node.imports.length,
-          contentSnippet: node.content.slice(0, 300)
+          importCount: node.imports.length,
+          internalDependencyCount: node.imports.filter(i => i.type === 'internal').length,
+          externalDependencyCount: node.imports.filter(i => i.type === 'external').length,
+          contentSnippet: node.content.slice(0, 300),
+          loc: node.content.split('\n').length,
+          containedSymbols: node.symbols.map(s => ({
+            id: `symbol:${filePath}:${s.name}`,
+            name: s.name,
+            type: s.type,
+            startLine: s.startLine
+          })),
+          relatedTests: fileRelatedTests,
+          taskRelevance: {
+            isRelevant: fileReasons.length > 0,
+            reasons: fileReasons.length > 0 ? fileReasons : ['Workspace source file']
+          }
         });
       }
 
-      const shouldIncludeSymbolSubNodes = scope === 'current-task' || scope === 'generated' || getFileStatus(filePath) === 'active' || getFileStatus(filePath) === 'generated' || getFileStatus(filePath) === 'modified' || relevantFilePaths.size <= 5;
+      // Process tests edge
+      for (const rt of fileRelatedTests) {
+        edges.push({
+          id: `edge:${rt.id}:tests:${fileNodeId}`,
+          source: rt.id,
+          target: fileNodeId,
+          type: 'TESTS',
+          label: 'TESTS'
+        });
+      }
+
+      const shouldIncludeSymbolSubNodes = scope === 'current-task' || scope === 'generated' || fileStatus === 'active' || fileStatus === 'generated' || fileStatus === 'modified' || relevantFilePaths.size <= 8;
 
       for (const sym of node.symbols) {
         totalSymbolsCount++;
+        const symNodeId = `symbol:${filePath}:${sym.name}`;
+        allSymbolNodesMap.set(symNodeId, { fact: sym, file: filePath, id: symNodeId });
+
         if (shouldIncludeSymbolSubNodes) {
-          const symNodeId = `symbol:${filePath}:${sym.name}`;
           if (!addedNodeIds.has(symNodeId)) {
             addedNodeIds.add(symNodeId);
             nodes.push({
@@ -753,8 +885,26 @@ export class GraphifyEngine {
               type: 'symbol',
               symbolType: sym.type,
               declaredIn: filePath,
+              path: filePath,
               isExported: sym.isExported,
-              status: 'normal'
+              status: 'normal',
+              statusExplanation: 'AST symbol declaration',
+              startLine: sym.startLine,
+              endLine: sym.endLine,
+              startColumn: sym.startColumn,
+              endColumn: sym.endColumn,
+              signature: sym.signature || `def ${sym.name}()`,
+              parameters: sym.parameters || [],
+              returnType: sym.returnType || 'Not available',
+              returnTypeInferred: sym.returnTypeInferred || false,
+              documentation: sym.documentation || 'No documentation available',
+              loc: sym.loc || (sym.endLine && sym.startLine ? sym.endLine - sym.startLine + 1 : 1),
+              complexity: sym.complexity || 1,
+              branches: sym.branches || 0,
+              parameterCount: sym.parameterCount || (sym.parameters ? sym.parameters.length : 0),
+              callers: [],
+              callees: [],
+              relatedTests: fileRelatedTests
             });
           }
 
@@ -782,6 +932,7 @@ export class GraphifyEngine {
               path: targetFile,
               language: this.astParser.getLanguageFromPath(targetFile),
               status: getFileStatus(targetFile),
+              statusExplanation: getStatusExplanation(getFileStatus(targetFile)),
               symbolsCount: 0,
               importsCount: 0
             });
@@ -804,7 +955,8 @@ export class GraphifyEngine {
               id: extNodeId,
               label: imp.moduleSpecifier,
               type: 'external',
-              status: 'normal'
+              status: 'normal',
+              statusExplanation: 'External third-party module dependency'
             });
           }
           edges.push({
@@ -824,7 +976,8 @@ export class GraphifyEngine {
               id: unresNodeId,
               label: `${imp.moduleSpecifier} (?)`,
               type: 'unresolved',
-              status: 'normal'
+              status: 'normal',
+              statusExplanation: 'Unresolved import reference'
             });
           }
           edges.push({
@@ -839,12 +992,105 @@ export class GraphifyEngine {
       }
     }
 
+    // Direct Call Graph Analysis (CALLS edges & Callers/Callees population)
+    const nodeMapById = new Map<string, GraphifyNode>();
+    for (const n of nodes) {
+      nodeMapById.set(n.id, n);
+    }
+
+    for (const [symAId, symAData] of allSymbolNodesMap.entries()) {
+      const symANode = nodeMapById.get(symAId);
+      if (!symANode || !symAData.fact.bodyText) continue;
+
+      const bodyText = symAData.fact.bodyText;
+
+      for (const [symBId, symBData] of allSymbolNodesMap.entries()) {
+        if (symAId === symBId) continue;
+        const bName = symBData.fact.name;
+        if (!bName || bName.length < 2) continue;
+
+        // Check if symA body contains call to symB
+        const callRegex = new RegExp(`\\b${bName}\\s*\\(`, 'g');
+        if (callRegex.test(bodyText)) {
+          // Record caller/callee
+          if (!symANode.callees) symANode.callees = [];
+          if (!symANode.callees.some(c => c.id === symBId)) {
+            symANode.callees.push({
+              id: symBId,
+              name: bName,
+              file: symBData.file,
+              line: symBData.fact.startLine
+            });
+          }
+
+          const symBNode = nodeMapById.get(symBId);
+          if (symBNode) {
+            if (!symBNode.callers) symBNode.callers = [];
+            if (!symBNode.callers.some(c => c.id === symAId)) {
+              symBNode.callers.push({
+                id: symAId,
+                name: symAData.fact.name,
+                file: symAData.file,
+                line: symAData.fact.startLine
+              });
+            }
+          }
+
+          // Add CALLS edge if both nodes are present in graph
+          if (addedNodeIds.has(symAId) && addedNodeIds.has(symBId)) {
+            const edgeId = `edge:${symAId}:calls:${symBId}`;
+            if (!edges.some(e => e.id === edgeId)) {
+              edges.push({
+                id: edgeId,
+                source: symAId,
+                target: symBId,
+                type: 'CALLS',
+                label: 'CALLS'
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // Populate Symbol Task Relevance
+    for (const n of nodes) {
+      if (n.type === 'symbol') {
+        const symReasons: string[] = [];
+        if (n.declaredIn && expandedTargets.includes(n.declaredIn)) {
+          symReasons.push(`Belongs to target task file (${path.basename(n.declaredIn)})`);
+        }
+        if (n.declaredIn && activeFile && n.declaredIn === activeFile) {
+          symReasons.push(`Declared in currently active editor file`);
+        }
+        if (n.callers && n.callers.some(c => expandedTargets.includes(c.file))) {
+          const callerNames = n.callers.filter(c => expandedTargets.includes(c.file)).map(c => c.name).join(', ');
+          symReasons.push(`Directly called by target workflow (${callerNames})`);
+        }
+        if (n.callees && n.callees.some(c => expandedTargets.includes(c.file))) {
+          const calleeNames = n.callees.filter(c => expandedTargets.includes(c.file)).map(c => c.name).join(', ');
+          symReasons.push(`Directly calls target symbol (${calleeNames})`);
+        }
+        if (n.relatedTests && n.relatedTests.length > 0) {
+          symReasons.push(`Covered by test suite (${n.relatedTests.map(t => t.name).join(', ')})`);
+        }
+
+        n.taskRelevance = {
+          isRelevant: symReasons.length > 0,
+          reasons: symReasons.length > 0 ? symReasons : ['Declared workspace symbol']
+        };
+      }
+    }
+
     const fileNodesCount = nodes.filter(n => n.type === 'file').length;
     const symbolNodesCount = nodes.filter(n => n.type === 'symbol').length;
 
-    // Node-edge integrity: filter out any edge referencing a non-existent node
     const validNodeIds = new Set(nodes.map(n => n.id));
-    const validEdges = edges.filter(e => validNodeIds.has(e.source) && validNodeIds.has(e.target));
+    let validEdges = edges.filter(e => validNodeIds.has(e.source) && validNodeIds.has(e.target));
+
+    if (edgeTypeFilter && edgeTypeFilter !== 'all') {
+      validEdges = validEdges.filter(e => e.type.toLowerCase() === edgeTypeFilter);
+    }
 
     return {
       nodes,
@@ -862,4 +1108,87 @@ export class GraphifyEngine {
       }
     };
   }
+
+  public getImpactAnalysis(nodeId: string, graphPayload?: GraphifyGraphPayload): {
+    nodeId: string;
+    directDependenciesCount: number;
+    directDependentsCount: number;
+    dependencies: Array<{ id: string; label: string; type: string }>;
+    dependents: Array<{ id: string; label: string; type: string }>;
+  } {
+    const payload = graphPayload || this.exportGraphData({ scope: 'full' });
+    const targetNode = payload.nodes.find(n => n.id === nodeId || n.path === nodeId);
+    if (!targetNode) {
+      return {
+        nodeId,
+        directDependenciesCount: 0,
+        directDependentsCount: 0,
+        dependencies: [],
+        dependents: []
+      };
+    }
+
+    const effectiveId = targetNode.id;
+    const outgoingEdges = payload.edges.filter(e => e.source === effectiveId);
+    const incomingEdges = payload.edges.filter(e => e.target === effectiveId);
+
+    const depNodeIds = Array.from(new Set(outgoingEdges.map(e => e.target)));
+    const deptNodeIds = Array.from(new Set(incomingEdges.map(e => e.source)));
+
+    const dependencies = payload.nodes
+      .filter(n => depNodeIds.includes(n.id))
+      .map(n => ({ id: n.id, label: n.label, type: n.type }));
+
+    const dependents = payload.nodes
+      .filter(n => deptNodeIds.includes(n.id))
+      .map(n => ({ id: n.id, label: n.label, type: n.type }));
+
+    return {
+      nodeId: effectiveId,
+      directDependenciesCount: dependencies.length,
+      directDependentsCount: dependents.length,
+      dependencies,
+      dependents
+    };
+  }
+
+  public tracePath(sourceId: string, targetId: string, graphPayload?: GraphifyGraphPayload): Array<{ id: string; label: string; type: string }> | null {
+    const payload = graphPayload || this.exportGraphData({ scope: 'full' });
+    const srcNode = payload.nodes.find(n => n.id === sourceId || n.path === sourceId);
+    const dstNode = payload.nodes.find(n => n.id === targetId || n.path === targetId);
+
+    if (!srcNode || !dstNode) return null;
+    if (srcNode.id === dstNode.id) return [{ id: srcNode.id, label: srcNode.label, type: srcNode.type }];
+
+    // BFS Shortest Path Traversal
+    const queue: Array<{ id: string; path: string[] }> = [{ id: srcNode.id, path: [srcNode.id] }];
+    const visited = new Set<string>([srcNode.id]);
+
+    const adjacency = new Map<string, string[]>();
+    for (const e of payload.edges) {
+      if (!adjacency.has(e.source)) adjacency.set(e.source, []);
+      adjacency.get(e.source)!.push(e.target);
+    }
+
+    while (queue.length > 0) {
+      const { id, path: currentPath } = queue.shift()!;
+      if (id === dstNode.id) {
+        return currentPath.map(nid => {
+          const n = payload.nodes.find(item => item.id === nid)!;
+          return { id: n.id, label: n.label, type: n.type };
+        });
+      }
+
+      const neighbors = adjacency.get(id) || [];
+      for (const nextId of neighbors) {
+        if (!visited.has(nextId)) {
+          visited.add(nextId);
+          queue.push({ id: nextId, path: [...currentPath, nextId] });
+        }
+      }
+    }
+
+    return null;
+  }
 }
+

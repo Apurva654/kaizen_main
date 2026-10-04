@@ -253,13 +253,24 @@
               <button class="graph-mode-btn" data-mode="full" title="Show full workspace graph context">Full Context</button>
             </div>
 
+            <div class="graph-edge-filters">
+              <span class="filter-label">Edge Type:</span>
+              <button class="edge-filter-btn active" data-edge="all">All</button>
+              <button class="edge-filter-btn" data-edge="calls">Calls</button>
+              <button class="edge-filter-btn" data-edge="imports">Imports</button>
+              <button class="edge-filter-btn" data-edge="defines">Defines</button>
+              <button class="edge-filter-btn" data-edge="tests">Tests</button>
+              <button class="edge-filter-btn" data-edge="depends_on">Dependencies</button>
+            </div>
+
             <div class="graphify-actions">
+              <button id="graphify-btn-legend" class="icon-btn-secondary" title="Toggle Graph Legend">📖 Legend</button>
               <button id="graphify-btn-fit" class="icon-btn-secondary" title="Fit graph to viewport">🎯 Fit</button>
               <button id="graphify-btn-refresh" class="icon-btn-secondary" title="Refresh Graphify data">🔄 Refresh</button>
             </div>
           </div>
 
-          <!-- Live Graph Statistics Bar -->
+          <!-- Live Graph Statistics Bar & Legend -->
           <div id="graphify-stats-bar" class="graphify-stats-bar">
             <span class="stat-pill"><strong id="stat-files">0</strong> Files</span>
             <span class="stat-pill"><strong id="stat-symbols">0</strong> Symbols</span>
@@ -267,6 +278,28 @@
             <span class="stat-pill"><strong id="stat-edges">0</strong> Edges</span>
             <span class="stat-pill"><strong id="stat-ext">0</strong> External</span>
             <span class="stat-pill"><strong id="stat-unresolved">0</strong> Unresolved</span>
+          </div>
+
+          <!-- Compact Graph Legend Panel -->
+          <div id="graphify-legend-panel" class="graphify-legend-panel hidden">
+            <div class="legend-group">
+              <span class="legend-group-title">NODE TYPES:</span>
+              <span class="legend-item"><span class="node-icon file-active"></span> Active File</span>
+              <span class="legend-item"><span class="node-icon file-target"></span> Target File</span>
+              <span class="legend-item"><span class="node-icon file-gen"></span> Generated</span>
+              <span class="legend-item"><span class="node-icon file-test"></span> Test Suite</span>
+              <span class="legend-item"><span class="node-icon symbol"></span> Symbol</span>
+              <span class="legend-item"><span class="node-icon external"></span> External</span>
+              <span class="legend-item"><span class="node-icon unresolved"></span> Unresolved</span>
+            </div>
+            <div class="legend-group">
+              <span class="legend-group-title">EDGE TYPES:</span>
+              <span class="legend-item"><span class="edge-line calls"></span> CALLS</span>
+              <span class="legend-item"><span class="edge-line imports"></span> IMPORTS</span>
+              <span class="legend-item"><span class="edge-line defines"></span> DEFINES</span>
+              <span class="legend-item"><span class="edge-line tests"></span> TESTS</span>
+              <span class="legend-item"><span class="edge-line depends"></span> DEPENDS_ON</span>
+            </div>
           </div>
 
           <!-- Graph Explorer Main View Area with Canvas & Node Detail Drawer -->
@@ -278,7 +311,10 @@
             <!-- Right Node Information Drawer -->
             <aside id="graphify-node-drawer" class="graphify-node-drawer hidden">
               <div class="drawer-header">
-                <div id="drawer-node-type-badge" class="badge-pill">FILE</div>
+                <div class="drawer-badges">
+                  <div id="drawer-node-type-badge" class="badge-pill">FILE</div>
+                  <div id="drawer-node-status-badge" class="badge-pill status-pill">NORMAL</div>
+                </div>
                 <button id="close-drawer-btn" class="icon-btn-tiny">&times;</button>
               </div>
               <div class="drawer-body" id="drawer-node-body">

@@ -107,6 +107,31 @@ export function verifyFileWasWritten(filePath: string): boolean {
 }
 
 /**
+ * Sanitizes code patches before writing to disk or returning.
+ * Fixes unescaped multiline double-quoted string literals in Go and cleans double-escaped newlines safely.
+ */
+export function sanitizeCodePatch(code: string, filePath: string): string {
+  if (!code) return '';
+  let cleanCode = code;
+  const ext = filePath.split('.').pop()?.toLowerCase();
+
+  // For Go files, fix physical linebreaks inside double-quoted string literals
+  if (ext === 'go' || filePath.endsWith('.go')) {
+    const goDoubleQuoteRegex = /"(?:[^"\\]|\\.)*"/g;
+    cleanCode = cleanCode.replace(goDoubleQuoteRegex, (match) => {
+      return match.replace(/\r?\n/g, '\\n');
+    });
+  }
+
+  // Handle double-escaped newlines outside string literals if present
+  if (cleanCode.includes('\\n') && !cleanCode.includes('\n')) {
+    cleanCode = cleanCode.replace(/\\n/g, '\n').replace(/\\"/g, '"');
+  }
+
+  return cleanCode;
+}
+
+/**
  * Write patches to disk and verify each one
  * @param patches Array of file patches to write
  * @param emitSSE Optional SSE emitter for progress reporting
@@ -137,10 +162,7 @@ export function saveFilePatchesToServerDiskWithVerification(
       }
 
       // Clean code before writing
-      let cleanCode = patch.code || '';
-      if (cleanCode.includes('\\n')) {
-        cleanCode = cleanCode.replace(/\\n/g, '\n').replace(/\\"/g, '"');
-      }
+      let cleanCode = sanitizeCodePatch(patch.code || '', patch.filePath);
 
       // Write file to disk
       fs.writeFileSync(fullPath, cleanCode, 'utf-8');
@@ -698,8 +720,10 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  // Filter out any protected file patch outputs
-  generatedPatches = (validPatches.length > 0 ? validPatches : generatedPatches).filter(p => !isProtectedFile(p.filePath));
+  // Filter out any protected file patch outputs and sanitize patch code
+  generatedPatches = (validPatches.length > 0 ? validPatches : generatedPatches)
+    .filter(p => !isProtectedFile(p.filePath))
+    .map(p => ({ ...p, code: sanitizeCodePatch(p.code, p.filePath) }));
 
   const updatedPlan: PlanStep[] = state.plan.map((step) => {
     if (step.id === 2) {

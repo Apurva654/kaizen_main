@@ -632,29 +632,17 @@ export async function runComprehensiveTests(): Promise<VerificationResult[]> {
     });
 
     // TEST 28: Graphify Explorer REST API & Graph Payload Verification
-    const { GraphifyEngine } = await import('./graphifyEngine');
-    const graphEngine = new GraphifyEngine();
-    await graphEngine.scanDirectory('src/sandbox');
-    const graphPayload = graphEngine.exportGraphData({
-      scope: 'current-task',
-      targetFiles: ['src/sandbox/main.ts']
-    });
+    const { runGraphifyVerificationTests } = await import('./graphifyTestRunner');
+    const graphifySuite = await runGraphifyVerificationTests();
 
-    const isGraphifyPayloadValid = graphPayload &&
-      Array.isArray(graphPayload.nodes) &&
-      Array.isArray(graphPayload.edges) &&
-      graphPayload.metadata &&
-      graphPayload.metadata.files > 0 &&
-      graphPayload.metadata.symbols >= 0;
-
-    results.push({
-      feature: 'Graphify Explorer Test 28: REST API Payload & Dependency Graph Data Verification',
-      status: isGraphifyPayloadValid ? 'PASS' : 'FAIL',
-      details: isGraphifyPayloadValid
-        ? `Graphify Explorer exported valid graph facts (${graphPayload.metadata.files} files, ${graphPayload.metadata.symbols} symbols, ${graphPayload.metadata.edges} edges, scope: ${graphPayload.metadata.scope}).`
-        : `Invalid Graphify graph payload: ${JSON.stringify(graphPayload)}`,
-      timestamp: new Date()
-    });
+    for (const res of graphifySuite.results) {
+      results.push({
+        feature: `Graphify Suite: ${res.test}`,
+        status: res.status,
+        details: res.details,
+        timestamp: new Date()
+      });
+    }
 
     // TEST 29: Multi-File Architecture Planner Decomposition & Guardrail Normalization
     const { plannerAgentNode } = await import('../agents/plannerAgent');

@@ -525,7 +525,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // 2. Open File in Editor
-  async function openFileInEditor(relPath) {
+  async function openFileInEditor(relPath, targetLine) {
     if (!relPath) return;
     exitReadOnlyBrowserMode();
 
@@ -562,6 +562,18 @@ document.addEventListener('DOMContentLoaded', () => {
       tabsContentMap.set(actualPath, data.content);
       if (codeEditor) codeEditor.value = data.content;
       updateLineNumbers();
+
+      if (targetLine && targetLine > 0 && codeEditor) {
+        const lines = codeEditor.value.split('\n');
+        let charIndex = 0;
+        for (let i = 0; i < Math.min(targetLine - 1, lines.length); i++) {
+          charIndex += lines[i].length + 1;
+        }
+        codeEditor.focus();
+        const lineLen = (lines[targetLine - 1] || '').length;
+        codeEditor.setSelectionRange(charIndex, charIndex + lineLen);
+        codeEditor.scrollTop = Math.max(0, (targetLine - 5) * 18);
+      }
     } catch (err) {
       if (codeEditor) codeEditor.value = `// Error loading file: ${err}`;
       updateLineNumbers();
@@ -1840,12 +1852,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const graphifySearchInput = document.getElementById('graphify-search-input');
   const graphifyBtnFit = document.getElementById('graphify-btn-fit');
   const graphifyBtnRefresh = document.getElementById('graphify-btn-refresh');
+  const graphifyBtnLegend = document.getElementById('graphify-btn-legend');
+  const graphifyLegendPanel = document.getElementById('graphify-legend-panel');
   const graphifyNodeDrawer = document.getElementById('graphify-node-drawer');
   const closeDrawerBtn = document.getElementById('close-drawer-btn');
 
   let currentGraphScope = 'current-task';
+  let currentEdgeFilter = 'all';
   let visNetworkInstance = null;
   let currentGraphData = null;
+  let activeSelectedNode = null;
 
   function switchCenterView(viewName) {
     if (viewName === 'graphify') {
@@ -1879,6 +1895,22 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
+  const edgeFilterBtns = document.querySelectorAll('.edge-filter-btn');
+  edgeFilterBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      edgeFilterBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentEdgeFilter = btn.dataset.edge || 'all';
+      loadGraphifyGraph();
+    });
+  });
+
+  if (graphifyBtnLegend) {
+    graphifyBtnLegend.addEventListener('click', () => {
+      if (graphifyLegendPanel) graphifyLegendPanel.classList.toggle('hidden');
+    });
+  }
+
   if (graphifyBtnRefresh) graphifyBtnRefresh.addEventListener('click', () => loadGraphifyGraph());
   if (graphifyBtnFit) {
     graphifyBtnFit.addEventListener('click', () => {
@@ -1891,19 +1923,28 @@ document.addEventListener('DOMContentLoaded', () => {
       const q = e.target.value.toLowerCase().trim();
       if (!q || !currentGraphData || !visNetworkInstance) return;
       const matchedNode = currentGraphData.nodes.find(n => 
-        n.label.toLowerCase().includes(q) || (n.path && n.path.toLowerCase().includes(q))
+        n.label.toLowerCase().includes(q) || (n.path && n.path.toLowerCase().includes(q)) || n.id.toLowerCase().includes(q)
       );
       if (matchedNode) {
-        visNetworkInstance.selectNodes([matchedNode.id]);
-        visNetworkInstance.focus(matchedNode.id, { scale: 1.2, animation: true });
-        renderNodeDrawer(matchedNode);
+        focusGraphNode(matchedNode.id);
       }
     });
   }
 
+  function focusGraphNode(nodeId) {
+    if (!currentGraphData || !visNetworkInstance) return;
+    const target = currentGraphData.nodes.find(n => n.id === nodeId || n.path === nodeId);
+    if (!target) return;
+
+    visNetworkInstance.selectNodes([target.id]);
+    visNetworkInstance.focus(target.id, { scale: 1.25, animation: { duration: 500, easingFunction: 'easeInOutQuad' } });
+    activeSelectedNode = target;
+    renderNodeDrawer(target);
+  }
+
   async function loadGraphifyGraph() {
     try {
-      const url = `/api/graphify/current?scope=${encodeURIComponent(currentGraphScope)}&activeFile=${encodeURIComponent(activeFilePath)}`;
+      const url = `/api/graphify/current?scope=${encodeURIComponent(currentGraphScope)}&activeFile=${encodeURIComponent(activeFilePath)}&edgeTypeFilter=${encodeURIComponent(currentEdgeFilter)}`;
       const res = await fetch(url);
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
@@ -2002,13 +2043,19 @@ document.addEventListener('DOMContentLoaded', () => {
       let dashes = false;
       let labelText = e.label || e.type || '';
 
-      if (e.type === 'IMPORTS') {
+      if (e.type === 'CALLS') {
+        color = '#38bdf8';
+        labelText = 'CALLS';
+      } else if (e.type === 'IMPORTS') {
         color = '#818cf8';
         labelText = 'IMPORTS';
       } else if (e.type === 'DEFINES') {
-        color = '#38bdf8';
+        color = '#34d399';
         dashes = true;
         labelText = 'DEFINES';
+      } else if (e.type === 'TESTS') {
+        color = '#c084fc';
+        labelText = 'TESTS';
       } else if (e.type === 'EXPORTS') {
         color = '#34d399';
         dashes = true;
@@ -2019,7 +2066,6 @@ document.addEventListener('DOMContentLoaded', () => {
         labelText = 'DEPENDS_ON';
       }
 
-      // If imported symbols exist and differ from target node label, display symbol name
       if (e.symbols && e.symbols.length > 0) {
         const symStr = e.symbols.join(', ');
         if (symStr !== e.label && symStr !== e.target && !e.target.endsWith(`:${symStr}`)) {
@@ -2081,12 +2127,8 @@ document.addEventListener('DOMContentLoaded', () => {
           updateInterval: 25
         }
       },
-      nodes: {
-        borderWidth: 2
-      },
-      edges: {
-        selectionWidth: 2
-      },
+      nodes: { borderWidth: 2 },
+      edges: { selectionWidth: 2 },
       interaction: {
         hover: true,
         tooltipDelay: 150,
@@ -2105,7 +2147,24 @@ document.addEventListener('DOMContentLoaded', () => {
       if (params.nodes.length > 0) {
         const selectedId = params.nodes[0];
         const raw = data.nodes.find(n => n.id === selectedId);
-        if (raw) renderNodeDrawer(raw);
+        if (raw) {
+          activeSelectedNode = raw;
+          renderNodeDrawer(raw);
+        }
+      }
+    });
+
+    visNetworkInstance.on('doubleClick', (params) => {
+      if (params.nodes.length > 0) {
+        const selectedId = params.nodes[0];
+        const raw = data.nodes.find(n => n.id === selectedId);
+        if (raw) {
+          const filePath = raw.path || raw.declaredIn;
+          if (filePath) {
+            switchCenterView('editor');
+            openFileInEditor(filePath, raw.startLine);
+          }
+        }
       }
     });
 
@@ -2122,78 +2181,309 @@ document.addEventListener('DOMContentLoaded', () => {
     graphifyNodeDrawer.classList.remove('hidden');
 
     const typeBadge = document.getElementById('drawer-node-type-badge');
+    const statusBadge = document.getElementById('drawer-node-status-badge');
     const title = document.getElementById('drawer-node-label');
     const body = document.getElementById('drawer-node-body');
 
     if (typeBadge) {
       typeBadge.textContent = (node.type || 'FILE').toUpperCase();
-      typeBadge.className = `badge-pill ${node.status || ''}`;
+    }
+    if (statusBadge) {
+      statusBadge.textContent = (node.status || 'NORMAL').toUpperCase();
     }
 
     if (title) title.textContent = node.label;
 
+    const isSymbol = node.type === 'symbol';
+    const filePath = node.path || node.declaredIn || '';
+    const lineStr = (node.startLine && node.endLine) ? `Lines ${node.startLine}–${node.endLine}` : (node.startLine ? `Line ${node.startLine}` : 'Not available');
+    const colStr = (node.startColumn && node.endColumn) ? `Cols ${node.startColumn}–${node.endColumn}` : 'Not available';
+
     let content = `
+      <!-- Section 1: Overview -->
       <div class="drawer-section">
-        <div class="drawer-section-label">Node Metadata</div>
+        <div class="drawer-section-label">1. Basic Information & Actions</div>
         <div class="drawer-fact-row">
-          <span class="drawer-fact-key">ID:</span>
-          <span class="drawer-fact-value code-wrap">${escapeHtml(node.id)}</span>
+          <span class="drawer-fact-key">Symbol / File:</span>
+          <span class="drawer-fact-value code-wrap">${escapeHtml(node.label)}</span>
         </div>
         <div class="drawer-fact-row">
-          <span class="drawer-fact-key">Type:</span>
-          <span class="drawer-fact-value">${node.type}</span>
+          <span class="drawer-fact-key">Node Type:</span>
+          <span class="drawer-fact-value">${escapeHtml(node.type)}</span>
         </div>
-        ${node.path ? `
-        <div class="drawer-fact-row">
-          <span class="drawer-fact-key">Path:</span>
-          <span class="drawer-fact-value code-wrap">${escapeHtml(node.path)}</span>
-        </div>` : ''}
-        ${node.language ? `
-        <div class="drawer-fact-row">
-          <span class="drawer-fact-key">Language:</span>
-          <span class="drawer-fact-value">${node.language}</span>
-        </div>` : ''}
-        ${node.status ? `
         <div class="drawer-fact-row">
           <span class="drawer-fact-key">Status:</span>
-          <span class="drawer-fact-value">${node.status.toUpperCase()}</span>
+          <span class="drawer-fact-value">${escapeHtml((node.status || 'normal').toUpperCase())} (${escapeHtml(node.statusExplanation || 'Standard node')})</span>
+        </div>
+        ${filePath ? `
+        <div class="drawer-fact-row">
+          <span class="drawer-fact-key">File Path:</span>
+          <span class="drawer-fact-value code-wrap">${escapeHtml(filePath)}</span>
         </div>` : ''}
+        <div class="drawer-fact-row">
+          <span class="drawer-fact-key">Line Range:</span>
+          <span class="drawer-fact-value">${lineStr}</span>
+        </div>
+        <div class="drawer-fact-row">
+          <span class="drawer-fact-key">Column Range:</span>
+          <span class="drawer-fact-value">${colStr}</span>
+        </div>
+
+        <div class="drawer-action-bar">
+          <button class="btn-drawer-action btn-accent" id="btn-open-in-editor" title="Open file and jump to exact line in editor">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            Open in Editor
+          </button>
+          <button class="btn-drawer-action" id="btn-show-impact" title="Show dependency impact analysis">
+            ⚡ Show Impact
+          </button>
+          <button class="btn-drawer-action" id="btn-trace-path" title="Trace dependency path to another node">
+            🔍 Trace Path
+          </button>
+          <button class="btn-drawer-action" id="btn-preview-context" title="Preview context fed to Kaizen AI agent">
+            📋 Preview Context
+          </button>
+        </div>
       </div>
     `;
 
-    if (node.type === 'file') {
-      content += `
-        <div class="drawer-section">
-          <div class="drawer-section-label">AST Facts</div>
-          <div class="drawer-fact-row"><span class="drawer-fact-key">Declared Symbols:</span> <span class="drawer-fact-value">${node.symbolsCount || 0}</span></div>
-          <div class="drawer-fact-row"><span class="drawer-fact-key">Imports:</span> <span class="drawer-fact-value">${node.importsCount || 0}</span></div>
-        </div>
-      `;
-      if (node.contentSnippet) {
-        content += `
-          <div class="drawer-section">
-            <div class="drawer-section-label">Content Snippet</div>
-            <pre class="node-code-snippet">${escapeHtml(node.contentSnippet)}</pre>
-          </div>
-        `;
+    // Section 2: Signature
+    if (isSymbol) {
+      const sigText = node.signature || `def ${node.label.replace('()', '')}()`;
+      let paramRows = '';
+      if (node.parameters && node.parameters.length > 0) {
+        paramRows = node.parameters.map(p => `
+          <tr>
+            <td><code>${escapeHtml(p.name)}</code></td>
+            <td><code>${escapeHtml(p.type || 'Not available')}</code>${p.isInferred ? '<span class="inferred-tag">(inferred)</span>' : ''}</td>
+          </tr>
+        `).join('');
+      } else {
+        paramRows = '<tr><td colspan="2" style="color: var(--text-muted);">None</td></tr>';
       }
-    } else if (node.type === 'symbol') {
+
       content += `
         <div class="drawer-section">
-          <div class="drawer-section-label">Symbol Details</div>
-          <div class="drawer-fact-row"><span class="drawer-fact-key">Symbol Type:</span> <span class="drawer-fact-value">${node.symbolType || 'symbol'}</span></div>
-          <div class="drawer-fact-row"><span class="drawer-fact-key">Declared In:</span> <span class="drawer-fact-value code-wrap">${escapeHtml(node.declaredIn || 'N/A')}</span></div>
-          <div class="drawer-fact-row"><span class="drawer-fact-key">Exported:</span> <span class="drawer-fact-value">${node.isExported ? 'Yes' : 'No'}</span></div>
+          <div class="drawer-section-label">2. Signature</div>
+          <div class="signature-block">${escapeHtml(sigText)}</div>
+          <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px;">PARAMETERS:</div>
+          <table class="param-table">
+            <thead><tr><th>Name</th><th>Type</th></tr></thead>
+            <tbody>${paramRows}</tbody>
+          </table>
+          <div class="drawer-fact-row" style="margin-top: 4px;">
+            <span class="drawer-fact-key">Return Type:</span>
+            <span class="drawer-fact-value"><code>${escapeHtml(node.returnType || 'Not available')}</code>${node.returnTypeInferred ? '<span class="inferred-tag">(inferred)</span>' : ''}</span>
+          </div>
         </div>
       `;
     }
 
+    // Section 3: Documentation
+    content += `
+      <div class="drawer-section">
+        <div class="drawer-section-label">3. Documentation</div>
+        <div class="drawer-sub" style="font-family: var(--font-mono); white-space: pre-wrap; color: #cbd5e1;">${escapeHtml(node.documentation || 'No documentation available')}</div>
+      </div>
+    `;
+
+    // Section 4: Structural Metrics
+    content += `
+      <div class="drawer-section">
+        <div class="drawer-section-label">4. Structural Metrics</div>
+        <div class="drawer-fact-row"><span class="drawer-fact-key">Lines of Code (LOC):</span> <span class="drawer-fact-value">${node.loc || 'Not available'}</span></div>
+        <div class="drawer-fact-row"><span class="drawer-fact-key">Cyclomatic Complexity:</span> <span class="drawer-fact-value">${node.complexity || '1'}</span></div>
+        <div class="drawer-fact-row"><span class="drawer-fact-key">Number of Branches:</span> <span class="drawer-fact-value">${node.branches || '0'}</span></div>
+        <div class="drawer-fact-row"><span class="drawer-fact-key">Number of Parameters:</span> <span class="drawer-fact-value">${node.parameterCount || (node.parameters ? node.parameters.length : 0)}</span></div>
+        <div class="drawer-fact-row"><span class="drawer-fact-key">Direct Callees:</span> <span class="drawer-fact-value">${node.callees ? node.callees.length : 0}</span></div>
+        <div class="drawer-fact-row"><span class="drawer-fact-key">Direct Callers:</span> <span class="drawer-fact-value">${node.callers ? node.callers.length : 0}</span></div>
+      </div>
+    `;
+
+    // Section 5: Calls (Direct Callees)
+    if (isSymbol) {
+      let calleesContent = '<div class="drawer-sub">No direct callees inside this symbol</div>';
+      if (node.callees && node.callees.length > 0) {
+        calleesContent = '<div class="drawer-item-list">' + node.callees.map(c => `
+          <button class="drawer-item-pill graph-focus-btn" data-target="${escapeHtml(c.id)}" title="Focus ${c.name}() on graph">
+            ➔ ${escapeHtml(c.name)}()
+          </button>
+        `).join('') + '</div>';
+      }
+
+      content += `
+        <div class="drawer-section">
+          <div class="drawer-section-label">5. Calls (Direct Callees)</div>
+          ${calleesContent}
+        </div>
+      `;
+    }
+
+    // Section 6: Called By (Direct Callers)
+    if (isSymbol) {
+      let callersContent = '<div class="drawer-sub">No direct callers detected</div>';
+      if (node.callers && node.callers.length > 0) {
+        callersContent = '<div class="drawer-item-list">' + node.callers.map(c => `
+          <button class="drawer-item-pill graph-focus-btn" data-target="${escapeHtml(c.id)}" title="Focus ${c.name}() on graph">
+            ⬅ ${escapeHtml(c.name)}()
+          </button>
+        `).join('') + '</div>';
+      }
+
+      content += `
+        <div class="drawer-section">
+          <div class="drawer-section-label">6. Called By (Direct Callers)</div>
+          ${callersContent}
+        </div>
+      `;
+    }
+
+    // Section 7: Dependencies / Contained Symbols
+    if (node.type === 'file') {
+      let symList = '<div class="drawer-sub">No symbols declared</div>';
+      if (node.containedSymbols && node.containedSymbols.length > 0) {
+        symList = '<div class="drawer-item-list">' + node.containedSymbols.map(s => `
+          <button class="drawer-item-pill graph-focus-btn" data-target="${escapeHtml(s.id)}" title="Focus ${s.name}() on graph">
+            ƒ ${escapeHtml(s.name)}()
+          </button>
+        `).join('') + '</div>';
+      }
+      content += `
+        <div class="drawer-section">
+          <div class="drawer-section-label">7. Contained Symbols (${node.symbolsCount || 0})</div>
+          ${symList}
+        </div>
+      `;
+    }
+
+    // Section 8: Related Tests
+    let testsContent = '<div class="drawer-sub">No related tests detected.</div>';
+    if (node.relatedTests && node.relatedTests.length > 0) {
+      testsContent = '<div class="drawer-item-list">' + node.relatedTests.map(t => `
+        <button class="drawer-item-pill graph-focus-btn" data-target="${escapeHtml(t.id)}" title="Focus test file on graph">
+          ✓ ${escapeHtml(t.name)}
+        </button>
+      `).join('') + '</div>';
+    }
+
+    content += `
+      <div class="drawer-section">
+        <div class="drawer-section-label">8. Related Tests</div>
+        ${testsContent}
+      </div>
+    `;
+
+    // Section 9: Current Task Relevance & Why is this node relevant?
+    const relevance = node.taskRelevance || { isRelevant: false, reasons: ['Workspace component'] };
+    const reasonsHtml = relevance.reasons.map(r => `<li>• ${escapeHtml(r)}</li>`).join('');
+
+    content += `
+      <div class="drawer-section">
+        <div class="drawer-section-label">9. Current Task Relevance</div>
+        <div class="drawer-fact-row">
+          <span class="drawer-fact-key">Status:</span>
+          <span class="drawer-fact-value" style="color: ${relevance.isRelevant ? '#34d399' : '#94a3b8'}; font-weight: 700;">
+            ${relevance.isRelevant ? '✓ Relevant to Current Task' : 'Standard Workspace Module'}
+          </span>
+        </div>
+        <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px; font-weight: 700;">WHY THIS NODE IS RELEVANT:</div>
+        <ul style="padding-left: 0; list-style: none; font-size: 11px; color: #cbd5e1; margin-top: 4px; display: flex; flex-direction: column; gap: 4px;">
+          ${reasonsHtml}
+        </ul>
+      </div>
+    `;
+
+    // Section 10: KAIZEN Context Preview (Collapsible)
+    const contextPreviewData = {
+      target: node.label,
+      type: node.type,
+      file: filePath,
+      lineRange: lineStr,
+      metrics: { loc: node.loc, complexity: node.complexity },
+      callers: (node.callers || []).map(c => c.name),
+      callees: (node.callees || []).map(c => c.name),
+      relatedTests: (node.relatedTests || []).map(t => t.name),
+      taskRelevance: relevance.reasons
+    };
+
+    content += `
+      <div class="drawer-section" id="section-kaizen-context">
+        <div class="drawer-section-label">10. KAIZEN Context Preview</div>
+        <div class="context-preview-box">${escapeHtml(JSON.stringify(contextPreviewData, null, 2))}</div>
+      </div>
+    `;
+
     if (body) body.innerHTML = content;
+
+    // Attach Action Listeners in Drawer
+    const btnOpenInEditor = document.getElementById('btn-open-in-editor');
+    if (btnOpenInEditor) {
+      btnOpenInEditor.addEventListener('click', () => {
+        if (filePath) {
+          switchCenterView('editor');
+          openFileInEditor(filePath, node.startLine);
+        }
+      });
+    }
+
+    const btnShowImpact = document.getElementById('btn-show-impact');
+    if (btnShowImpact) {
+      btnShowImpact.addEventListener('click', async () => {
+        try {
+          const res = await fetch(`/api/graphify/impact?id=${encodeURIComponent(node.id)}`);
+          const impactData = await res.json();
+          alert(`DEPENDENCY IMPACT ANALYSIS\nTarget Node: ${impactData.nodeId}\n\nDirect Dependencies (${impactData.directDependenciesCount}):\n${impactData.dependencies.map(d => '  • ' + d.label + ' [' + d.type + ']').join('\n') || 'None'}\n\nDirect Dependents (${impactData.directDependentsCount}):\n${impactData.dependents.map(d => '  • ' + d.label + ' [' + d.type + ']').join('\n') || 'None'}`);
+        } catch (e) {
+          showToast('Error computing impact analysis', 'error');
+        }
+      });
+    }
+
+    const btnTracePath = document.getElementById('btn-trace-path');
+    if (btnTracePath) {
+      btnTracePath.addEventListener('click', async () => {
+        const targetNodeId = prompt(`Enter target node ID or symbol name to trace path from '${node.label}':`);
+        if (!targetNodeId) return;
+        try {
+          const res = await fetch(`/api/graphify/trace?sourceId=${encodeURIComponent(node.id)}&targetId=${encodeURIComponent(targetNodeId)}`);
+          const traceData = await res.json();
+          if (traceData.path && traceData.path.length > 0) {
+            const chainStr = traceData.path.map((item, idx) => `${idx + 1}. ${item.label} (${item.type})`).join('\n   ↓\n');
+            alert(`DEPENDENCY TRACE PATH:\n\n${chainStr}`);
+          } else {
+            alert("No dependency path found between nodes.");
+          }
+        } catch (e) {
+          showToast('Error tracing path', 'error');
+        }
+      });
+    }
+
+    const btnPreviewContext = document.getElementById('btn-preview-context');
+    if (btnPreviewContext) {
+      btnPreviewContext.addEventListener('click', () => {
+        const contextSec = document.getElementById('section-kaizen-context');
+        if (contextSec) {
+          contextSec.scrollIntoView({ behavior: 'smooth' });
+        }
+      });
+    }
+
+    // Attach Graph Node Focus Listeners on Pills
+    document.querySelectorAll('.graph-focus-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const targetId = btn.dataset.target;
+        if (targetId) {
+          focusGraphNode(targetId);
+        }
+      });
+    });
   }
 
   function escapeHtml(str) {
     if (!str) return '';
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   // Movable & Resizable Execution Console Terminal Engine

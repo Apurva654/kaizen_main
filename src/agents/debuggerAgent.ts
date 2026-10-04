@@ -5,7 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { KaizenState } from '../state';
 import { langfuseTracer } from '../tools/langfuseTracer';
-import { FilePatchSchema, isProtectedFile, getLanguageFromPath } from './codeGenAgent';
+import { FilePatchSchema, isProtectedFile, getLanguageFromPath, sanitizeCodePatch } from './codeGenAgent';
 
 dotenv.config();
 
@@ -191,11 +191,12 @@ Attempt Count: ${state.retryCount || 1} / 3
 
         const filePatches = rawFiles
           .map((f: any) => {
-            const rawPath = f.filePath || f.path || primaryTarget;
+            const rawPath = (f.filePath || f.path || primaryTarget).replace(/\\/g, '/');
             let rawCode = f.code || f.content || '';
             rawCode = rawCode.replace(/^```[a-zA-Z]*\n?/, '').replace(/\n?```$/, '');
+            rawCode = sanitizeCodePatch(rawCode, rawPath);
             return {
-              filePath: rawPath.replace(/\\/g, '/'),
+              filePath: rawPath,
               code: rawCode,
               imports: f.imports
             };
@@ -243,6 +244,8 @@ Attempt Count: ${state.retryCount || 1} / 3
       fallbackCode = targetCode.replace(/return\s+0;/g, 'return a / b;');
     }
   }
+
+  fallbackCode = sanitizeCodePatch(fallbackCode, primaryTarget);
 
   const fallbackPatches = [{
     filePath: primaryTarget,
