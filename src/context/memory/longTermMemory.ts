@@ -215,5 +215,9 @@ export class LongTermMemoryManager {
 
     return output;
   }
+
+  public clearAll(): void {
+    this.records.clear();
+  }
 }
 

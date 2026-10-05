@@ -137,4 +137,8 @@ SHORT-TERM MEMORY (Recent Events & Window):
 ${items.join('\n')}
 `;
   }
+
+  public clearAll(): void {
+    this.events = [];
+  }
 }

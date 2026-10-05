@@ -324,6 +324,37 @@ export class PersistenceEngine {
       return null;
     }
   }
+
+  public clearAllMemoryStores(): boolean {
+    try {
+      this.ensureDirectories();
+      if (fs.existsSync(this.memoryDir)) {
+        const files = fs.readdirSync(this.memoryDir);
+        for (const file of files) {
+          try { fs.unlinkSync(path.join(this.memoryDir, file)); } catch {}
+        }
+      }
+      if (fs.existsSync(this.checkpointsDir)) {
+        fs.rmSync(this.checkpointsDir, { recursive: true, force: true });
+        fs.mkdirSync(this.checkpointsDir, { recursive: true });
+      }
+      if (fs.existsSync(this.sessionsDir)) {
+        fs.rmSync(this.sessionsDir, { recursive: true, force: true });
+        fs.mkdirSync(this.sessionsDir, { recursive: true });
+      }
+      const rootMemoryDir = path.resolve(process.cwd(), '.memory');
+      if (fs.existsSync(rootMemoryDir)) {
+        fs.rmSync(rootMemoryDir, { recursive: true, force: true });
+        ['conversational', 'project', 'structural', 'workflow'].forEach(sub => {
+          fs.mkdirSync(path.join(rootMemoryDir, sub), { recursive: true });
+        });
+      }
+      return true;
+    } catch (err) {
+      console.error('[PersistenceEngine] Error clearing memory stores:', err);
+      return false;
+    }
+  }
 }
 
 export const persistenceEngine = new PersistenceEngine();

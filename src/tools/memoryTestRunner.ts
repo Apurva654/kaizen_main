@@ -495,8 +495,8 @@ export async function runMemoryTests(): Promise<VerificationResult[]> {
     state.status = intent.status;
 
     const planner = await plannerAgentNode(state);
-    state.plan = planner.plan;
-    state.targetFiles = planner.targetFiles;
+    state.plan = planner.plan || [];
+    state.targetFiles = (planner.targetFiles || []).filter((f): f is string => Boolean(f));
 
     // Assertions required by Section 8
     const hasEpisodicDemo = state.targetFiles.some(f => f.includes('episodic_demo.py'));
@@ -607,8 +607,8 @@ export async function runMemoryTests(): Promise<VerificationResult[]> {
     state1.status = intent1.status;
 
     const planner1 = await plannerAgentNode(state1);
-    state1.plan = planner1.plan;
-    state1.targetFiles = planner1.targetFiles;
+    state1.plan = planner1.plan || [];
+    state1.targetFiles = (planner1.targetFiles || []).filter((f): f is string => Boolean(f));
 
     memoryEngine.stateMemory.updateState(state1, testWorkspace);
 
@@ -663,8 +663,8 @@ export async function runMemoryTests(): Promise<VerificationResult[]> {
     state2.status = intent2.status;
 
     const planner2 = await plannerAgentNode(state2);
-    state2.plan = planner2.plan;
-    state2.targetFiles = planner2.targetFiles;
+    state2.plan = planner2.plan || [];
+    state2.targetFiles = (planner2.targetFiles || []).filter((f): f is string => Boolean(f));
 
     const req1OnlyEpisodic = state1.targetFiles.some(f => f.includes('episodic_demo.py'));
     const req2OnlyStringDemo = state2.targetFiles.some(f => f.includes('string_demo.ts'));

@@ -49,6 +49,38 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // Clear Model Permanent Memory Button Handler
+  const clearMemoryBtn = document.getElementById('clear-memory-btn');
+  if (clearMemoryBtn) {
+    clearMemoryBtn.addEventListener('click', async () => {
+      const confirmed = confirm('Are you sure you want to permanently clear all model memory? This will erase historical facts, past conversation turns, and user context.');
+      if (!confirmed) return;
+
+      try {
+        clearMemoryBtn.disabled = true;
+        clearMemoryBtn.innerHTML = `
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/></svg>
+          Clearing...`;
+
+        const res = await fetch('/api/memory/clear', { method: 'POST' });
+        const data = await res.json();
+
+        if (data.success) {
+          alert('✓ Permanent model memory cleared successfully!');
+        } else {
+          alert('❌ Failed to clear memory: ' + (data.error || 'Unknown error'));
+        }
+      } catch (err) {
+        alert('❌ Error connecting to server: ' + (err?.message || err));
+      } finally {
+        clearMemoryBtn.disabled = false;
+        clearMemoryBtn.innerHTML = `
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+          Clear Memory`;
+      }
+    });
+  }
+
   // Permission Gate Mode Toggle Control
   const permissionModeBtn = document.getElementById('permission-mode-btn');
   const permissionModeText = document.getElementById('permission-mode-text');
@@ -325,7 +357,64 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // 1. Initialize File Explorer
+  // 1. Initialize File Explorer & Tree Rendering
+  const btnCreateFile = document.getElementById('btn-create-file');
+  const btnCreateFolder = document.getElementById('btn-create-folder');
+
+  async function createNewFileInSandbox(defaultParentDir = '') {
+    const defaultHint = defaultParentDir ? `${defaultParentDir}/new_file.ts` : 'new_file.ts';
+    const inputPath = prompt('Enter new file name or relative path inside src/sandbox:\n(e.g., main.ts, routes/auth.py, utils/helpers.ts)', defaultHint);
+    if (!inputPath || !inputPath.trim()) return;
+
+    const relPath = inputPath.trim().replace(/\\/g, '/');
+    try {
+      const res = await fetch('/api/workspace/file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: relPath, content: `// ${relPath}\n` })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showToast(`✓ Created file '${data.path || relPath}'`, 'success');
+        await loadSandboxFiles();
+        openFileInEditor(data.path || relPath);
+      } else {
+        showToast(data.error || 'Failed to create file', 'error');
+      }
+    } catch (err) {
+      showToast('Error creating file', 'error');
+    }
+  }
+
+  async function createNewFolderInSandbox(defaultParentDir = '') {
+    const defaultHint = defaultParentDir ? `${defaultParentDir}/new_folder` : 'new_folder';
+    const inputPath = prompt('Enter new folder name or relative path inside src/sandbox:\n(e.g., components, routes, database)', defaultHint);
+    if (!inputPath || !inputPath.trim()) return;
+
+    const relPath = inputPath.trim().replace(/\\/g, '/');
+    try {
+      const res = await fetch('/api/workspace/folder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: relPath })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showToast(`✓ Created folder '${data.path || relPath}'`, 'success');
+        await loadSandboxFiles();
+      } else {
+        showToast(data.error || 'Failed to create folder', 'error');
+      }
+    } catch (err) {
+      showToast('Error creating folder', 'error');
+    }
+  }
+
+  if (btnCreateFile) btnCreateFile.addEventListener('click', () => createNewFileInSandbox());
+  if (btnCreateFolder) btnCreateFolder.addEventListener('click', () => createNewFolderInSandbox());
+
+  const collapsedFoldersSet = new Set();
+
   async function loadSandboxFiles() {
     if (isVsCodeEnv) {
       vscode.postMessage({ type: 'GET_ACTIVE_FILE' });
@@ -337,15 +426,15 @@ document.addEventListener('DOMContentLoaded', () => {
       fileTree.innerHTML = '';
 
       if (!data.sandboxFiles || data.sandboxFiles.length === 0) {
-        fileTree.innerHTML = `<div class="tree-placeholder">Empty window. Run a prompt to generate code!</div>`;
+        fileTree.innerHTML = `<div class="tree-placeholder">Empty sandbox. Click + to create files or folders!</div>`;
         return;
       }
 
       // Strict filter for internal benchmark test suite folders (test1..test5)
-      const visibleFiles = data.sandboxFiles.filter(file => {
-        const nameLower = file.name.toLowerCase();
-        const pathLower = file.path.toLowerCase();
-        if (/^test[1-5]$/i.test(file.name)) return false;
+      const visibleItems = data.sandboxFiles.filter(item => {
+        const pathLower = item.path.toLowerCase();
+        const nameLower = item.name.toLowerCase();
+        if (/^test[1-5]$/i.test(item.name)) return false;
         if (pathLower.includes('/test1') || pathLower.includes('/test2') ||
             pathLower.includes('/test3') || pathLower.includes('/test4') ||
             pathLower.includes('/test5') || pathLower.includes('\\test1') ||
@@ -356,64 +445,196 @@ document.addEventListener('DOMContentLoaded', () => {
         return true;
       });
 
-      if (visibleFiles.length === 0) {
-        fileTree.innerHTML = `<div class="tree-placeholder">Workspace empty. Type a prompt to create project files!</div>`;
+      if (visibleItems.length === 0) {
+        fileTree.innerHTML = `<div class="tree-placeholder">Sandbox empty. Click + to create project files!</div>`;
         return;
       }
 
-      visibleFiles.forEach(file => {
-        const item = document.createElement('div');
-        item.className = `tree-item ${file.path === activeFilePath ? 'active' : ''}`;
-        item.setAttribute('data-path', file.path);
-        
-        item.innerHTML = `
-          <div class="tree-item-label">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-            <span>${file.name}</span>
-          </div>
-          <button type="button" class="tree-item-delete-btn" title="Delete file '${file.name}'">&times;</button>
-        `;
+      const filesOnly = visibleItems.filter(i => !i.isDir);
 
-        item.querySelector('.tree-item-label').addEventListener('click', () => openFileInEditor(file.path));
+      // Build & Render Tree
+      const treeContainer = renderTreeNodes(visibleItems);
+      fileTree.appendChild(treeContainer);
 
-        const delBtn = item.querySelector('.tree-item-delete-btn');
-        if (delBtn) {
-          delBtn.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            if (confirm(`Delete '${file.name}' from sandbox?`)) {
-              try {
-                const deleteRes = await fetch(`/api/workspace/file?path=${encodeURIComponent(file.path)}`, {
-                  method: 'DELETE'
-                });
-                if (deleteRes.ok) {
-                  showToast(`Deleted ${file.name}`, 'info');
-                  if (activeFilePath === file.path) {
-                    activeFilePath = '';
-                    if (codeEditor) codeEditor.value = '';
-                    if (editorFilePath) editorFilePath.textContent = 'No file open';
-                    updateLineNumbers();
-                  }
-                  loadSandboxFiles();
-                } else {
-                  showToast('Failed to delete file', 'error');
-                }
-              } catch (err) {
-                showToast('Error deleting file', 'error');
-              }
-            }
-          });
-        }
-
-        fileTree.appendChild(item);
-      });
-
-      // Auto-open first file if none selected or if active path is invalid
-      if (visibleFiles.length > 0 && (!activeFilePath || !visibleFiles.some(f => f.path === activeFilePath))) {
-        openFileInEditor(visibleFiles[0].path);
+      // Auto-open first file if none selected or active file is invalid
+      if (filesOnly.length > 0 && (!activeFilePath || !filesOnly.some(f => f.path === activeFilePath))) {
+        openFileInEditor(filesOnly[0].path);
       }
     } catch (err) {
       fileTree.innerHTML = `<div class="tree-placeholder">Workspace files managed via VS Code.</div>`;
     }
+  }
+
+  function renderTreeNodes(items) {
+    const fragment = document.createDocumentFragment();
+
+    // Map items into parent-child structure
+    const rootMap = new Map();
+
+    items.forEach(item => {
+      rootMap.set(item.path, { ...item, children: [] });
+    });
+
+    const rootNodes = [];
+
+    items.forEach(item => {
+      const node = rootMap.get(item.path);
+      const parentPath = item.path.substring(0, item.path.lastIndexOf('/'));
+
+      if (parentPath && rootMap.has(parentPath)) {
+        rootMap.get(parentPath).children.push(node);
+      } else {
+        rootNodes.push(node);
+      }
+    });
+
+    // Sort: directories first, then alphabetical
+    const sortTree = (nodes) => {
+      nodes.sort((a, b) => {
+        if (a.isDir && !b.isDir) return -1;
+        if (!a.isDir && b.isDir) return 1;
+        return a.name.localeCompare(b.name);
+      });
+      nodes.forEach(n => {
+        if (n.children && n.children.length > 0) sortTree(n.children);
+      });
+    };
+
+    sortTree(rootNodes);
+
+    function buildDom(nodes) {
+      const container = document.createElement('div');
+      container.className = 'tree-nodes-group';
+
+      nodes.forEach(node => {
+        if (node.isDir) {
+          const folderNode = document.createElement('div');
+          folderNode.className = 'tree-folder-node';
+
+          const isCollapsed = collapsedFoldersSet.has(node.path);
+          const folderHeader = document.createElement('div');
+          folderHeader.className = 'tree-item folder-item';
+          folderHeader.setAttribute('data-path', node.path);
+
+          folderHeader.innerHTML = `
+            <div class="tree-item-label">
+              <span class="folder-chevron ${isCollapsed ? 'collapsed' : ''}">▼</span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+              <span>${node.name}</span>
+            </div>
+            <div class="tree-item-actions">
+              <button type="button" class="tree-action-btn btn-add-file-in-folder" title="New file in '${node.name}'">+</button>
+              <button type="button" class="tree-item-delete-btn" title="Delete folder '${node.name}'">&times;</button>
+            </div>
+          `;
+
+          const childrenContainer = document.createElement('div');
+          childrenContainer.className = `tree-folder-children ${isCollapsed ? 'hidden' : ''}`;
+          if (node.children && node.children.length > 0) {
+            childrenContainer.appendChild(buildDom(node.children));
+          }
+
+          // Folder collapse / expand toggle
+          folderHeader.querySelector('.tree-item-label').addEventListener('click', () => {
+            const chevron = folderHeader.querySelector('.folder-chevron');
+            if (childrenContainer.classList.contains('hidden')) {
+              childrenContainer.classList.remove('hidden');
+              chevron.classList.remove('collapsed');
+              collapsedFoldersSet.delete(node.path);
+            } else {
+              childrenContainer.classList.add('hidden');
+              chevron.classList.add('collapsed');
+              collapsedFoldersSet.add(node.path);
+            }
+          });
+
+          // Create file inside folder
+          const addFileBtn = folderHeader.querySelector('.btn-add-file-in-folder');
+          if (addFileBtn) {
+            addFileBtn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              const relDir = node.path.replace(/^src\/sandbox\/?/, '');
+              createNewFileInSandbox(relDir);
+            });
+          }
+
+          // Delete folder
+          const delFolderBtn = folderHeader.querySelector('.tree-item-delete-btn');
+          if (delFolderBtn) {
+            delFolderBtn.addEventListener('click', async (e) => {
+              e.stopPropagation();
+              if (confirm(`Delete folder '${node.name}' and all its contents?`)) {
+                try {
+                  const deleteRes = await fetch(`/api/workspace/file?path=${encodeURIComponent(node.path)}`, { method: 'DELETE' });
+                  if (deleteRes.ok) {
+                    showToast(`Deleted folder ${node.name}`, 'info');
+                    loadSandboxFiles();
+                  } else {
+                    showToast('Failed to delete folder', 'error');
+                  }
+                } catch {
+                  showToast('Error deleting folder', 'error');
+                }
+              }
+            });
+          }
+
+          folderNode.appendChild(folderHeader);
+          folderNode.appendChild(childrenContainer);
+          container.appendChild(folderNode);
+        } else {
+          // File node
+          const fileEl = document.createElement('div');
+          fileEl.className = `tree-item ${node.path === activeFilePath ? 'active' : ''}`;
+          fileEl.setAttribute('data-path', node.path);
+
+          fileEl.innerHTML = `
+            <div class="tree-item-label">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              <span>${node.name}</span>
+            </div>
+            <div class="tree-item-actions">
+              <button type="button" class="tree-item-delete-btn" title="Delete file '${node.name}'">&times;</button>
+            </div>
+          `;
+
+          fileEl.querySelector('.tree-item-label').addEventListener('click', () => openFileInEditor(node.path));
+
+          const delBtn = fileEl.querySelector('.tree-item-delete-btn');
+          if (delBtn) {
+            delBtn.addEventListener('click', async (e) => {
+              e.stopPropagation();
+              if (confirm(`Delete '${node.name}' from sandbox?`)) {
+                try {
+                  const deleteRes = await fetch(`/api/workspace/file?path=${encodeURIComponent(node.path)}`, { method: 'DELETE' });
+                  if (deleteRes.ok) {
+                    showToast(`Deleted ${node.name}`, 'info');
+                    if (activeFilePath === node.path) {
+                      activeFilePath = '';
+                      if (codeEditor) codeEditor.value = '';
+                      if (editorFilePath) editorFilePath.textContent = 'No file open';
+                      updateLineNumbers();
+                    }
+                    loadSandboxFiles();
+                  } else {
+                    showToast('Failed to delete file', 'error');
+                  }
+                } catch {
+                  showToast('Error deleting file', 'error');
+                }
+              }
+            });
+          }
+
+          container.appendChild(fileEl);
+        }
+      });
+
+      return container;
+    }
+
+    fragment.appendChild(buildDom(rootNodes));
+    return fragment;
   }
 
   // Clear Sandbox Workspace Listener

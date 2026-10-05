@@ -6,6 +6,7 @@ import { MemoryRetriever, RetrievalQuery } from './memoryRetriever';
 import { MemoryConsolidator } from './memoryConsolidator';
 import { BaseMemory, ShortTermEvent, LongTermMemoryRecord, EpisodicMemoryRecord, UnifiedContext } from './memoryTypes';
 import { KaizenStateType } from '../../state';
+import { persistenceEngine } from '../../tools/persistenceEngine';
 
 export class MemoryEngine {
   public stateMemory: StateMemoryManager;
@@ -35,6 +36,14 @@ export class MemoryEngine {
 
     // Initial load from persistence
     this.shortTermMemory.loadFromPersistence();
+  }
+
+  public clearAllMemory() {
+    this.stateMemory.clearState();
+    this.shortTermMemory.clearAll();
+    this.longTermMemory.clearAll();
+    this.episodicMemory.clearAll();
+    persistenceEngine.clearAllMemoryStores();
   }
 
   /**

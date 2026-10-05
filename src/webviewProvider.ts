@@ -662,9 +662,17 @@ ${factItemsMarkdown}
       if (state.status === "ROUTED_EXPLAIN_CODE") {
         skippedStages.push('planner', 'coder', 'testrunner', 'debugger', 'reviewer');
         completedStages.push('response');
+
+        const { generateFilteredResponse } = await import('./agents/responseFilterAgent');
+        const filteredExplanation = await generateFilteredResponse(
+          state.userInput || '',
+          state.extractedContext || '',
+          state.targetFiles || []
+        );
+
         await finalizeExecution('COMPLETED', {
           route: 'EXPLAIN_CODE',
-          explanation: state.extractedContext || "No code context to explain."
+          explanation: filteredExplanation
         });
         return;
       }
@@ -801,6 +809,21 @@ ${factItemsMarkdown}
         const plannerOutput = await plannerAgentNode(state);
         state.plan = plannerOutput.plan || [];
         state.status = plannerOutput.status || "PLANNED";
+        if (plannerOutput.planAttempt !== undefined) state.planAttempt = plannerOutput.planAttempt;
+        if (plannerOutput.rejectedPlans !== undefined) state.rejectedPlans = plannerOutput.rejectedPlans;
+
+        if (plannerOutput.status === 'PLAN_FAILED' || plannerOutput.status === 'PLAN_RETRY_LIMIT') {
+          state.planFailureReason = plannerOutput.planFailureReason;
+          postWebviewEvent('AGENT_STEP', {
+            agent: 'PlannerAgent',
+            status: 'failed',
+            message: plannerOutput.planFailureReason || 'Plan generation failed.'
+          });
+          skippedStages.push('coder', 'testrunner', 'debugger', 'reviewer');
+          await finalizeExecution('FAILED', { message: plannerOutput.planFailureReason || 'Plan generation failed.' });
+          return;
+        }
+
         completedStages.push('planner');
 
         postWebviewEvent('AGENT_STEP', {
@@ -837,6 +860,21 @@ ${factItemsMarkdown}
           state.userInput = `${state.originalUserRequest || state.userInput} (User plan feedback: ${userHitlResponse.message})`;
           const updatedPlannerOutput = await plannerAgentNode(state);
           state.plan = updatedPlannerOutput.plan || state.plan;
+          if (updatedPlannerOutput.planAttempt !== undefined) state.planAttempt = updatedPlannerOutput.planAttempt;
+          if (updatedPlannerOutput.rejectedPlans !== undefined) state.rejectedPlans = updatedPlannerOutput.rejectedPlans;
+
+          if (updatedPlannerOutput.status === 'PLAN_FAILED' || updatedPlannerOutput.status === 'PLAN_RETRY_LIMIT') {
+            state.status = updatedPlannerOutput.status;
+            state.planFailureReason = updatedPlannerOutput.planFailureReason;
+            postWebviewEvent('AGENT_STEP', {
+              agent: 'PlannerAgent',
+              status: 'failed',
+              message: updatedPlannerOutput.planFailureReason || 'Plan generation failed.'
+            });
+            skippedStages.push('coder', 'testrunner', 'debugger', 'reviewer');
+            await finalizeExecution('FAILED', { message: updatedPlannerOutput.planFailureReason || 'Plan generation failed.' });
+            return;
+          }
 
           postWebviewEvent('AGENT_STEP', {
             agent: 'PlannerAgent',
@@ -850,6 +888,20 @@ ${factItemsMarkdown}
         // 5. Coder Agent
         postWebviewEvent('AGENT_STEP', { agent: 'CoderAgent', status: 'running', message: 'Generating code patches...' });
         let coderOutput = await codeGenAgentNode(state);
+
+        if (coderOutput.status === 'CODE_GEN_FAILED' || coderOutput.status === 'PREFLIGHT_SECURITY_BLOCKED') {
+          state.status = coderOutput.status;
+          state.generationFailureReason = coderOutput.generationFailureReason;
+          postWebviewEvent('AGENT_STEP', {
+            agent: 'CoderAgent',
+            status: 'failed',
+            message: coderOutput.generationFailureReason || 'Code generation failed.'
+          });
+          skippedStages.push('testrunner', 'debugger', 'reviewer');
+          await finalizeExecution('FAILED', { message: coderOutput.generationFailureReason || 'Code generation failed.' });
+          return;
+        }
+
         state.extractedContext = coderOutput.extractedContext || state.extractedContext;
         completedStages.push('coder');
 

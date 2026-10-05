@@ -144,6 +144,47 @@ const ALLOWED_EXTENSIONS = new Set([
   '.css'
 ]);
 
+const PYTHON_STD_LIB = new Set([
+  'abc', 'argparse', 'array', 'ast', 'asyncio', 'atexit', 'base64', 'bisect',
+  'builtins', 'bz2', 'calendar', 'cgi', 'cgitb', 'chunk', 'cmath', 'cmd',
+  'code', 'codecs', 'codeop', 'collections', 'colorsys', 'compileall',
+  'concurrent', 'configparser', 'contextlib', 'contextvars', 'copy', 'copyreg',
+  'cProfile', 'crypt', 'csv', 'ctypes', 'curses', 'dataclasses', 'datetime',
+  'dbm', 'decimal', 'difflib', 'dis', 'distutils', 'doctest', 'email',
+  'encodings', 'enum', 'errno', 'faulthandler', 'fcntl', 'filecmp', 'fileinput',
+  'fnmatch', 'fractions', 'ftplib', 'functools', 'gc', 'getpass', 'getopt',
+  'gettext', 'glob', 'graphlib', 'grp', 'gzip', 'hashlib', 'heapq', 'hmac',
+  'html', 'http', 'imaplib', 'imghdr', 'imp', 'importlib', 'inspect', 'io',
+  'ipaddress', 'itertools', 'json', 'keyword', 'linecache', 'locale', 'logging',
+  'lzma', 'mailbox', 'mailcap', 'marshal', 'math', 'mimetypes', 'mmap',
+  'modulefinder', 'msilib', 'msvcrt', 'multiprocessing', 'netrc', 'nntplib',
+  'numbers', 'operator', 'optparse', 'os', 'pathlib', 'pdb', 'pickle',
+  'pickletools', 'pkgutil', 'platform', 'plistlib', 'poplib', 'posix',
+  'pprint', 'profile', 'pstats', 'pty', 'pwd', 'py_compile', 'pyclbr',
+  'pydoc', 'queue', 'quopri', 'random', 're', 'readline', 'reprlib',
+  'resource', 'rlcompleter', 'runpy', 'sched', 'secrets', 'select', 'selectors',
+  'shelve', 'shutil', 'signal', 'site', 'smtpd', 'smtplib', 'sndhdr',
+  'socket', 'socketserver', 'spwd', 'sqlite3', 'ssl', 'stat', 'statistics',
+  'string', 'stringprep', 'struct', 'subprocess', 'sunau', 'symtable',
+  'sys', 'sysconfig', 'syslog', 'tabnanny', 'tarfile', 'telnetlib', 'tempfile',
+  'termios', 'textwrap', 'threading', 'time', 'timeit', 'tkinter', 'token',
+  'tokenize', 'tomllib', 'trace', 'traceback', 'tracemalloc', 'tty', 'types',
+  'typing', 'unicodedata', 'unittest', 'urllib', 'uu', 'uuid', 'venv',
+  'warnings', 'wave', 'weakref', 'webbrowser', 'winreg', 'winsound', 'wsgiref',
+  'xdrlib', 'xml', 'xmlrpc', 'zipapp', 'zipfile', 'zipimport', 'zlib', '_thread'
+]);
+
+const PYTHON_KNOWN_THIRD_PARTY = new Set([
+  'requests', 'numpy', 'pandas', 'scipy', 'matplotlib', 'seaborn', 'sklearn',
+  'torch', 'tensorflow', 'keras', 'cv2', 'PIL', 'pillow', 'bs4', 'beautifulsoup4',
+  'yaml', 'pyyaml', 'dotenv', 'boto3', 'botocore', 'click', 'fastapi', 'flask',
+  'django', 'pytest', 'pydantic', 'sqlalchemy', 'uvicorn', 'aiohttp', 'jinja2',
+  'celery', 'redis', 'psycopg2', 'pymongo', 'cryptography', 'jwt', 'jose',
+  'setuptools', 'wheel', 'pip', 'scikit-learn', 'networkx', 'sympy', 'tornado',
+  'twisted', 'paramiko', 'fabric', 'ansible', 'docker', 'kubernetes', 'openpyxl',
+  'xlsxwriter', 'docx', 'pptx', 'pypdf', 'fitz'
+]);
+
 export class GraphifyEngine {
   private astParser: ASTParserTool;
   private fileFactsMap: Map<string, FileNodeFacts> = new Map();
@@ -435,6 +476,7 @@ export class GraphifyEngine {
           const dotMatch = imp.moduleSpecifier.match(/^(\.+)/);
           const dots = dotMatch ? dotMatch[1].length : 0;
           const modName = imp.moduleSpecifier.replace(/^\.+/, '');
+          const relPath = modName.replace(/\./g, '/');
 
           let candidates: string[] = [];
 
@@ -444,12 +486,11 @@ export class GraphifyEngine {
               targetDir = path.dirname(targetDir);
             }
 
-            if (modName) {
+            if (relPath) {
               candidates = [
-                path.join(targetDir, `${modName}.py`),
-                path.join(targetDir, modName, '__init__.py'),
-                `${targetDir}/${modName}.py`,
-                `${modName}.py`
+                path.join(targetDir, `${relPath}.py`),
+                path.join(targetDir, relPath, '__init__.py'),
+                `${targetDir}/${relPath}.py`
               ];
             } else {
               candidates = [
@@ -458,13 +499,33 @@ export class GraphifyEngine {
               ];
             }
           } else {
-            candidates = [
-              path.join(fileDir, `${modName}.py`),
-              path.join(fileDir, modName, '__init__.py'),
-              `src/sandbox/${modName}.py`,
-              `src/sandbox/${modName}/__init__.py`,
-              `${modName}.py`
-            ];
+            const rootCandidates: string[] = [];
+            let currDir = fileDir;
+            while (currDir) {
+              if (!rootCandidates.includes(currDir)) {
+                rootCandidates.push(currDir);
+              }
+              const parent = path.dirname(currDir);
+              if (!parent || parent === currDir || currDir === '.' || currDir === '/') break;
+              currDir = parent;
+            }
+            if (!rootCandidates.includes('.')) {
+              rootCandidates.push('.');
+            }
+
+            for (const knownPath of this.fileFactsMap.keys()) {
+              const kDir = path.dirname(knownPath);
+              if (!rootCandidates.includes(kDir)) {
+                rootCandidates.push(kDir);
+              }
+            }
+
+            for (const root of rootCandidates) {
+              if (relPath) {
+                candidates.push(path.join(root, `${relPath}.py`));
+                candidates.push(path.join(root, relPath, '__init__.py'));
+              }
+            }
           }
 
           let matchedKey: string | undefined = undefined;
@@ -479,7 +540,12 @@ export class GraphifyEngine {
           } else if (dots > 0) {
             imp.type = 'unresolved';
           } else {
-            imp.type = 'external';
+            const topModule = modName.split('.')[0];
+            if (PYTHON_STD_LIB.has(topModule) || PYTHON_KNOWN_THIRD_PARTY.has(topModule)) {
+              imp.type = 'external';
+            } else {
+              imp.type = 'unresolved';
+            }
           }
         } else {
           if (imp.moduleSpecifier.startsWith('.')) {

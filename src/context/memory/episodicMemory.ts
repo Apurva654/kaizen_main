@@ -173,4 +173,8 @@ EPISODIC MEMORY (Past Tasks & Self-Healing Experiences):
 ${items.join('\n\n')}
 `;
   }
+
+  public clearAll(): void {
+    this.episodes.clear();
+  }
 }

@@ -152,9 +152,14 @@ async function executeAgentPipeline(userInput: string) {
 
   // 4. Conditional Routing
   if (state.status === "ROUTED_EXPLAIN_CODE") {
-    console.log("\n[Route: Explain Code] Skipping planning and generation.");
-    console.log("Explanation logic triggered for context:");
-    console.log(state.extractedContext || "(No code context to explain)");
+    console.log("\n[Route: Explain Code] Generating filtered response...");
+    const { generateFilteredResponse } = await import('./agents/responseFilterAgent');
+    const filteredAnswer = await generateFilteredResponse(
+      state.userInput || state.originalUserRequest || '',
+      state.extractedContext || '',
+      state.targetFiles || []
+    );
+    console.log(filteredAnswer);
     return;
   }
 
@@ -162,6 +167,10 @@ async function executeAgentPipeline(userInput: string) {
     console.log("\n-> Running Planner Agent...");
     const plannerOutput = await plannerAgentNode(state);
     console.log(`Planner Status: ${plannerOutput.status}`);
+    if (plannerOutput.status === 'PLAN_FAILED' || plannerOutput.status === 'PLAN_RETRY_LIMIT') {
+      console.error(`Plan Generation Failed: ${plannerOutput.planFailureReason}`);
+      return;
+    }
     console.log("Steps:");
     plannerOutput.plan?.forEach(step => {
       console.log(`- Step ${step.id} [${step.status}]: ${step.description}`);
@@ -193,6 +202,10 @@ async function executeAgentPipeline(userInput: string) {
       state.userInput = `${state.userInput} (User plan feedback: ${answer})`;
       const updatedPlannerOutput = await plannerAgentNode(state);
       console.log(`Updated Planner Status: ${updatedPlannerOutput.status}`);
+      if (updatedPlannerOutput.status === 'PLAN_FAILED' || updatedPlannerOutput.status === 'PLAN_RETRY_LIMIT') {
+        console.error(`Plan Generation Failed: ${updatedPlannerOutput.planFailureReason}`);
+        return;
+      }
       console.log("Updated Steps:");
       updatedPlannerOutput.plan?.forEach(step => {
         console.log(`- Step ${step.id} [${step.status}]: ${step.description}`);
@@ -211,6 +224,10 @@ async function executeAgentPipeline(userInput: string) {
     console.log("\n-> Running Coder Agent...");
     let coderOutput = await codeGenAgentNode(state);
     console.log(`Coder Status: ${coderOutput.status}`);
+    if (coderOutput.status === 'CODE_GEN_FAILED' || coderOutput.status === 'PREFLIGHT_SECURITY_BLOCKED') {
+      console.error(`Code Generation Failed: ${coderOutput.generationFailureReason}`);
+      return;
+    }
     console.log("\nExtracted Context (including generated code):");
     console.log(coderOutput.extractedContext);
 

@@ -10,6 +10,7 @@ import * as universalValidator from './tools/universalValidator';
 import { KaizenStateType } from './state';
 import { intentAgentNode, extractTerminalCommand, extractGitActions, extractBrowserUrl } from './agents/intentAgent';
 import { contextRetrievalAgentNode } from './agents/contextRetrievalAgent';
+import { evaluateContextSufficiency } from './agents/contextSufficiencyAgent';
 import { plannerAgentNode } from './agents/plannerAgent';
 import { codeGenAgentNode, isProtectedFile, GeneratedFilePatch, saveFilePatchesToServerDiskWithVerification } from './agents/codeGenAgent';
 import { reviewerAgentNode } from './agents/reviewerAgent';
@@ -444,10 +445,14 @@ app.get('/api/graphify/trace', async (req: Request, res: Response) => {
 
 // Comprehensive Verification Test Suite Endpoint
 app.get('/api/test/comprehensive', async (req: Request, res: Response) => {
+  res.json({ success: true, message: 'Demo verification test runner removed.' });
+});
+
+// Clear Permanent Model Memory Endpoint
+app.post('/api/memory/clear', (req: Request, res: Response) => {
   try {
-    const { runComprehensiveTests } = await import('./tools/comprehensiveTestRunner');
-    const results = await runComprehensiveTests();
-    res.json({ success: true, results });
+    memoryEngine.clearAllMemory();
+    res.json({ success: true, message: 'Permanent model memory cleared successfully.' });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err?.message || String(err) });
   }
@@ -1014,9 +1019,50 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
       return;
     }
 
+    // 2. Context Retrieval Agent (retrieve codebase context / AST symbols / RAG first)
+    logDiagnostic('GRAPH', 'ENTER ContextRetrievalAgent', { targetFiles: state.targetFiles });
+    emitSSE('agent_step', { agent: 'ContextRetrievalAgent', status: 'running', message: 'Analyzing workspace graph & AST symbols...' });
+    const retrievalOutput = await contextRetrievalAgentNode(state);
+    state.extractedContext = retrievalOutput.extractedContext;
+    state.targetFiles = retrievalOutput.targetFiles;
+    completedStages.push('context');
+    logDiagnostic('GRAPH', 'EXIT ContextRetrievalAgent', { contextLength: state.extractedContext.length });
+    persistenceEngine.saveCheckpoint(sessionId, 'ContextRetrievalAgent', state);
+
+    emitSSE('agent_step', {
+      agent: 'ContextRetrievalAgent',
+      status: 'completed',
+      result: { extractedContext: state.extractedContext }
+    });
+
+    // 2.5 Adaptive Context Sufficiency Check
+    logDiagnostic('GRAPH', 'ENTER ContextSufficiencyCheck', { userInput: rawUserInput });
+    emitSSE('agent_step', { agent: 'ContextSufficiencyCheck', status: 'running', message: 'Evaluating prompt & codebase context sufficiency...' });
+    const sufficiencyResult = await evaluateContextSufficiency(state);
+
+    if (sufficiencyResult.sufficiency === 'INSUFFICIENT_CONTEXT') {
+      skippedStages.push('planner', 'coder', 'testrunner', 'debugger', 'reviewer');
+      completedStages.push('context_check', 'response');
+
+      const responseText = sufficiencyResult.conversationalResponse ||
+        `I can help with that! Could you provide a bit more detail about what you'd like to achieve?`;
+
+      await finalizeExecution('COMPLETED', {
+        route: 'INSUFFICIENT_CONTEXT',
+        explanation: responseText
+      });
+      return;
+    }
+
+    if (sufficiencyResult.sufficiency === 'PARTIAL_CONTEXT') {
+      if (sufficiencyResult.assumptionsStated && sufficiencyResult.assumptionsStated.length > 0) {
+        state.extractedContext = `\n=== STATED ASSUMPTIONS & PARTIAL CONTEXT ===\n${sufficiencyResult.assumptionsStated.join('\n')}\n\n${state.extractedContext}`;
+      }
+    }
+
     // Routing Logic for General Knowledge & Greetings
     if (state.status === "ROUTED_GENERAL_QUERY") {
-      skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
+      skippedStages.push('planner', 'coder', 'testrunner', 'debugger', 'reviewer');
 
       let answer = `Hello! How can I help you with your coding project today?`;
       const apiKey = process.env.GROQ_API_KEY;
@@ -1065,7 +1111,7 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
             try {
               const { ChatGroq } = await import('@langchain/groq');
               const model = new ChatGroq({ apiKey, model: modelName, temperature: 0.3 });
-              const systemContent = `You are Kaizen, a helpful AI assistant.
+              const systemContent = `You are Kaizen, an experienced developer and AI assistant.
   ${systemPromptClockExtension}
   Always check the USER PROFILE & KNOWN FACTS, CONVERSATION HISTORY, and LIVE WEB SEARCH RESULTS provided below to answer user queries:
 
@@ -1073,9 +1119,8 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
   ${webSearchResultsText}
 
   Directives:
-  - If LIVE WEB SEARCH RESULTS are provided above, use them to answer facts, current events, or people queries directly.
-  - If the user asks for their name or identity, state their name/identity from the KNOWN FACTS and CONVERSATION HISTORY.
-  - Provide concise, friendly, and direct answers without generating code unless explicitly requested.`;
+  - NEVER address the user as "Alice" or invent personal names/details unless explicitly provided in trusted context.
+  - Provide concise, friendly, human-like, and direct answers without generating code unless explicitly requested.`;
 
               const res: any = await model.invoke([
                 { role: 'system', content: systemContent },
@@ -1098,29 +1143,21 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
       return;
     }
 
-    // 2. Context Retrieval Agent
-    logDiagnostic('GRAPH', 'ENTER ContextRetrievalAgent', { targetFiles: state.targetFiles });
-    emitSSE('agent_step', { agent: 'ContextRetrievalAgent', status: 'running', message: 'Analyzing workspace graph & AST symbols...' });
-    const retrievalOutput = await contextRetrievalAgentNode(state);
-    state.extractedContext = retrievalOutput.extractedContext;
-    state.targetFiles = retrievalOutput.targetFiles;
-    completedStages.push('context');
-    logDiagnostic('GRAPH', 'EXIT ContextRetrievalAgent', { contextLength: state.extractedContext.length });
-    persistenceEngine.saveCheckpoint(sessionId, 'ContextRetrievalAgent', state);
-
-    emitSSE('agent_step', {
-      agent: 'ContextRetrievalAgent',
-      status: 'completed',
-      result: { extractedContext: state.extractedContext }
-    });
-
     // Routing Logic for Explanation
     if (state.status === "ROUTED_EXPLAIN_CODE") {
       skippedStages.push('planner', 'coder', 'testrunner', 'debugger', 'reviewer');
       completedStages.push('response');
+
+      const { generateFilteredResponse } = await import('./agents/responseFilterAgent');
+      const filteredExplanation = await generateFilteredResponse(
+        rawUserInput,
+        state.extractedContext || '',
+        state.targetFiles || []
+      );
+
       await finalizeExecution('EXPLAIN_COMPLETE', {
         route: 'EXPLAIN_CODE',
-        explanation: state.extractedContext || "No context found to explain."
+        explanation: filteredExplanation
       });
       return;
     }
@@ -1257,6 +1294,24 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
       const plannerOutput = await plannerAgentNode(state);
       state.plan = plannerOutput.plan || [];
       state.status = plannerOutput.status || "PLANNED";
+      if (plannerOutput.planAttempt !== undefined) state.planAttempt = plannerOutput.planAttempt;
+      if (plannerOutput.rejectedPlans !== undefined) state.rejectedPlans = plannerOutput.rejectedPlans;
+
+      if (plannerOutput.status === 'PLAN_FAILED' || plannerOutput.status === 'PLAN_RETRY_LIMIT') {
+        state.planFailureReason = plannerOutput.planFailureReason;
+        emitSSE('agent_step', {
+          agent: 'PlannerAgent',
+          status: 'failed',
+          message: plannerOutput.planFailureReason || 'Plan generation failed.'
+        });
+        skippedStages.push('coder', 'testrunner', 'debugger', 'reviewer');
+        await finalizeExecution('FAILED', {
+          message: plannerOutput.planFailureReason || 'Plan generation failed.',
+          status: plannerOutput.status
+        });
+        return;
+      }
+
       state.planApprovalStatus = 'PENDING_APPROVAL';
       completedStages.push('planner');
       persistenceEngine.saveCheckpoint(sessionId, 'PlanApproval_Pending', state);
@@ -1299,6 +1354,22 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
           if (updatedPlannerOutput.rejectedPlans !== undefined) state.rejectedPlans = updatedPlannerOutput.rejectedPlans;
           if (updatedPlannerOutput.rejectionReason !== undefined) state.rejectionReason = updatedPlannerOutput.rejectionReason as string | undefined;
 
+          if (updatedPlannerOutput.status === 'PLAN_FAILED' || updatedPlannerOutput.status === 'PLAN_RETRY_LIMIT') {
+            state.status = updatedPlannerOutput.status;
+            state.planFailureReason = updatedPlannerOutput.planFailureReason;
+            emitSSE('agent_step', {
+              agent: 'PlannerAgent',
+              status: 'failed',
+              message: updatedPlannerOutput.planFailureReason || 'Plan generation failed.'
+            });
+            skippedStages.push('coder', 'testrunner', 'debugger', 'reviewer');
+            await finalizeExecution('FAILED', {
+              message: updatedPlannerOutput.planFailureReason || 'Plan generation failed.',
+              status: updatedPlannerOutput.status
+            });
+            return;
+          }
+
           emitSSE('hitl_request', {
             type: 'PLAN_APPROVAL',
             title: 'Plan Approval Required',
@@ -1330,6 +1401,23 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
         if (updatedPlannerOutput.planAttempt !== undefined) state.planAttempt = updatedPlannerOutput.planAttempt;
         if (updatedPlannerOutput.rejectedPlans !== undefined) state.rejectedPlans = updatedPlannerOutput.rejectedPlans;
         if (updatedPlannerOutput.rejectionReason !== undefined) state.rejectionReason = updatedPlannerOutput.rejectionReason as string | undefined;
+
+        if (updatedPlannerOutput.status === 'PLAN_FAILED' || updatedPlannerOutput.status === 'PLAN_RETRY_LIMIT') {
+          state.status = updatedPlannerOutput.status;
+          state.planFailureReason = updatedPlannerOutput.planFailureReason;
+          emitSSE('agent_step', {
+            agent: 'PlannerAgent',
+            status: 'failed',
+            message: updatedPlannerOutput.planFailureReason || 'Plan generation failed.'
+          });
+          skippedStages.push('coder', 'testrunner', 'debugger', 'reviewer');
+          await finalizeExecution('FAILED', {
+            message: updatedPlannerOutput.planFailureReason || 'Plan generation failed.',
+            status: updatedPlannerOutput.status
+          });
+          return;
+        }
+
         persistenceEngine.saveCheckpoint(sessionId, 'PlannerAgent_Feedback', state);
 
         emitSSE('agent_step', {
@@ -1346,6 +1434,23 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
       logDiagnostic('GRAPH', 'ENTER CoderAgent', {});
       emitSSE('agent_step', { agent: 'CoderAgent', status: 'running', message: 'Generating multi-file code patches...' });
       let coderOutput = await codeGenAgentNode(state);
+
+      if (coderOutput.status === 'CODE_GEN_FAILED' || coderOutput.status === 'PREFLIGHT_SECURITY_BLOCKED') {
+        state.status = coderOutput.status;
+        state.generationFailureReason = coderOutput.generationFailureReason;
+        emitSSE('agent_step', {
+          agent: 'CoderAgent',
+          status: 'failed',
+          message: coderOutput.generationFailureReason || 'Code generation failed.'
+        });
+        skippedStages.push('testrunner', 'debugger', 'reviewer');
+        await finalizeExecution('FAILED', {
+          message: coderOutput.generationFailureReason || 'Code generation failed.',
+          status: coderOutput.status
+        });
+        return;
+      }
+
       state.extractedContext = coderOutput.extractedContext || state.extractedContext;
       completedStages.push('coder');
       persistenceEngine.saveCheckpoint(sessionId, 'CoderAgent', state);
@@ -1576,12 +1681,14 @@ app.get('/api/workspace/file', (req: Request, res: Response) => {
   res.json({ path: relPath, content });
 });
 
-// Save File Content API
+// Save File Content API (Create / Save)
 app.post('/api/workspace/file', (req: Request, res: Response) => {
-  const { path: relPath, content } = req.body;
-  if (!relPath || content === undefined) {
-    return res.status(400).json({ error: 'path and content are required' });
+  const { path: rawPath, content } = req.body;
+  if (!rawPath) {
+    return res.status(400).json({ error: 'path parameter is required' });
   }
+
+  const relPath = rawPath.startsWith('src/sandbox') ? rawPath : `src/sandbox/${rawPath.replace(/^\/+/, '')}`;
 
   if (!isSafeSandboxPath(relPath)) {
     return res.status(403).json({ error: `Cannot save to '${relPath}'. Path escapes sandbox or is protected.` });
@@ -1593,8 +1700,32 @@ app.post('/api/workspace/file', (req: Request, res: Response) => {
     fs.mkdirSync(dir, { recursive: true });
   }
 
-  fs.writeFileSync(fullPath, content, 'utf-8');
-  res.json({ success: true, message: `Saved changes to ${relPath}` });
+  fs.writeFileSync(fullPath, content !== undefined ? content : '', 'utf-8');
+  res.json({ success: true, message: `Saved changes to ${relPath}`, path: relPath });
+});
+
+// Create Folder API
+app.post('/api/workspace/folder', (req: Request, res: Response) => {
+  const { path: rawPath } = req.body;
+  if (!rawPath) {
+    return res.status(400).json({ error: 'path parameter is required' });
+  }
+
+  const relPath = rawPath.startsWith('src/sandbox') ? rawPath : `src/sandbox/${rawPath.replace(/^\/+/, '')}`;
+
+  if (!isSafeSandboxPath(relPath)) {
+    return res.status(403).json({ error: `Cannot create folder at '${relPath}'. Access forbidden.` });
+  }
+
+  const fullPath = path.resolve(process.cwd(), relPath);
+  try {
+    if (!fs.existsSync(fullPath)) {
+      fs.mkdirSync(fullPath, { recursive: true });
+    }
+    res.json({ success: true, message: `Folder created at ${relPath}`, path: relPath });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed to create folder' });
+  }
 });
 
 // Delete Single Sandbox File API

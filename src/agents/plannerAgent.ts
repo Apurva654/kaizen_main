@@ -1,17 +1,16 @@
 import { z } from 'zod';
-import { ChatGroq } from '@langchain/groq';
 import * as dotenv from 'dotenv';
 import * as fs from 'fs';
 import * as path from 'path';
 import { KaizenState, PlanStep } from '../state';
 import { ASTParserTool, ExtractedSymbol } from '../tools/astParser';
 import { isProtectedFile } from './codeGenAgent';
-import { langfuseTracer } from '../tools/langfuseTracer';
+import { runStructured } from '../tools/llmRunner';
 
 dotenv.config();
 
 export function normalizeSandboxPath(pathStr: string): string {
-  if (!pathStr) return 'src/sandbox/main.ts';
+  if (!pathStr) return '';
   let norm = pathStr.replace(/\\/g, '/').trim();
   norm = norm.replace(/^\.\//, '');
   if (!norm.startsWith('src/sandbox/')) {
@@ -24,28 +23,20 @@ export function normalizeSandboxPath(pathStr: string): string {
   return norm;
 }
 
-export const StepObjectSchema = z.object({
-  id: z.number().optional().describe("Unique sequential step identifier"),
-  step_number: z.number().optional().describe("Step number"),
-  description: z.string().describe("Detailed, actionable task description explaining what will be created, modified, or tested"),
-  task: z.string().optional().describe("Detailed task description"),
-  targetFile: z.string().nullable().optional().describe("Target source file path for this step (must be under src/sandbox/...)"),
-  action: z.string().nullable().optional().describe("Action type (create, modify, test)"),
-  isNewFile: z.boolean().nullable().optional().describe("Whether target file is new"),
-  assignedTool: z.string().nullable().optional().describe("Tool or agent module")
+export const PlannerStepSchema = z.object({
+  description: z.string().min(30).describe("Specific, actionable step description naming specific functions, classes, or code sections"),
+  targetFile: z.string().describe("Target source file path under src/sandbox/..."),
+  action: z.enum(['create', 'modify', 'test']).describe("Action type"),
+  dependsOn: z.array(z.number()).optional().describe("1-indexed step numbers this step depends on")
 });
-
-export const StepItemSchema = z.union([
-  z.string().describe("Actionable task description string for this step"),
-  StepObjectSchema
-]);
 
 export const PlannerSchema = z.object({
-  steps: z.array(StepItemSchema).describe("List of detailed sequential implementation steps"),
-  plan: z.array(StepItemSchema).optional().describe("List of detailed sequential implementation steps")
+  approach: z.string().describe("High-level technical strategy and decomposition approach"),
+  steps: z.array(PlannerStepSchema).min(1).max(8).describe("Ordered list of 1 to 8 implementation steps")
 });
 
-function summarizePlan(plan: import('../state').PlanStep[]): string {
+export function summarizePlan(plan: PlanStep[]): string {
+  if (!plan || plan.length === 0) return '';
   return plan.map(s => `[${s.targetFile}] ${s.description}`).join(' | ');
 }
 
@@ -54,7 +45,7 @@ function extractSymbolsFromWorkspace(targetFiles: string[], extractedContext: st
   const seenNames = new Set<string>();
 
   for (const tf of targetFiles) {
-    if (fs.existsSync(tf)) {
+    if (tf && fs.existsSync(tf)) {
       try {
         const stat = fs.statSync(tf);
         if (!stat.isDirectory()) {
@@ -93,575 +84,203 @@ function extractSymbolsFromWorkspace(targetFiles: string[], extractedContext: st
   return symbols;
 }
 
+function extractTokens(text: string): Set<string> {
+  const words = text.toLowerCase().replace(/[^a-z0-9]/g, ' ').split(/\s+/);
+  return new Set(words.filter(w => w.length > 2));
+}
+
+function computeJaccardSimilarity(text1: string, text2: string): number {
+  const set1 = extractTokens(text1);
+  const set2 = extractTokens(text2);
+  if (set1.size === 0 || set2.size === 0) return 0;
+  let intersectionSize = 0;
+  for (const token of set1) {
+    if (set2.has(token)) {
+      intersectionSize++;
+    }
+  }
+  const unionSize = set1.size + set2.size - intersectionSize;
+  return unionSize === 0 ? 0 : intersectionSize / unionSize;
+}
+
 export async function plannerAgentNode(state: typeof KaizenState.State) {
   const cleanUserQuery = state.originalUserRequest || state.userInput || "";
   const stateTargets = state.targetFiles || [];
   const extractedCtx = state.extractedContext || "";
 
-  // Collect previously rejected plans for context
+  const MAX_PLAN_ATTEMPTS = 3;
   const attempt = state.planAttempt ?? 0;
-  const rejected: string[] = [...(state.rejectedPlans ?? [])];
-  const wasRejected =
-    state.planApprovalStatus === 'REJECTED' || state.planApprovalStatus === 'FEEDBACK_SUBMITTED';
-  if (wasRejected && state.plan?.length) {
-    rejected.push(summarizePlan(state.plan));
+
+  const rejectedPlans: string[] = [...(state.rejectedPlans || [])];
+  if (
+    (state.planApprovalStatus === 'REJECTED' || state.planApprovalStatus === 'FEEDBACK_SUBMITTED') &&
+    state.plan &&
+    state.plan.length > 0
+  ) {
+    const lastSummary = summarizePlan(state.plan);
+    if (lastSummary && !rejectedPlans.includes(lastSummary)) {
+      rejectedPlans.push(lastSummary);
+    }
   }
 
-  const isWebReq = /\b(html|website|webpage|landing\s+page|web|frontend)\b/i.test(cleanUserQuery) ||
-    stateTargets.some(f => f.endsWith('.html'));
-
-  let rawTargets = stateTargets.length > 0
-    ? stateTargets
-    : (isWebReq ? ['src/sandbox/index.html', 'src/sandbox/style.css', 'src/sandbox/script.js'] : ['src/sandbox/main.ts']);
-
-  if (isWebReq) {
-    const hasCss = rawTargets.some(f => f.endsWith('.css'));
-    const hasJs = rawTargets.some(f => f.endsWith('.js'));
-    if (!hasCss) rawTargets.push('src/sandbox/style.css');
-    if (!hasJs) rawTargets.push('src/sandbox/script.js');
+  if (attempt >= MAX_PLAN_ATTEMPTS) {
+    return {
+      status: 'PLAN_RETRY_LIMIT',
+      planFailureReason: 'Plan rejected 3 times. Please refine the request.',
+      rejectedPlans
+    };
   }
-
-  const targetFiles = Array.from(new Set(rawTargets)).map(f => normalizeSandboxPath(f));
-
-  const existingFiles = targetFiles.filter(tf => fs.existsSync(tf));
-  const newFiles = targetFiles.filter(tf => !fs.existsSync(tf));
 
   const astParser = new ASTParserTool();
-  const extractedSymbols = extractSymbolsFromWorkspace(existingFiles, extractedCtx, astParser);
+  const normalizedTargets = stateTargets.map(normalizeSandboxPath).filter(Boolean);
+  const symbols = extractSymbolsFromWorkspace(normalizedTargets, extractedCtx, astParser);
 
-  const symbolSummary = extractedSymbols.length > 0
-    ? extractedSymbols.map((s: ExtractedSymbol) => `- [${s.language || 'code'}] ${s.type} ${s.name}`).join('\n')
-    : "No existing file AST symbols pre-extracted.";
+  // Strategy lens & temperature selection based on attempt
+  let strategyLens = "";
+  let temperature = 0.2;
 
-  console.log(`[PLANNER][INPUT] originalUserRequest: "${state.originalUserRequest}"`);
-  console.log(`[PLANNER][INPUT] userInput: "${state.userInput}"`);
-  console.log(`[PLANNER][INPUT] cleanUserQuery: "${cleanUserQuery}"`);
-  console.log(`[PLANNER][INPUT] targetFiles: [${targetFiles.join(', ')}]`);
-  console.log(`[PLANNER][CONTEXT] extractedContext length: ${extractedCtx.length} chars`);
+  if (attempt === 0) {
+    strategyLens = "Direct Implementation Strategy (attempt 0/3): Focus on the most direct, minimal, and concise change set to fulfill the request cleanly.";
+    temperature = 0.2;
+  } else if (attempt === 1) {
+    strategyLens = "Alternative Decomposition Strategy (attempt 1/3): The previous plan was rejected. Produce a DELIBERATELY DIFFERENT decomposition, file layout, or technique than the rejected plans.";
+    temperature = 0.6;
+  } else {
+    strategyLens = "Robustness-First Strategy (attempt 2/3): Focus on robustness-first design, comprehensive data structures, edge case validation, and verification, completely different from the rejected plans.";
+    temperature = 0.9;
+  }
 
-  const apiKey = process.env.GROQ_API_KEY;
+  const systemPrompt = `You are Kaizen's Lead Software Architect.
+Your task is to decompose the user's coding request into a precise, step-by-step technical plan.
 
-  if (apiKey && apiKey !== 'your_groq_api_key_here') {
-    const modelCandidates = [
-      'openai/gpt-oss-120b',
-      'openai/gpt-oss-20b',
-      'qwen/qwen3.8-27b',
-      'llama-3.3-70b-versatile',
-      'llama-3.1-8b-instant',
-      'llama3-70b-8192',
-      'llama3-8b-8192',
-      'qwen-2.5-coder-32b',
-      'deepseek-r1-distill-llama-70b'
-    ];
+STRATEGY LENS:
+${strategyLens}
 
-    for (const modelName of modelCandidates) {
+STRICT ARCHITECTURAL RULES:
+1. Every file path in targetFile MUST be under 'src/sandbox/' (e.g., 'src/sandbox/app.py' or 'src/sandbox/services/auth.ts').
+2. You select the exact file layout and filenames (hint files are suggestions only).
+3. Do NOT include extra test files, CSS, HTML, or mock models unless specifically requested or necessary for the execution.
+4. Small or focused requests MUST be decomposed into 1 to 3 steps max.
+5. Each step's 'description' MUST be at least 30 characters long, naming specific functions, classes, or code sections to create/modify.
+6. NEVER restate the user request verbatim in step descriptions or say "implement requested functionality".
+
+Return a structured JSON output with 'approach' and 'steps'.`;
+
+  // Read existing target hint files (up to 4000 chars each)
+  const existingFilesContent: string[] = [];
+  for (const targetPath of normalizedTargets) {
+    const fullPath = path.resolve(process.cwd(), targetPath);
+    if (fs.existsSync(fullPath)) {
       try {
-        const model = new ChatGroq({
-          apiKey: apiKey,
-          model: modelName,
-          temperature: 0
-        });
-
-        const structuredModel = model.withStructuredOutput(PlannerSchema, { method: 'jsonMode' });
-
-        const systemPrompt = `You are an expert technical software planner for Kaizen AI.
-Construct a grounded, step-by-step implementation plan for the user request. Respond in valid JSON format.
-
-=== ORIGINAL USER REQUEST ===
-${cleanUserQuery}
-${state.rejectionReason ? `
-USER FEEDBACK ON THE REJECTED PLAN:
-${state.rejectionReason}` : ''}
-${rejected.length > 0 ? `
-=== PREVIOUSLY REJECTED PLANS (DO NOT REPEAT THESE) ===
-${rejected.map((r, i) => `[Attempt ${i + 1}]: ${r}`).join('\n')}` : ''}
-
-=== WORKSPACE CONTEXT ===
-Target Directory: src/sandbox/
-Existing Files: ${existingFiles.length > 0 ? existingFiles.join(', ') : 'None'}
-New Files to Create: ${newFiles.length > 0 ? newFiles.join(', ') : 'None'}
-
-=== RELEVANT FILES ===
-${targetFiles.join(', ')}
-
-=== AST/SYMBOL CONTEXT ===
-${symbolSummary}
-
-=== GRAPHIFY DEPENDENCIES ===
-${(state.extractedContext || "No context provided.").slice(-4000)}
-
-=== CONSTRAINTS ===
-1. All target files MUST reside inside 'src/sandbox/' (e.g., 'src/sandbox/OOPSsample.cpp').
-2. ADAPTIVE GRANULARITY: For simple requests, quick scripts, C++/Python files, or refactoring tasks (e.g. removing comments, fixing namespace, adding functions), generate concise 1-3 targeted steps. Do NOT force 6-step enterprise web architecture (models/repositories/controllers) unless the user explicitly requests an enterprise multi-module system.
-3. Every step MUST include an explicit targetFile under 'src/sandbox/'.
-4. Do NOT modify any files on disk during planning.
-
-=== PLANNING REQUIREMENTS ===
-1. Produce grounded, actionable steps with targetFile, action, isNewFile, and dependencies.
-2. Step Descriptions must be clear, concise, and professional without repeating raw user prompts or using internal class names like ASTParserTool.`;
-
-        const startTime = Date.now();
-        const invokePromise = structuredModel.invoke([
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: cleanUserQuery }
-        ]);
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error(`ChatGroq model '${modelName}' execution timed out after 8000ms`)), 8000);
-        });
-
-        const result = await Promise.race([invokePromise, timeoutPromise]);
-        const latencyMs = Date.now() - startTime;
-
-        console.log(`[PLANNER][LLM_RAW] Model '${modelName}' returned structured output successfully in ${latencyMs}ms.`);
-
-        await langfuseTracer.recordGeneration(
-          'PlannerAgent',
-          modelName,
-          cleanUserQuery,
-          JSON.stringify(result),
-          latencyMs,
-          120,
-          250
-        );
-
-        const rawSteps = (result && (result.steps || result.plan)) || [];
-        if (rawSteps.length > 0) {
-          const parsedSteps: Array<{ id: number; description: string; targetFile: string; isNewFile?: boolean }> = [];
-
-          for (let idx = 0; idx < rawSteps.length; idx++) {
-            const step = rawSteps[idx];
-            let desc = typeof step === 'string'
-              ? step
-              : (step.description || step.task || (step as any).details || step.action || (step as any).text || (step as any).summary);
-
-            if (desc && (desc.includes('ASTParserTool') || desc.includes('GraphifyEngine') || desc.includes('AST Context Verified'))) {
-              desc = idx === 0 ? `Inspect workspace structure and models in ${targetFiles[0]}` : `Implement module logic for query: "${cleanUserQuery.slice(0, 50)}"`;
-            }
-
-            if (!desc || desc.trim().toLowerCase() === 'step 1' || desc.trim().toLowerCase() === `step ${idx + 1}`) {
-              desc = `Implement step ${idx + 1} for query: "${cleanUserQuery.slice(0, 50)}"`;
-            }
-
-            let stepTargetFile = (typeof step === 'object' && step?.targetFile) ? step.targetFile : undefined;
-
-            // Extract file path from description string if omitted
-            if (!stepTargetFile && desc) {
-              const pathMatch = desc.match(/\b(src\/[a-zA-Z0-9_\-\/]+\.[a-zA-Z0-9]+|[a-zA-Z0-9_\-]+\/[a-zA-Z0-9_\-\/]+\.[a-zA-Z0-9]+|\b[a-zA-Z0-9_\-]+\.(ts|py|js|tsx|jsx|json))\b/i);
-              if (pathMatch && pathMatch[1]) {
-                stepTargetFile = pathMatch[1];
-              }
-            }
-
-            if (!stepTargetFile) {
-              stepTargetFile = targetFiles[Math.min(idx, targetFiles.length - 1)];
-            }
-
-            const normalizedTarget = normalizeSandboxPath(stepTargetFile);
-
-            const stepId = (typeof step === 'object' && (step?.id || step?.step_number)) ? (step.id || step.step_number || (idx + 1)) : (idx + 1);
-
-            parsedSteps.push({
-              id: stepId,
-              description: desc,
-              targetFile: normalizedTarget,
-              isNewFile: (typeof step === 'object' && step?.isNewFile !== undefined) ? !!step.isNewFile : !fs.existsSync(normalizedTarget)
-            });
-          }
-
-          // Plan Validation: Detect single-file collapse on multi-step plans (>3 steps)
-          const uniqueTargetFiles = new Set(parsedSteps.map(s => s.targetFile));
-          if (parsedSteps.length > 3 && uniqueTargetFiles.size === 1) {
-            console.warn(`[PLANNER][VALIDATION] Detected ${parsedSteps.length} steps collapsed into single file '${Array.from(uniqueTargetFiles)[0]}'. Auto-decomposing modular targets...`);
-
-            parsedSteps.forEach((step, idx) => {
-              const d = step.description.toLowerCase();
-              if (d.includes('user') || d.includes('auth') || d.includes('profile')) {
-                step.targetFile = 'src/sandbox/models/User.ts';
-              } else if (d.includes('registration') || d.includes('attendee')) {
-                step.targetFile = 'src/sandbox/models/Registration.ts';
-              } else if (d.includes('repo') || d.includes('storage') || d.includes('db')) {
-                step.targetFile = d.includes('user') ? 'src/sandbox/repositories/UserRepository.ts' : 'src/sandbox/repositories/OrderRepository.ts';
-              } else if (d.includes('service') || d.includes('business')) {
-                step.targetFile = d.includes('attendee') ? 'src/sandbox/services/AttendeeService.ts' : 'src/sandbox/services/OrderService.ts';
-              } else if (d.includes('notification') || d.includes('email')) {
-                step.targetFile = 'src/sandbox/notifications/NotificationService.ts';
-              } else if (d.includes('controller') || d.includes('route') || d.includes('api')) {
-                step.targetFile = 'src/sandbox/controllers/OrderController.ts';
-              } else if (d.includes('test') || d.includes('spec') || d.includes('verify')) {
-                step.targetFile = 'src/sandbox/tests/OrderService.test.ts';
-              } else {
-                step.targetFile = `src/sandbox/models/Order.ts`;
-              }
-            });
-          }
-
-          const verifiedSteps: PlanStep[] = parsedSteps.map((step, idx) => {
-            const isBlocked = isProtectedFile(step.targetFile);
-            const actionType = step.isNewFile ? 'create' : (step.targetFile.includes('/tests/') || step.targetFile.includes('.test.') ? 'test' : 'modify');
-            return {
-              id: step.id,
-              planVersion: attempt + 1,
-              targetFile: step.targetFile,
-              language: state.requestedLanguage,
-              action: actionType,
-              isNewFile: step.isNewFile,
-              dependencies: idx > 0 ? [parsedSteps[idx - 1].targetFile] : [],
-              description: isBlocked
-                ? `[GUARDRAIL BLOCKED] Security Policy Violation for '${step.targetFile}': ${step.description}`
-                : step.description,
-              status: isBlocked ? 'failed' : 'pending'
-            };
-          });
-
-          const validatedPlan = validatePlanLanguage(verifiedSteps, state.requestedLanguage);
-
-          console.log(`[PLANNER][NORMALIZED] Produced ${validatedPlan.length} steps across targets: [${Array.from(new Set(validatedPlan.map(s => s.targetFile))).join(', ')}]`);
-
-          return {
-            plan: validatedPlan,
-            targetFiles: Array.from(new Set(validatedPlan.map(s => s.targetFile!))),
-            status: validatedPlan.some(s => s.status === 'failed') ? "SECURITY_VIOLATION_BLOCKED" : "PLANNED",
-            planAttempt: attempt + 1,
-            rejectedPlans: rejected,
-            rejectionReason: undefined
-          };
-        }
-      }
-      catch (error: any) {
-        console.warn(`[PLANNER][GROQ_WARN] Model '${modelName}' execution failed: ${error?.message || error}`);
-      }
+        const content = fs.readFileSync(fullPath, 'utf-8').slice(0, 4000);
+        existingFilesContent.push(`--- FILE: ${targetPath} ---\n${content}`);
+      } catch {}
     }
   }
 
-  console.warn(`[PLANNER][FALLBACK] Groq API models unavailable or timed out. Generating dynamic modular fallback plan for query: "${cleanUserQuery}"`);
+  const symbolSummary = symbols.map(s => `${s.type} ${s.name} (${s.language})`).join(', ');
+  const recentContext = extractedCtx.slice(-3000);
 
-  const rawFallbackSteps = buildModularFallbackPlan(cleanUserQuery, targetFiles);
-  const fallbackSteps = validatePlanLanguage(rawFallbackSteps, state.requestedLanguage);
-  const fallbackTargets = Array.from(new Set(fallbackSteps.map(s => s.targetFile!)));
+  const userPromptParts: string[] = [
+    `USER REQUEST:\n${cleanUserQuery}`,
+    `HINT FILES:\n${normalizedTargets.length > 0 ? normalizedTargets.join(', ') : 'None provided'}`,
+    `EXISTING SYMBOLS:\n${symbolSummary || 'None found'}`,
+  ];
 
-  console.log(`[PLANNER][FINAL_STATE] Fallback plan generated ${fallbackSteps.length} modular steps across: [${fallbackTargets.join(', ')}]`);
+  if (existingFilesContent.length > 0) {
+    userPromptParts.push(`EXISTING FILE CONTENTS:\n${existingFilesContent.join('\n\n')}`);
+  }
 
-  return {
-    plan: fallbackSteps,
-    targetFiles: fallbackTargets,
-    status: "PLANNED"
-  };
-}
+  if (recentContext) {
+    userPromptParts.push(`RETRIEVED CONTEXT SNIPPET:\n${recentContext}`);
+  }
 
-function validatePlanLanguage(steps: PlanStep[], reqLang?: string): PlanStep[] {
-  if (!reqLang || reqLang === 'typescript') return steps;
+  if (rejectedPlans.length > 0) {
+    userPromptParts.push(`PREVIOUSLY REJECTED PLANS (do NOT repeat these approaches or file structures):\n${rejectedPlans.map((p, i) => `Rejected Plan #${i + 1}: ${p}`).join('\n')}`);
+  }
 
-  return steps.map(step => {
-    if (!step.targetFile) return { ...step, language: reqLang };
-    const currentExt = step.targetFile.split('.').pop()?.toLowerCase();
-    let targetExt = currentExt;
+  if (state.rejectionReason) {
+    userPromptParts.push(`USER REJECTION FEEDBACK:\n${state.rejectionReason}`);
+  }
 
-    if (reqLang === 'python' && currentExt !== 'py') targetExt = 'py';
-    else if (reqLang === 'typescript' && currentExt !== 'ts' && currentExt !== 'tsx') targetExt = 'ts';
-    else if (reqLang === 'javascript' && currentExt !== 'js' && currentExt !== 'jsx') targetExt = 'js';
-    else if (reqLang === 'html' && currentExt !== 'html') targetExt = 'html';
-    else if (reqLang === 'css' && currentExt !== 'css') targetExt = 'css';
-    else if (reqLang === 'java' && currentExt !== 'java') targetExt = 'java';
-    else if (reqLang === 'cpp' && currentExt !== 'cpp') targetExt = 'cpp';
-    else if (reqLang === 'go' && currentExt !== 'go') targetExt = 'go';
-    else if (reqLang === 'rust' && currentExt !== 'rs') targetExt = 'rs';
-    else if (reqLang === 'c' && currentExt !== 'c') targetExt = 'c';
+  const userPrompt = userPromptParts.join('\n\n');
 
-    let newTarget = step.targetFile;
-    if (targetExt && targetExt !== currentExt && step.isNewFile) {
-      newTarget = step.targetFile.replace(/\.[a-zA-Z0-9]+$/, `.${targetExt}`);
-    }
+  try {
+    const { result } = await runStructured({
+      agent: 'PlannerAgent',
+      schema: PlannerSchema,
+      system: systemPrompt,
+      user: userPrompt,
+      temperature,
+      timeoutMs: 30000,
+      validate: (planRes) => {
+        // Check for verbatim request restatement
+        if (cleanUserQuery.length > 20) {
+          const lowerReq = cleanUserQuery.toLowerCase();
+          for (const step of planRes.steps) {
+            if (step.description.toLowerCase().includes(lowerReq)) {
+              return `Step description restates the user request verbatim: "${step.description}"`;
+            }
+          }
+        }
+
+        // Check Jaccard similarity against rejected plans
+        const candidateSummary = planRes.steps
+          .map(s => `[${normalizeSandboxPath(s.targetFile)}] ${s.description}`)
+          .join(' | ');
+
+        for (const rejectedPlan of rejectedPlans) {
+          const sim = computeJaccardSimilarity(candidateSummary, rejectedPlan);
+          if (sim > 0.7) {
+            return `Candidate plan is too similar (Jaccard similarity ${sim.toFixed(2)} > 0.7) to a previously rejected plan: "${rejectedPlan}"`;
+          }
+        }
+
+        return null;
+      }
+    });
+
+    const rawSteps = result.steps;
+    const planSteps: PlanStep[] = rawSteps.map((step, idx) => {
+      const normTarget = normalizeSandboxPath(step.targetFile);
+      const isBlocked = isProtectedFile(normTarget);
+      const fullPath = path.resolve(process.cwd(), normTarget);
+      const isNew = !fs.existsSync(fullPath);
+      const stepDeps = (step.dependsOn || [])
+        .map(depIdx => rawSteps[depIdx - 1]?.targetFile)
+        .filter((tf): tf is string => Boolean(tf))
+        .map(normalizeSandboxPath);
+
+      return {
+        id: idx + 1,
+        step_number: idx + 1,
+        description: isBlocked ? `[GUARDRAIL BLOCKED] ${step.description}` : step.description,
+        targetFile: normTarget,
+        action: step.action,
+        isNewFile: isNew,
+        dependencies: stepDeps,
+        planVersion: attempt + 1,
+        status: isBlocked ? 'failed' : 'pending'
+      };
+    });
+
+    const anyFailed = planSteps.some(s => s.status === 'failed');
+    const uniqueTargetFiles = Array.from(new Set(planSteps.map(s => s.targetFile)));
 
     return {
-      ...step,
-      targetFile: newTarget,
-      language: reqLang
+      plan: planSteps,
+      targetFiles: uniqueTargetFiles,
+      planAttempt: attempt + 1,
+      rejectedPlans,
+      rejectionReason: undefined,
+      status: anyFailed ? 'SECURITY_VIOLATION_BLOCKED' : 'PLANNED'
     };
-  });
-}
-
-function formatSmartStepDescription(userQuery: string, targetFile: string, idx: number): string {
-  const queryLower = userQuery.toLowerCase().trim();
-
-  if (queryLower.includes('remove std') || queryLower.includes('using namespace std')) {
-    return `Refactor \`using namespace std;\` in ${targetFile}`;
+  } catch (err: any) {
+    const failureReason = err?.message || 'Failed to generate plan via LLM.';
+    return {
+      status: 'PLAN_FAILED',
+      planFailureReason: failureReason,
+      rejectedPlans
+    };
   }
-  if (queryLower.includes('remove comment') || queryLower.includes('delete comment') || queryLower.includes('clean comment') || queryLower.includes('inline comment')) {
-    return `Remove inline comments and clean code structure in ${targetFile}`;
-  }
-  if (queryLower.includes('oops') || queryLower.includes('class') || queryLower.includes('object')) {
-    return `Implement Object-Oriented structure in ${targetFile}`;
-  }
-  if (queryLower.includes('description') || queryLower.includes('nole')) {
-    return `Write description and utility logic in ${targetFile}`;
-  }
-
-  let verb = 'Implement';
-  if (/\b(add|create|make|write|generate)\b/i.test(queryLower)) verb = 'Create';
-  else if (/\b(remove|delete|clean|clear|strip|refactor)\b/i.test(queryLower)) verb = 'Refactor';
-  else if (/\b(fix|debug|repair|correct)\b/i.test(queryLower)) verb = 'Fix';
-  else if (/\b(update|modify|change|edit)\b/i.test(queryLower)) verb = 'Update';
-  else if (/\b(test|spec|verify)\b/i.test(queryLower)) verb = 'Test';
-
-  // Clean raw prompt string: strip conversational prefixes and file paths
-  let cleanSubject = userQuery
-    .replace(/^(please|pls|can you|help me|make|create|write|add|remove|delete|update|fix|refactor|clean)\s+/i, '')
-    .replace(/\b(in|from|inside|for|of)\s+src\/sandbox\/[a-zA-Z0-9_\-\.]+/gi, '')
-    .replace(/\bsrc\/sandbox\/[a-zA-Z0-9_\-\.]+/gi, '')
-    .replace(/\b[a-zA-Z0-9_\-]+\.(ts|py|cpp|js|java|rs|go|json|html|css)\b/gi, '')
-    .replace(/^(to|and|the|a|an)\s+/i, '')
-    .trim();
-
-  cleanSubject = cleanSubject.slice(0, 50).trim();
-  if (!cleanSubject || cleanSubject.length < 3) {
-    cleanSubject = 'requested code changes';
-  }
-
-  return `${verb} ${cleanSubject} in ${targetFile}`;
-}
-
-function buildModularFallbackPlan(userQuery: string, targetFiles: string[]): PlanStep[] {
-  const queryLower = userQuery.toLowerCase();
-
-  // Check if target file or prompt specifies non-TypeScript language (C++, Python, Java, Rust, Go, C#, PHP)
-  const isCpp = /\b(c\+\+|cpp|cplusplus)\b/i.test(queryLower) || targetFiles.some(f => f.endsWith('.cpp') || f.endsWith('.h') || f.endsWith('.hpp'));
-  const isPython = /\b(python|py)\b/i.test(queryLower) || targetFiles.some(f => f.endsWith('.py'));
-  const isJava = /\b(java)\b/i.test(queryLower) || targetFiles.some(f => f.endsWith('.java'));
-  const isRust = /\b(rust|rs)\b/i.test(queryLower) || targetFiles.some(f => f.endsWith('.rs'));
-  const isGo = /\b(golang|go)\b/i.test(queryLower) || targetFiles.some(f => f.endsWith('.go'));
-
-  if (isCpp || isPython || isJava || isRust || isGo || (targetFiles.length > 0 && !targetFiles[0].endsWith('.ts'))) {
-    let mainTarget = targetFiles[0];
-    const ext = isCpp ? '.cpp' : (isPython ? '.py' : (isJava ? '.java' : (isRust ? '.rs' : (isGo ? '.go' : '.cpp'))));
-
-    if (!mainTarget || (mainTarget.endsWith('.ts') && (ext as string) !== '.ts')) {
-      const canonicalPath = `src/sandbox/main${ext}`;
-      const sandboxDir = path.resolve(process.cwd(), 'src/sandbox');
-      if (fs.existsSync(sandboxDir)) {
-        if (fs.existsSync(path.resolve(process.cwd(), canonicalPath))) {
-          mainTarget = canonicalPath;
-        } else {
-          try {
-            const existing = fs.readdirSync(sandboxDir).filter(f => f.endsWith(ext) && !f.startsWith('test_') && !f.includes('_test.') && !f.includes('.test.'));
-            if (existing.length > 0) {
-              mainTarget = `src/sandbox/${existing[0]}`;
-            } else {
-              mainTarget = canonicalPath;
-            }
-          } catch {
-            mainTarget = canonicalPath;
-          }
-        }
-      } else {
-        mainTarget = canonicalPath;
-      }
-    }
-
-    const effectiveTargets = targetFiles.length > 0 ? targetFiles : [mainTarget];
-    const steps: PlanStep[] = effectiveTargets.map((tf, idx) => ({
-      id: idx + 1,
-      targetFile: tf,
-      action: fs.existsSync(tf) ? 'modify' : 'create',
-      isNewFile: !fs.existsSync(tf),
-      dependencies: idx > 0 ? [effectiveTargets[idx - 1]] : [],
-      description: formatSmartStepDescription(userQuery, tf, idx),
-      status: 'pending'
-    }));
-
-    return steps;
-  }
-
-  // If target files exist or specific target files are provided, create concise targeted plan steps
-  const validTargets = targetFiles.length > 0 ? targetFiles : ['src/sandbox/main.ts'];
-  
-  const isWebProject = /\b(html|website|webpage|landing\s+page|web|frontend)\b/i.test(queryLower) ||
-    targetFiles.some(f => f.endsWith('.html') || f.endsWith('.css'));
-
-  if (isWebProject) {
-    const htmlFile = 'src/sandbox/index.html';
-    const cssFile = 'src/sandbox/style.css';
-    const jsFile = 'src/sandbox/script.js';
-
-    return [
-      {
-        id: 1,
-        targetFile: htmlFile,
-        action: 'create',
-        isNewFile: !fs.existsSync(htmlFile),
-        dependencies: [],
-        description: `Create semantic HTML5 landing page structure in ${htmlFile} with hero section, features grid, call to action, and footer`,
-        status: 'pending'
-      },
-      {
-        id: 2,
-        targetFile: cssFile,
-        action: 'create',
-        isNewFile: !fs.existsSync(cssFile),
-        dependencies: [htmlFile],
-        description: `Create responsive CSS styling in ${cssFile} with modern typography, dark mode theme, glassmorphism card layouts, and hover effects`,
-        status: 'pending'
-      },
-      {
-        id: 3,
-        targetFile: jsFile,
-        action: 'create',
-        isNewFile: !fs.existsSync(jsFile),
-        dependencies: [htmlFile, cssFile],
-        description: `Create interactive JavaScript behavior in ${jsFile} for dynamic button interactions, form validation, and animations`,
-        status: 'pending'
-      }
-    ];
-  }
-
-  // Multi-file system request fallback (Event Management, Order Management, etc.)
-  if (queryLower.includes('event management') || (queryLower.includes('event model') && queryLower.includes('eventservice'))) {
-    return [
-      { id: 1, targetFile: 'src/sandbox/models/Event.ts', action: 'create', isNewFile: true, dependencies: [], description: 'Define Event model interface', status: 'pending' },
-      { id: 2, targetFile: 'src/sandbox/models/Registration.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/models/Event.ts'], description: 'Define Registration model interface', status: 'pending' },
-      { id: 3, targetFile: 'src/sandbox/repositories/EventRepository.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/models/Event.ts'], description: 'Implement EventRepository data access layer', status: 'pending' },
-      { id: 4, targetFile: 'src/sandbox/services/EventService.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/repositories/EventRepository.ts'], description: 'Implement EventService business logic', status: 'pending' },
-      { id: 5, targetFile: 'src/sandbox/notifications/EmailNotificationService.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/services/EventService.ts'], description: 'Implement EmailNotificationService adapter', status: 'pending' },
-      { id: 6, targetFile: 'src/sandbox/controllers/EventController.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/services/EventService.ts'], description: 'Implement EventController API endpoints', status: 'pending' },
-      { id: 7, targetFile: 'src/sandbox/tests/EventService.test.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/services/EventService.ts'], description: 'Implement EventService unit tests', status: 'pending' }
-    ];
-  }
-
-  if (queryLower.includes('order management') || (queryLower.includes('order model') && queryLower.includes('orderservice'))) {
-    return [
-      { id: 1, targetFile: 'src/sandbox/models/Order.ts', action: 'create', isNewFile: true, dependencies: [], description: 'Define Order data model interface', status: 'pending' },
-      { id: 2, targetFile: 'src/sandbox/models/OrderItem.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/models/Order.ts'], description: 'Define OrderItem model interface', status: 'pending' },
-      { id: 3, targetFile: 'src/sandbox/repositories/OrderRepository.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/models/Order.ts'], description: 'Implement OrderRepository data access layer', status: 'pending' },
-      { id: 4, targetFile: 'src/sandbox/services/OrderService.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/repositories/OrderRepository.ts'], description: 'Implement OrderService business logic', status: 'pending' },
-      { id: 5, targetFile: 'src/sandbox/adapters/PaymentGatewayAdapter.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/services/OrderService.ts'], description: 'Implement PaymentGatewayAdapter', status: 'pending' },
-      { id: 6, targetFile: 'src/sandbox/controllers/OrderController.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/services/OrderService.ts'], description: 'Implement OrderController API endpoints', status: 'pending' },
-      { id: 7, targetFile: 'src/sandbox/tests/OrderService.test.ts', action: 'create', isNewFile: true, dependencies: ['src/sandbox/services/OrderService.ts'], description: 'Implement OrderService unit tests', status: 'pending' }
-    ];
-  }
-
-  // Check if prompt explicitly asks for architecture / multi-file decomposition
-  const isExplicitArchitecture = /\b(controller|repository|rest api|crud api|architecture|multi-file|microservice|database layer)\b/i.test(queryLower);
-
-  // Check if query asks for a small edit / modification (e.g. remove comments, add feature, refactor)
-  const isModification = /\b(remove|fix|update|modify|change|refactor|clean|namespace|comment|comments)\b/i.test(queryLower);
-
-  if (!isExplicitArchitecture && (isModification || (validTargets.length <= 2 && !/\b(api|rest|service|controller|repository)\b/i.test(queryLower)))) {
-    const steps: PlanStep[] = validTargets.map((tf, idx) => ({
-      id: idx + 1,
-      targetFile: tf,
-      action: fs.existsSync(tf) ? 'modify' : 'create',
-      isNewFile: !fs.existsSync(tf),
-      dependencies: idx > 0 ? [validTargets[idx - 1]] : [],
-      description: formatSmartStepDescription(userQuery, tf, idx),
-      status: 'pending'
-    }));
-    return steps;
-  }
-
-  const entityMatch = queryLower.match(/\b(order|event|user|product|item|inventory|payment|registration|auth|notification|customer|booking)\b/i);
-
-  if (entityMatch) {
-    const rawEntity = entityMatch[1];
-    const entity = rawEntity.charAt(0).toUpperCase() + rawEntity.slice(1);
-
-    const modelFile = `src/sandbox/models/${entity}.ts`;
-    const typeFile = `src/sandbox/types/${entity.toLowerCase()}Types.ts`;
-    const repoFile = `src/sandbox/repositories/${entity}Repository.ts`;
-    const serviceFile = `src/sandbox/services/${entity}Service.ts`;
-    const controllerFile = `src/sandbox/controllers/${entity}Controller.ts`;
-    const testFile = `src/sandbox/tests/${entity}Service.test.ts`;
-
-    return [
-      {
-        id: 1,
-        targetFile: modelFile,
-        action: 'create',
-        isNewFile: !fs.existsSync(modelFile),
-        dependencies: [],
-        description: `Define core ${entity} domain data model structure, properties, and interface contracts`,
-        status: 'pending'
-      },
-      {
-        id: 2,
-        targetFile: typeFile,
-        action: 'create',
-        isNewFile: !fs.existsSync(typeFile),
-        dependencies: [modelFile],
-        description: `Create shared TypeScript types, enums, status codes, and error definitions for ${entity} management`,
-        status: 'pending'
-      },
-      {
-        id: 3,
-        targetFile: repoFile,
-        action: 'create',
-        isNewFile: !fs.existsSync(repoFile),
-        dependencies: [modelFile, typeFile],
-        description: `Implement ${entity}Repository for data storage operations, queries, and persistence management`,
-        status: 'pending'
-      },
-      {
-        id: 4,
-        targetFile: serviceFile,
-        action: 'create',
-        isNewFile: !fs.existsSync(serviceFile),
-        dependencies: [repoFile],
-        description: `Implement ${entity}Service containing core business logic, validation rules, and operations`,
-        status: 'pending'
-      },
-      {
-        id: 5,
-        targetFile: controllerFile,
-        action: 'create',
-        isNewFile: !fs.existsSync(controllerFile),
-        dependencies: [serviceFile],
-        description: `Implement ${entity}Controller route handlers and API request/response processing`,
-        status: 'pending'
-      },
-      {
-        id: 6,
-        targetFile: testFile,
-        action: 'test',
-        isNewFile: !fs.existsSync(testFile),
-        dependencies: [serviceFile],
-        description: `Implement ${entity}Service automated unit tests verifying business logic and edge cases`,
-        status: 'pending'
-      }
-    ];
-  }
-
-  const steps: PlanStep[] = [];
-  const normalizedTargets = targetFiles.length > 0 ? targetFiles.map(normalizeSandboxPath) : ['src/sandbox/main.ts'];
-
-  for (let idx = 0; idx < normalizedTargets.length; idx++) {
-    const tf = normalizedTargets[idx];
-    const isTest = tf.includes('/tests/') || tf.includes('.test.') || tf.includes('/test_') || tf.startsWith('src/sandbox/test_');
-    const ext = path.extname(tf);
-    const fileName = path.basename(tf);
-
-    let desc = '';
-    if (isTest) {
-      if (ext === '.py') {
-        desc = `Create pytest automated unit tests in ${fileName} to verify implementation`;
-      } else {
-        desc = `Create automated unit tests in ${fileName} to verify module logic`;
-      }
-    } else {
-      if (queryLower.includes('divide')) {
-        desc = `Implement function divide(a, b) returning a / b in ${fileName}`;
-      } else {
-        desc = `Implement core functionality and exported symbols in ${fileName} for request: "${userQuery.slice(0, 60)}"`;
-      }
-    }
-
-    steps.push({
-      id: idx + 1,
-      targetFile: tf,
-      action: !fs.existsSync(tf) ? 'create' : (isTest ? 'test' : 'modify'),
-      isNewFile: !fs.existsSync(tf),
-      dependencies: idx > 0 ? [normalizedTargets[idx - 1]] : [],
-      description: desc,
-      status: 'pending'
-    });
-  }
-
-  return steps;
 }

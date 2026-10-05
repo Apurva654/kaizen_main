@@ -9,7 +9,6 @@ export function verifyImplementation() {
   const filesToCheck = [
     'src/tools/universalValidator.ts',
     'src/tools/testRunner.ts',
-    'src/tools/comprehensiveTestRunner.ts',
   ];
 
   filesToCheck.forEach(file => {
