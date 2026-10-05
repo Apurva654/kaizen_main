@@ -1,0 +1,82 @@
+/* Basic styling for the Travel Explorer site */
+body {
+  margin: 0;
+  font-family: Arial, Helvetica, sans-serif;
+  line-height: 1.6;
+  background-color: #f4f4f4;
+  color: #333;
+}
+
+header {
+  background: #35424a;
+  color: #fff;
+  padding: 20px 0;
+  text-align: center;
+}
+
+header nav a {
+  color: #fff;
+  margin: 0 15px;
+  text-decoration: none;
+  font-weight: bold;
+}
+
+#hero {
+  background: url('https://via.placeholder.com/1200x400') no-repeat center center/cover;
+  color: #fff;
+  padding: 100px 20px;
+  text-align: center;
+}
+
+section {
+  padding: 20px;
+  margin: 10px auto;
+  max-width: 1000px;
+  background: #fff;
+  border-radius: 5px;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+}
+
+.cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 15px;
+  justify-content: center;
+}
+
+.card {
+  background: #e2e2e2;
+  border-radius: 5px;
+  overflow: hidden;
+  width: 150px;
+  text-align: center;
+}
+
+.card img {
+  width: 100%;
+  height: auto;
+}
+
+#contactForm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 400px;
+  margin: auto;
+}
+
+#contactForm input, #contactForm button {
+  padding: 10px;
+  font-size: 1rem;
+}
+
+#contactForm button {
+  background: #35424a;
+  color: #fff;
+  border: none;
+  cursor: pointer;
+}
+
+#contactForm button:hover {
+  background: #45a049;
+}

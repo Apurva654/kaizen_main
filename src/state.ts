@@ -13,10 +13,25 @@ export interface PlanStep {
   appliedPatch?: boolean;
   userApprovedFile?: boolean;
   patchId?: string;
+  planVersion?: number;
 }
-
 export const KaizenState = Annotation.Root({
   sessionId: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
+
+  planAttempt: Annotation<number>({
+    reducer: (_, y) => y,
+    default: () => 0
+  }),
+
+  rejectedPlans: Annotation<string[]>({
+    reducer: (_, y) => y,
+    default: () => []
+  }),
+
+  planFailureReason: Annotation<string | undefined>({
     reducer: (_, y) => y,
     default: () => undefined
   }),
@@ -61,14 +76,12 @@ export const KaizenState = Annotation.Root({
   plan: Annotation<PlanStep[]>({
     reducer: (x, y) => {
       if (!x.length) return y;
+      if (y.length && y[0].planVersion !== undefined && y[0].planVersion !== x[0]?.planVersion) return y;
       const merged = [...x];
       for (const updatedStep of y) {
         const idx = merged.findIndex(s => s.id === updatedStep.id);
-        if (idx !== -1) {
-          merged[idx] = { ...merged[idx], ...updatedStep };
-        } else {
-          merged.push(updatedStep);
-        }
+        if (idx !== -1) merged[idx] = { ...merged[idx], ...updatedStep };
+        else merged.push(updatedStep);
       }
       return merged;
     },

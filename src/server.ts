@@ -534,6 +534,9 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
     extractedContext: "",
     plan: [],
     planApprovalStatus: 'NONE',
+    planAttempt: 0,
+    rejectedPlans: [],
+    planFailureReason: undefined,
     generatedPatch: "",
     choices: [],
     retryCount: 0,
@@ -1281,6 +1284,8 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
       emitSSE('hitl_received', { response: userHitlResponse });
 
       while (userHitlResponse.action === 'reject') {
+        state.planApprovalStatus = 'REJECTED';
+        state.rejectionReason = userHitlResponse.message || undefined;
         state.retryCount = (state.retryCount || 0) + 1;
         if (state.retryCount <= 3) {
           emitSSE('agent_step', {
@@ -1288,9 +1293,11 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
             status: 'running',
             message: `[Attempt #${state.retryCount}] User rejected plan. Re-planning alternative approach...`
           });
-          state.userInput = `${state.originalUserRequest || state.userInput} (Previous plan rejected by user. Generate an alternative refined plan)`;
           const updatedPlannerOutput = await plannerAgentNode(state);
           state.plan = updatedPlannerOutput.plan || state.plan;
+          if (updatedPlannerOutput.planAttempt !== undefined) state.planAttempt = updatedPlannerOutput.planAttempt;
+          if (updatedPlannerOutput.rejectedPlans !== undefined) state.rejectedPlans = updatedPlannerOutput.rejectedPlans;
+          if (updatedPlannerOutput.rejectionReason !== undefined) state.rejectionReason = updatedPlannerOutput.rejectionReason as string | undefined;
 
           emitSSE('hitl_request', {
             type: 'PLAN_APPROVAL',
@@ -1316,10 +1323,13 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
 
       if (userHitlResponse.action === 'feedback' && userHitlResponse.message) {
         state.planApprovalStatus = 'FEEDBACK_SUBMITTED';
+        state.rejectionReason = userHitlResponse.message;
         emitSSE('agent_step', { agent: 'PlannerAgent', status: 'running', message: 'Updating plan with user feedback...' });
-        state.userInput = `${state.originalUserRequest || state.userInput} (User plan feedback: ${userHitlResponse.message})`;
         const updatedPlannerOutput = await plannerAgentNode(state);
         state.plan = updatedPlannerOutput.plan || state.plan;
+        if (updatedPlannerOutput.planAttempt !== undefined) state.planAttempt = updatedPlannerOutput.planAttempt;
+        if (updatedPlannerOutput.rejectedPlans !== undefined) state.rejectedPlans = updatedPlannerOutput.rejectedPlans;
+        if (updatedPlannerOutput.rejectionReason !== undefined) state.rejectionReason = updatedPlannerOutput.rejectionReason as string | undefined;
         persistenceEngine.saveCheckpoint(sessionId, 'PlannerAgent_Feedback', state);
 
         emitSSE('agent_step', {

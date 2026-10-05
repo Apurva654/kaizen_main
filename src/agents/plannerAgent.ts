@@ -45,6 +45,10 @@ export const PlannerSchema = z.object({
   plan: z.array(StepItemSchema).optional().describe("List of detailed sequential implementation steps")
 });
 
+function summarizePlan(plan: import('../state').PlanStep[]): string {
+  return plan.map(s => `[${s.targetFile}] ${s.description}`).join(' | ');
+}
+
 function extractSymbolsFromWorkspace(targetFiles: string[], extractedContext: string, astParser: ASTParserTool): ExtractedSymbol[] {
   const symbols: ExtractedSymbol[] = [];
   const seenNames = new Set<string>();
@@ -93,6 +97,15 @@ export async function plannerAgentNode(state: typeof KaizenState.State) {
   const cleanUserQuery = state.originalUserRequest || state.userInput || "";
   const stateTargets = state.targetFiles || [];
   const extractedCtx = state.extractedContext || "";
+
+  // Collect previously rejected plans for context
+  const attempt = state.planAttempt ?? 0;
+  const rejected: string[] = [...(state.rejectedPlans ?? [])];
+  const wasRejected =
+    state.planApprovalStatus === 'REJECTED' || state.planApprovalStatus === 'FEEDBACK_SUBMITTED';
+  if (wasRejected && state.plan?.length) {
+    rejected.push(summarizePlan(state.plan));
+  }
 
   const isWebReq = /\b(html|website|webpage|landing\s+page|web|frontend)\b/i.test(cleanUserQuery) ||
     stateTargets.some(f => f.endsWith('.html'));
@@ -156,6 +169,12 @@ Construct a grounded, step-by-step implementation plan for the user request. Res
 
 === ORIGINAL USER REQUEST ===
 ${cleanUserQuery}
+${state.rejectionReason ? `
+USER FEEDBACK ON THE REJECTED PLAN:
+${state.rejectionReason}` : ''}
+${rejected.length > 0 ? `
+=== PREVIOUSLY REJECTED PLANS (DO NOT REPEAT THESE) ===
+${rejected.map((r, i) => `[Attempt ${i + 1}]: ${r}`).join('\n')}` : ''}
 
 === WORKSPACE CONTEXT ===
 Target Directory: src/sandbox/
@@ -281,6 +300,7 @@ ${(state.extractedContext || "No context provided.").slice(-4000)}
             const actionType = step.isNewFile ? 'create' : (step.targetFile.includes('/tests/') || step.targetFile.includes('.test.') ? 'test' : 'modify');
             return {
               id: step.id,
+              planVersion: attempt + 1,
               targetFile: step.targetFile,
               language: state.requestedLanguage,
               action: actionType,
@@ -300,7 +320,10 @@ ${(state.extractedContext || "No context provided.").slice(-4000)}
           return {
             plan: validatedPlan,
             targetFiles: Array.from(new Set(validatedPlan.map(s => s.targetFile!))),
-            status: validatedPlan.some(s => s.status === 'failed') ? "SECURITY_VIOLATION_BLOCKED" : "PLANNED"
+            status: validatedPlan.some(s => s.status === 'failed') ? "SECURITY_VIOLATION_BLOCKED" : "PLANNED",
+            planAttempt: attempt + 1,
+            rejectedPlans: rejected,
+            rejectionReason: undefined
           };
         }
       }
