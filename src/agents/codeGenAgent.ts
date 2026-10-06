@@ -47,10 +47,10 @@ export const CodeGenSchema = z.object({
 });
 
 const PROTECTED_PATTERNS = [
-  /\.env($|\.)/, 
-  /package-lock\.json$/, 
-  /\.git\//, 
-  /\.vscode\//, 
+  /\.env($|\.)/,
+  /package-lock\.json$/,
+  /\.git\//,
+  /\.vscode\//,
   /node_modules\//,
   /src\/index\.ts$/,
   /src\/state\.ts$/,
@@ -58,6 +58,14 @@ const PROTECTED_PATTERNS = [
   /src\/graph\//,
   /src\/tools\//
 ];
+
+// FIX #4: files that are legitimately empty
+const EMPTY_ALLOWED_FILES = new Set(['__init__.py', '.gitkeep']);
+
+function isEmptyAllowed(filePath: string): boolean {
+  const base = filePath.replace(/\\/g, '/').split('/').pop() || '';
+  return EMPTY_ALLOWED_FILES.has(base);
+}
 
 export function isProtectedFile(filePath: string): boolean {
   if (!filePath) return true;
@@ -81,12 +89,15 @@ export function verifyFileWasWritten(filePath: string): boolean {
       return false;
     }
     const stat = fs.statSync(filePath);
-    if (stat.size === 0) {
+    if (stat.size === 0 && !isEmptyAllowed(filePath)) {
       console.warn(`[FileVerification] File is empty: ${filePath}`);
       return false;
     }
     const content = fs.readFileSync(filePath, 'utf-8');
-    if (content.includes('// File not found:') || content.includes('# File not found:')) {
+    // FIX #4: only treat it as an error placeholder if the FILE STARTS with the marker,
+    // so real code containing that comment (404 handlers, fixtures) is not rejected.
+    const head = content.trimStart();
+    if (head.startsWith('// File not found:') || head.startsWith('# File not found:')) {
       console.error(`[FileVerification] File contains error marker: ${filePath}`);
       return false;
     }
@@ -100,8 +111,8 @@ export function verifyFileWasWritten(filePath: string): boolean {
 export function sanitizeCodePatch(code: string, _filePath?: string): string {
   if (!code) return '\n';
   let clean = code.trim();
-  clean = clean.replace(/^```[a-zA-Z0-9_-]*\r?\n/, '');
-  clean = clean.replace(/\r?\n```$/, '');
+  clean = clean.replace(/^```[a-zA-Z0-9_+.-]*[ \t]*\r?\n/, '');
+  clean = clean.replace(/\r?\n[ \t]*```$/, '');
   clean = clean.trim();
   return clean + '\n';
 }
@@ -124,7 +135,7 @@ export function saveFilePatchesToServerDiskWithVerification(
     try {
       const fullPath = path.resolve(process.cwd(), patch.filePath);
       const dir = path.dirname(fullPath);
-      
+
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
@@ -149,21 +160,30 @@ export function saveFilePatchesToServerDiskWithVerification(
   return { successCount, failedFiles, verifiedPaths };
 }
 
-export async function codeGenAgentNode(state: typeof KaizenState.State) {
+export async function codeGenAgentNode(
+  state: typeof KaizenState.State,
+  emitSSE?: (eventType: string, data: any) => void
+) {
   const cleanUserQuery = state.originalUserRequest || state.userInput || "";
-  const planSteps = state.plan || [];
+  // FIX #6: always process steps in plan order
+  const planSteps = [...(state.plan || [])].sort((a, b) => a.id - b.id);
 
+  // FIX #1: the approved plan is the source of truth for target files.
+  // state.targetFiles accumulates across rejected attempts (Set union reducer), so it is
+  // only used as a fallback when there is no plan at all.
   const rawTargetFiles = new Set<string>();
-  (state.targetFiles || []).forEach(f => {
-    const norm = normalizeSandboxPath(f);
-    if (norm) rawTargetFiles.add(norm);
-  });
   planSteps.forEach(step => {
     if (step.targetFile) {
       const norm = normalizeSandboxPath(step.targetFile);
       if (norm) rawTargetFiles.add(norm);
     }
   });
+  if (rawTargetFiles.size === 0) {
+    (state.targetFiles || []).forEach(f => {
+      const norm = normalizeSandboxPath(f);
+      if (norm) rawTargetFiles.add(norm);
+    });
+  }
 
   const targetFiles = Array.from(rawTargetFiles);
   if (targetFiles.length === 0) {
@@ -204,19 +224,40 @@ STRICT CODE GENERATION RULES:
 1. Return complete, fully-functional code for EVERY file in targetFiles. Do NOT omit any file.
 2. Maintain existing interfaces, imports, and functions unless the plan explicitly requests modifying them.
 3. Output clean code without markdown backtick wrappers inside the json code property.
-4. Ensure code passes syntax validation for each file's specific programming language.`;
+4. Ensure code passes syntax validation for each file's specific programming language.
+5. When several plan steps target the same file, apply them IN ORDER (lowest step number first) and return ONE final file that contains the combined result of all of them.`;
 
   const approvedPlanSummary = planSteps
-    .map(s => `Step ${s.id} [${s.targetFile}]: (${s.action}) ${s.description}`)
+    .map(s => {
+      const deps = s.dependencies && s.dependencies.length > 0 ? ` depends on: ${s.dependencies.join(', ')}` : '';
+      return `Step ${s.id} [${s.targetFile}]: (${s.action}) ${s.description}${deps}`;
+    })
+    .join('\n');
+
+  // FIX #6: per-file ordered view so multiple steps on one file are not skipped
+  const stepsPerFile = targetFiles
+    .map(tf => {
+      const steps = planSteps.filter(s => normalizeSandboxPath(s.targetFile || '') === tf);
+      if (steps.length <= 1) return '';
+      return `${tf}: apply steps ${steps.map(s => `#${s.id} (${s.action})`).join(' -> ')} in this order`;
+    })
+    .filter(Boolean)
     .join('\n');
 
   const userPromptBaseParts = [
     `USER REQUEST:\n${cleanUserQuery}`,
     `APPROVED PLAN:\n${approvedPlanSummary || 'None specified'}`,
     `TARGET FILES TO GENERATE/UPDATE:\n${targetFiles.join(', ')}`,
+  ];
+
+  if (stepsPerFile) {
+    userPromptBaseParts.push(`MULTI-STEP FILES (combine into one final file each):\n${stepsPerFile}`);
+  }
+
+  userPromptBaseParts.push(
     `TARGET FILES CURRENT CONTENT:\n${fileContexts.join('\n\n')}`,
     `RETRIEVED CONTEXT:\n${(state.extractedContext || '').slice(-3000)}`
-  ];
+  );
 
   if (state.retryCount && state.retryCount > 0) {
     userPromptBaseParts.push(`NOTE: This is retry attempt #${state.retryCount}. Fix any previous syntax or logic errors.`);
@@ -263,12 +304,15 @@ STRICT CODE GENERATION RULES:
               return `Generated file '${normPath}' is a protected file.`;
             }
 
-            if (!patch.code || patch.code.trim().length === 0) {
+            if ((!patch.code || patch.code.trim().length === 0) && !isEmptyAllowed(normPath)) {
               return `Generated code for file '${normPath}' is empty.`;
             }
 
+            // FIX #3: validate the SAME sanitized text that will be written to disk,
+            // so stray markdown fences don't cause false syntax failures.
+            const cleanedCode = sanitizeCodePatch(patch.code, normPath);
             const ext = normPath.split('.').pop()?.toLowerCase() || '';
-            const syntaxCheck = validateCodeSyntax(patch.code, ext, normPath);
+            const syntaxCheck = validateCodeSyntax(cleanedCode, ext, normPath);
             if (!syntaxCheck.isValid) {
               return `Syntax validation failed for '${normPath}': ${syntaxCheck.error}`;
             }
@@ -301,19 +345,38 @@ STRICT CODE GENERATION RULES:
     };
   });
 
-  saveFilePatchesToServerDiskWithVerification(filePatches);
+  // FIX #2: actually use the write/verification result
+  const writeResult = saveFilePatchesToServerDiskWithVerification(filePatches, emitSSE);
 
-  const generatedFilePaths = new Set(filePatches.map(f => f.filePath));
+  if (writeResult.failedFiles.length > 0) {
+    return {
+      status: 'CODE_GEN_FAILED',
+      generationFailureReason: `Failed to write or verify files on disk: ${writeResult.failedFiles.join(', ')}`
+    };
+  }
+
+  // Only steps whose file was verified on disk are marked completed; others are failed
+  const verifiedPaths = new Set(writeResult.verifiedPaths);
   const updatedPlan = planSteps.map(step => {
-    if (step.targetFile && generatedFilePaths.has(normalizeSandboxPath(step.targetFile))) {
-      return { ...step, status: 'completed' as const };
+    if (step.targetFile) {
+      const norm = normalizeSandboxPath(step.targetFile);
+      if (verifiedPaths.has(norm)) {
+        return { ...step, status: 'completed' as const };
+      }
+      return { ...step, status: 'failed' as const };
     }
     return step;
   });
 
+  // FIX #5: keep every file in generatedPatch for single-patch consumers
+  // (single file => raw code, same as before; multiple files => labelled sections)
+  const generatedPatch = filePatches.length === 1
+    ? filePatches[0].code
+    : filePatches.map(f => `// ===== FILE: ${f.filePath} =====\n${f.code}`).join('\n');
+
   return {
     filePatches,
-    generatedPatch: filePatches[0]?.code || '',
+    generatedPatch,
     generationSource: 'llm',
     extractedContext: `${state.extractedContext || ''}\n\nGenerated files:\n${filePatches.map(f => `[${f.filePath}]: ${f.code.slice(0, 150)}...`).join('\n')}`,
     plan: updatedPlan,

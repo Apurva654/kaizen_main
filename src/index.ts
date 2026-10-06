@@ -2,7 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
 import { KaizenStateType } from './state';
-import { intentAgentNode, extractGitActions } from './agents/intentAgent';
+import { intentAgentNode, extractGitActions, extractTerminalCommand } from './agents/intentAgent';
+import { permissionGate } from './tools/permissionGate';
 import { contextRetrievalAgentNode } from './agents/contextRetrievalAgent';
 import { plannerAgentNode } from './agents/plannerAgent';
 import { codeGenAgentNode, isProtectedFile } from './agents/codeGenAgent';
@@ -10,6 +11,7 @@ import { reviewerAgentNode } from './agents/reviewerAgent';
 import { debuggerAgentNode } from './agents/debuggerAgent';
 import { persistenceEngine } from './tools/persistenceEngine';
 import { memoryEngine } from './context/memory/memoryEngine';
+import { runWorkspaceTests } from './tools/testRunner';
 
 function promptUserApproval(questionText: string): Promise<string> {
   const rl = readline.createInterface({
@@ -49,6 +51,7 @@ async function executeAgentPipeline(userInput: string) {
     rejectedPlans: [],
     planFailureReason: undefined,
     generatedPatch: "",
+    filePatches: [],
     choices: [],
     retryCount: 0,
     status: "INITIALIZED",
@@ -96,8 +99,24 @@ async function executeAgentPipeline(userInput: string) {
     const actions = extractGitActions(state.userInput);
 
     for (const act of actions) {
-      const res = await mcpInterface.executeGitAction(act);
-      console.log(`\n--- Git ${act.toUpperCase()} Output ---`);
+      const evalResult = permissionGate.evaluate(`git_${act}`, { command: `git ${act}` });
+      let isApproved = true;
+
+      if (evalResult.requiresApproval && !evalResult.allowed) {
+        console.log(`\n⚠️ [PermissionGate] Git ${act.toUpperCase()} intercepted (Risk Score: ${evalResult.riskScore}/100)`);
+        console.log(`Reason: ${evalResult.reason}`);
+        const answer = await promptUserApproval(`Approve execution of 'git ${act}'? (y/N): `);
+        isApproved = answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes';
+        if (!isApproved) {
+          console.log(`❌ Permission denied by user for 'git ${act}'.`);
+        }
+      }
+
+      const res = await mcpInterface.executeGitAction(act, state.userInput, {
+        dryRun: permissionGate.isDryRunMode(),
+        approved: isApproved
+      });
+      console.log(`\n--- Git ${act.toUpperCase()} Output (${res.isSimulated ? 'SIMULATED' : (res.success ? 'EXECUTED' : 'BLOCKED')}) ---`);
       console.log(res.output || res.error || '(clean output)');
     }
     return;
@@ -106,8 +125,29 @@ async function executeAgentPipeline(userInput: string) {
   if (state.status === "ROUTED_MCP_TERMINAL") {
     console.log("\n-> Executing MCP Terminal operation...");
     const { mcpInterface } = await import('./mcp/mcpInterface');
-    const res = await mcpInterface.executeTerminalCommand(state.userInput);
-    console.log(`\n--- Terminal Execution Output ---`);
+    const command = extractTerminalCommand(state.userInput) || state.userInput;
+    const evalResult = permissionGate.evaluate('terminal_exec', { command });
+    let isApproved = true;
+
+    if (evalResult.requiresApproval && !evalResult.allowed) {
+      console.log(`\n⚠️ [PermissionGate] Terminal execution intercepted (Risk Score: ${evalResult.riskScore}/100)`);
+      console.log(`Command: ${command}`);
+      console.log(`Reason: ${evalResult.reason}`);
+      const answer = await promptUserApproval(`Approve execution of '${command}'? (y/N): `);
+      isApproved = answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes';
+      if (!isApproved) {
+        console.log(`❌ Permission denied by user for command '${command}'.`);
+      }
+    }
+
+    const isSimulatedPrompt = /\b(simulat|dry-run|dry run|fake|mock|permission gate)\b/i.test(state.userInput);
+    const isDryRun = permissionGate.isDryRunMode() || isSimulatedPrompt;
+
+    const res = await mcpInterface.executeTerminalCommand(command, process.cwd(), {
+      dryRun: isDryRun,
+      approved: isApproved
+    });
+    console.log(`\n--- Terminal Execution Output (${res.isSimulated ? 'SIMULATED' : (res.success ? 'EXECUTED' : 'BLOCKED')}) ---`);
     console.log(res.output || res.error || '(clean output)');
     return;
   }
@@ -167,7 +207,7 @@ async function executeAgentPipeline(userInput: string) {
     console.log("\n-> Running Planner Agent...");
     const plannerOutput = await plannerAgentNode(state);
     console.log(`Planner Status: ${plannerOutput.status}`);
-    if (plannerOutput.status === 'PLAN_FAILED' || plannerOutput.status === 'PLAN_RETRY_LIMIT') {
+    if (plannerOutput.status === 'SECURITY_VIOLATION_BLOCKED' || plannerOutput.status === 'PLAN_FAILED' || plannerOutput.status === 'PLAN_RETRY_LIMIT') {
       console.error(`Plan Generation Failed: ${plannerOutput.planFailureReason}`);
       return;
     }
@@ -202,7 +242,7 @@ async function executeAgentPipeline(userInput: string) {
       state.userInput = `${state.userInput} (User plan feedback: ${answer})`;
       const updatedPlannerOutput = await plannerAgentNode(state);
       console.log(`Updated Planner Status: ${updatedPlannerOutput.status}`);
-      if (updatedPlannerOutput.status === 'PLAN_FAILED' || updatedPlannerOutput.status === 'PLAN_RETRY_LIMIT') {
+      if (updatedPlannerOutput.status === 'SECURITY_VIOLATION_BLOCKED' || updatedPlannerOutput.status === 'PLAN_FAILED' || updatedPlannerOutput.status === 'PLAN_RETRY_LIMIT') {
         console.error(`Plan Generation Failed: ${updatedPlannerOutput.planFailureReason}`);
         return;
       }
@@ -348,6 +388,12 @@ async function executeAgentPipeline(userInput: string) {
       }
     } else if (state.retryCount > 0) {
       console.log(`\n[Self-Healing Success]: Code successfully revised and APPROVED by Reviewer Agent after ${state.retryCount} retry attempt(s)!`);
+    }
+
+    if (reviewResult.approved) {
+      console.log(`\n-> Running Workspace Tests...`);
+      const testResult = await runWorkspaceTests(state.targetFiles);
+      console.log(`Test Execution Result: ${testResult.summary}`);
     }
 
     return;

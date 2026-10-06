@@ -4,17 +4,26 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { KaizenState, PlanStep } from '../state';
 import { ASTParserTool, ExtractedSymbol } from '../tools/astParser';
-import { isProtectedFile } from './codeGenAgent';
+import { isProtectedFile } from '../tools/sandboxPathUtils';
 import { runStructured } from '../tools/llmRunner';
 
 dotenv.config();
 
+// FIX #5: resolves leading slashes, duplicate slashes and rejects any '..' segment
+// (sandbox escape). Returns '' for invalid paths; callers already treat '' as invalid
+// (isProtectedFile('') === true, and callers filter with Boolean).
 export function normalizeSandboxPath(pathStr: string): string {
   if (!pathStr) return '';
   let norm = pathStr.replace(/\\/g, '/').trim();
-  norm = norm.replace(/^\.\//, '');
+  norm = norm.replace(/^(\.\/)+/, '');
+  norm = norm.replace(/^\/+/, '');
+  if (norm.split('/').includes('..')) return '';
+  norm = path.posix.normalize(norm);
+  if (!norm || norm === '.') return '';
   if (!norm.startsWith('src/sandbox/')) {
-    if (norm.startsWith('src/')) {
+    if (norm.startsWith('sandbox/')) {
+      norm = `src/${norm}`;
+    } else if (norm.startsWith('src/')) {
       norm = norm.replace(/^src\//, 'src/sandbox/');
     } else {
       norm = `src/sandbox/${norm}`;
@@ -23,8 +32,10 @@ export function normalizeSandboxPath(pathStr: string): string {
   return norm;
 }
 
+// FIX #3: min(30) was a hard Zod failure for concise-but-valid steps. Keep a small floor
+// in the schema; the "be specific" requirement stays in the prompt.
 export const PlannerStepSchema = z.object({
-  description: z.string().min(30).describe("Specific, actionable step description naming specific functions, classes, or code sections"),
+  description: z.string().min(10).describe("Specific, actionable step description naming specific functions, classes, or code sections"),
   targetFile: z.string().describe("Target source file path under src/sandbox/..."),
   action: z.enum(['create', 'modify', 'test']).describe("Action type"),
   dependsOn: z.array(z.number()).optional().describe("1-indexed step numbers this step depends on")
@@ -84,9 +95,18 @@ function extractSymbolsFromWorkspace(targetFiles: string[], extractedContext: st
   return symbols;
 }
 
+// FIX #2: boilerplate words that every plan shares. They inflated Jaccard similarity
+// and made genuinely different plans look identical.
+const SIMILARITY_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'then', 'will', 'all',
+  'src', 'sandbox', 'implement', 'export', 'exports', 'create', 'modify', 'update', 'add',
+  'file', 'files', 'function', 'functions', 'class', 'classes', 'method', 'code', 'new',
+  'test', 'tests', 'using', 'use', 'make', 'ensure'
+]);
+
 function extractTokens(text: string): Set<string> {
   const words = text.toLowerCase().replace(/[^a-z0-9]/g, ' ').split(/\s+/);
-  return new Set(words.filter(w => w.length > 2));
+  return new Set(words.filter(w => w.length > 2 && !SIMILARITY_STOPWORDS.has(w)));
 }
 
 function computeJaccardSimilarity(text1: string, text2: string): number {
@@ -101,6 +121,24 @@ function computeJaccardSimilarity(text1: string, text2: string): number {
   }
   const unionSize = set1.size + set2.size - intersectionSize;
   return unionSize === 0 ? 0 : intersectionSize / unionSize;
+}
+
+// Splits a "[file] description | [file] description" summary into files + description text
+function parsePlanSummary(summary: string): { files: Set<string>; text: string } {
+  const files = new Set<string>();
+  for (const m of summary.matchAll(/\[([^\]]+)\]/g)) {
+    files.add(m[1].trim());
+  }
+  const text = summary.replace(/\[[^\]]*\]/g, ' ');
+  return { files, text };
+}
+
+function sameFileSet(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const f of a) {
+    if (!b.has(f)) return false;
+  }
+  return true;
 }
 
 export async function plannerAgentNode(state: typeof KaizenState.State) {
@@ -161,7 +199,7 @@ STRICT ARCHITECTURAL RULES:
 2. You select the exact file layout and filenames (hint files are suggestions only).
 3. Do NOT include extra test files, CSS, HTML, or mock models unless specifically requested or necessary for the execution.
 4. Small or focused requests MUST be decomposed into 1 to 3 steps max.
-5. Each step's 'description' MUST be at least 30 characters long, naming specific functions, classes, or code sections to create/modify.
+5. Each step's 'description' should be specific (aim for 30+ characters), naming the functions, classes, or code sections to create/modify.
 6. NEVER restate the user request verbatim in step descriptions or say "implement requested functionality".
 
 Return a structured JSON output with 'approach' and 'steps'.`;
@@ -174,7 +212,7 @@ Return a structured JSON output with 'approach' and 'steps'.`;
       try {
         const content = fs.readFileSync(fullPath, 'utf-8').slice(0, 4000);
         existingFilesContent.push(`--- FILE: ${targetPath} ---\n${content}`);
-      } catch {}
+      } catch { }
     }
   }
 
@@ -214,25 +252,36 @@ Return a structured JSON output with 'approach' and 'steps'.`;
       temperature,
       timeoutMs: 30000,
       validate: (planRes) => {
-        // Check for verbatim request restatement
+        // FIX #1: only reject a step that is (near) identical to the request,
+        // not one that merely contains the request phrase.
         if (cleanUserQuery.length > 20) {
-          const lowerReq = cleanUserQuery.toLowerCase();
+          const lowerReq = cleanUserQuery.toLowerCase().replace(/\s+/g, ' ').trim();
           for (const step of planRes.steps) {
-            if (step.description.toLowerCase().includes(lowerReq)) {
+            const lowerDesc = step.description.toLowerCase().replace(/\s+/g, ' ').trim();
+            const isExact = lowerDesc === lowerReq;
+            const isNearCopy = computeJaccardSimilarity(lowerDesc, lowerReq) >= 0.9;
+            if (isExact || isNearCopy) {
               return `Step description restates the user request verbatim: "${step.description}"`;
             }
           }
         }
 
-        // Check Jaccard similarity against rejected plans
+        // Check similarity against rejected plans
         const candidateSummary = planRes.steps
           .map(s => `[${normalizeSandboxPath(s.targetFile)}] ${s.description}`)
           .join(' | ');
+        const candidate = parsePlanSummary(candidateSummary);
 
         for (const rejectedPlan of rejectedPlans) {
-          const sim = computeJaccardSimilarity(candidateSummary, rejectedPlan);
-          if (sim > 0.7) {
-            return `Candidate plan is too similar (Jaccard similarity ${sim.toFixed(2)} > 0.7) to a previously rejected plan: "${rejectedPlan}"`;
+          const rejected = parsePlanSummary(rejectedPlan);
+
+          // A different file layout is a legitimately different plan
+          if (!sameFileSet(candidate.files, rejected.files)) continue;
+
+          // Compare descriptions only (paths removed, boilerplate words ignored)
+          const sim = computeJaccardSimilarity(candidate.text, rejected.text);
+          if (sim > 0.75) {
+            return `Candidate plan is too similar (Jaccard similarity ${sim.toFixed(2)} > 0.75) to a previously rejected plan: "${rejectedPlan}"`;
           }
         }
 
@@ -244,8 +293,8 @@ Return a structured JSON output with 'approach' and 'steps'.`;
     const planSteps: PlanStep[] = rawSteps.map((step, idx) => {
       const normTarget = normalizeSandboxPath(step.targetFile);
       const isBlocked = isProtectedFile(normTarget);
-      const fullPath = path.resolve(process.cwd(), normTarget);
-      const isNew = !fs.existsSync(fullPath);
+      const fullPath = normTarget ? path.resolve(process.cwd(), normTarget) : '';
+      const isNew = !fullPath || !fs.existsSync(fullPath);
       const stepDeps = (step.dependsOn || [])
         .map(depIdx => rawSteps[depIdx - 1]?.targetFile)
         .filter((tf): tf is string => Boolean(tf))
@@ -265,7 +314,7 @@ Return a structured JSON output with 'approach' and 'steps'.`;
     });
 
     const anyFailed = planSteps.some(s => s.status === 'failed');
-    const uniqueTargetFiles = Array.from(new Set(planSteps.map(s => s.targetFile)));
+    const uniqueTargetFiles = Array.from(new Set(planSteps.map(s => s.targetFile).filter(Boolean)));
 
     return {
       plan: planSteps,

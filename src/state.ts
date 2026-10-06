@@ -64,7 +64,7 @@ export const KaizenState = Annotation.Root({
   }),
 
   targetFiles: Annotation<string[]>({
-    reducer: (x, y) => Array.from(new Set([...x, ...y])),
+    reducer: (x, y) => y !== undefined ? y : x,
     default: () => []
   }),
 
@@ -85,6 +85,11 @@ export const KaizenState = Annotation.Root({
       }
       return merged;
     },
+    default: () => []
+  }),
+
+  filePatches: Annotation<Array<{ filePath: string; code: string; imports?: string[] }>>({
+    reducer: (x, y) => y !== undefined ? y : x,
     default: () => []
   }),
 

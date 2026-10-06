@@ -8,7 +8,7 @@ export interface RunStructuredOptions<S extends z.ZodTypeAny> {
   system: string;
   user: string;
   temperature?: number;
-  timeoutMs?: number; // default 30000
+  timeoutMs?: number; // default 8000
   models?: string[];
   validate?: (r: z.infer<S>) => string | null;
 }
@@ -17,7 +17,7 @@ export async function runStructured<S extends z.ZodTypeAny>(
   opts: RunStructuredOptions<S>
 ): Promise<{ result: z.infer<S>; model: string }> {
   const apiKey = process.env.GROQ_API_KEY;
-  const timeoutMs = opts.timeoutMs ?? 30000;
+  const timeoutMs = opts.timeoutMs ?? 8000;
   
   let modelList: string[] = [];
   if (opts.models && opts.models.length > 0) {
@@ -25,7 +25,17 @@ export async function runStructured<S extends z.ZodTypeAny>(
   } else if (process.env.GROQ_MODELS) {
     modelList = process.env.GROQ_MODELS.split(',').map(m => m.trim()).filter(Boolean);
   } else {
-    modelList = ['openai/gpt-oss-120b', 'llama-3.3-70b-versatile'];
+    modelList = [
+      'openai/gpt-oss-120b',
+      'openai/gpt-oss-20b',
+      'qwen/qwen3.8-27b',
+      'llama-3.3-70b-versatile',
+      'llama-3.1-8b-instant',
+      'llama3-70b-8192',
+      'llama3-8b-8192',
+      'qwen-2.5-coder-32b',
+      'deepseek-r1-distill-llama-70b'
+    ];
   }
 
   if (!apiKey) {

@@ -194,6 +194,7 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
       rejectedPlans: [],
       planFailureReason: undefined,
       generatedPatch: "",
+      filePatches: [],
       choices: [],
       retryCount: 0,
       status: "INITIALIZED",
@@ -812,7 +813,7 @@ ${factItemsMarkdown}
         if (plannerOutput.planAttempt !== undefined) state.planAttempt = plannerOutput.planAttempt;
         if (plannerOutput.rejectedPlans !== undefined) state.rejectedPlans = plannerOutput.rejectedPlans;
 
-        if (plannerOutput.status === 'PLAN_FAILED' || plannerOutput.status === 'PLAN_RETRY_LIMIT') {
+        if (plannerOutput.status === 'SECURITY_VIOLATION_BLOCKED' || plannerOutput.status === 'PLAN_FAILED' || plannerOutput.status === 'PLAN_RETRY_LIMIT') {
           state.planFailureReason = plannerOutput.planFailureReason;
           postWebviewEvent('AGENT_STEP', {
             agent: 'PlannerAgent',
@@ -863,7 +864,7 @@ ${factItemsMarkdown}
           if (updatedPlannerOutput.planAttempt !== undefined) state.planAttempt = updatedPlannerOutput.planAttempt;
           if (updatedPlannerOutput.rejectedPlans !== undefined) state.rejectedPlans = updatedPlannerOutput.rejectedPlans;
 
-          if (updatedPlannerOutput.status === 'PLAN_FAILED' || updatedPlannerOutput.status === 'PLAN_RETRY_LIMIT') {
+          if (updatedPlannerOutput.status === 'SECURITY_VIOLATION_BLOCKED' || updatedPlannerOutput.status === 'PLAN_FAILED' || updatedPlannerOutput.status === 'PLAN_RETRY_LIMIT') {
             state.status = updatedPlannerOutput.status;
             state.planFailureReason = updatedPlannerOutput.planFailureReason;
             postWebviewEvent('AGENT_STEP', {

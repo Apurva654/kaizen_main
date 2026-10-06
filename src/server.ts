@@ -12,7 +12,7 @@ import { intentAgentNode, extractTerminalCommand, extractGitActions, extractBrow
 import { contextRetrievalAgentNode } from './agents/contextRetrievalAgent';
 import { evaluateContextSufficiency } from './agents/contextSufficiencyAgent';
 import { plannerAgentNode } from './agents/plannerAgent';
-import { codeGenAgentNode, isProtectedFile, GeneratedFilePatch, saveFilePatchesToServerDiskWithVerification } from './agents/codeGenAgent';
+import { codeGenAgentNode, isProtectedFile, GeneratedFilePatch } from './agents/codeGenAgent';
 import { reviewerAgentNode } from './agents/reviewerAgent';
 import { debuggerAgentNode } from './agents/debuggerAgent';
 import { langfuseTracer } from './tools/langfuseTracer';
@@ -543,6 +543,7 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
     rejectedPlans: [],
     planFailureReason: undefined,
     generatedPatch: "",
+    filePatches: [],
     choices: [],
     retryCount: 0,
     status: "INITIALIZED",
@@ -1297,7 +1298,7 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
       if (plannerOutput.planAttempt !== undefined) state.planAttempt = plannerOutput.planAttempt;
       if (plannerOutput.rejectedPlans !== undefined) state.rejectedPlans = plannerOutput.rejectedPlans;
 
-      if (plannerOutput.status === 'PLAN_FAILED' || plannerOutput.status === 'PLAN_RETRY_LIMIT') {
+      if (plannerOutput.status === 'SECURITY_VIOLATION_BLOCKED' || plannerOutput.status === 'PLAN_FAILED' || plannerOutput.status === 'PLAN_RETRY_LIMIT') {
         state.planFailureReason = plannerOutput.planFailureReason;
         emitSSE('agent_step', {
           agent: 'PlannerAgent',
@@ -1354,7 +1355,7 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
           if (updatedPlannerOutput.rejectedPlans !== undefined) state.rejectedPlans = updatedPlannerOutput.rejectedPlans;
           if (updatedPlannerOutput.rejectionReason !== undefined) state.rejectionReason = updatedPlannerOutput.rejectionReason as string | undefined;
 
-          if (updatedPlannerOutput.status === 'PLAN_FAILED' || updatedPlannerOutput.status === 'PLAN_RETRY_LIMIT') {
+          if (updatedPlannerOutput.status === 'SECURITY_VIOLATION_BLOCKED' || updatedPlannerOutput.status === 'PLAN_FAILED' || updatedPlannerOutput.status === 'PLAN_RETRY_LIMIT') {
             state.status = updatedPlannerOutput.status;
             state.planFailureReason = updatedPlannerOutput.planFailureReason;
             emitSSE('agent_step', {
@@ -1402,7 +1403,7 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
         if (updatedPlannerOutput.rejectedPlans !== undefined) state.rejectedPlans = updatedPlannerOutput.rejectedPlans;
         if (updatedPlannerOutput.rejectionReason !== undefined) state.rejectionReason = updatedPlannerOutput.rejectionReason as string | undefined;
 
-        if (updatedPlannerOutput.status === 'PLAN_FAILED' || updatedPlannerOutput.status === 'PLAN_RETRY_LIMIT') {
+        if (updatedPlannerOutput.status === 'SECURITY_VIOLATION_BLOCKED' || updatedPlannerOutput.status === 'PLAN_FAILED' || updatedPlannerOutput.status === 'PLAN_RETRY_LIMIT') {
           state.status = updatedPlannerOutput.status;
           state.planFailureReason = updatedPlannerOutput.planFailureReason;
           emitSSE('agent_step', {
@@ -1433,7 +1434,7 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
       // 5. Coder Agent
       logDiagnostic('GRAPH', 'ENTER CoderAgent', {});
       emitSSE('agent_step', { agent: 'CoderAgent', status: 'running', message: 'Generating multi-file code patches...' });
-      let coderOutput = await codeGenAgentNode(state);
+      let coderOutput = await codeGenAgentNode(state, emitSSE);
 
       if (coderOutput.status === 'CODE_GEN_FAILED' || coderOutput.status === 'PREFLIGHT_SECURITY_BLOCKED') {
         state.status = coderOutput.status;
@@ -1457,18 +1458,51 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
 
       const diffCards = await prepareDiffCards(coderOutput.filePatches || []);
 
-      // Auto-persist verified patches to disk so tests can validate them
-      if (coderOutput.filePatches && coderOutput.filePatches.length > 0) {
-        saveFilePatchesToServerDiskWithVerification(coderOutput.filePatches, emitSSE);
-      }
-
       emitSSE('agent_step', {
         agent: 'CoderAgent',
         status: 'completed',
         result: { filePatches: coderOutput.filePatches, diffCards }
       });
 
-      // 6. Test Runner & Self-Healing Debugger Loop
+      // 6. Reviewer Agent Evaluation (Architecture Step 3)
+      logDiagnostic('GRAPH', 'ENTER ReviewerAgent', {});
+      emitSSE('agent_step', { agent: 'ReviewerAgent', status: 'running', message: 'Performing automated code review & quality audit...' });
+      let reviewResult = await reviewerAgentNode(state);
+
+      const MAX_REVIEW_RETRIES = 2;
+      let reviewRetries = 0;
+      while ((!reviewResult.approved || (reviewResult.codeQualityScore !== undefined && reviewResult.codeQualityScore < 75)) && reviewRetries < MAX_REVIEW_RETRIES) {
+        reviewRetries++;
+        state.retryCount = (state.retryCount || 0) + 1;
+        emitSSE('agent_step', {
+          agent: 'ReviewerAgent',
+          status: 'running',
+          message: `[Reviewer Revision Loop #${reviewRetries}/${MAX_REVIEW_RETRIES}]: Code quality score (${reviewResult.codeQualityScore}/100) below threshold. Re-running Coder Agent...`
+        });
+
+        const feedbackContext = reviewResult.issues && reviewResult.issues.length > 0
+          ? reviewResult.issues.map(i => `- ${i}`).join('\n')
+          : reviewResult.summary;
+
+        state.extractedContext = `${state.extractedContext}\n\n[REVIEWER REVISION MANDATE - ATTEMPT #${reviewRetries}]:\n${feedbackContext}\nPlease address all issues and regenerate corrected source code.`;
+
+        coderOutput = await codeGenAgentNode(state, emitSSE);
+        if (coderOutput.status === 'CODE_GEN_FAILED' || coderOutput.status === 'PREFLIGHT_SECURITY_BLOCKED') {
+          break;
+        }
+        reviewResult = await reviewerAgentNode(state);
+      }
+
+      completedStages.push('reviewer');
+      persistenceEngine.saveCheckpoint(sessionId, 'ReviewerAgent', state);
+
+      emitSSE('agent_step', {
+        agent: 'ReviewerAgent',
+        status: 'completed',
+        result: reviewResult
+      });
+
+      // 7. Test Runner & Self-Healing Debugger Loop (Architecture Step 4 & 5)
       logDiagnostic('GRAPH', 'ENTER TestRunnerAgent', {});
       emitSSE('agent_step', { agent: 'TestRunnerAgent', status: 'running', message: 'Executing workspace automated unit test suite...' });
       let testResult = await runWorkspaceTests(state.targetFiles);
@@ -1512,18 +1546,7 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
         skippedStages.push('debugger');
       }
 
-      // 7. Reviewer Agent
-      logDiagnostic('GRAPH', 'ENTER ReviewerAgent', {});
-      emitSSE('agent_step', { agent: 'ReviewerAgent', status: 'running', message: 'Performing automated code review & quality audit...' });
-      let reviewResult = await reviewerAgentNode(state);
-      completedStages.push('reviewer');
-      persistenceEngine.saveCheckpoint(sessionId, 'ReviewerAgent', state);
-
-      emitSSE('agent_step', {
-        agent: 'ReviewerAgent',
-        status: 'completed',
-        result: reviewResult
-      });
+      completedStages.push('testrunner');
 
       try {
         if (typeof (universalValidator as any)?.validateWorkspace === 'function') {

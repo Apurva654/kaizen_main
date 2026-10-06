@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import { KaizenState } from '../state';
 import { GraphifyEngine } from '../tools/graphifyEngine';
 import { persistenceEngine } from '../tools/persistenceEngine';
+import { resolveLanguage, deriveTargetFile } from '../tools/languageResolver';
 
 export async function contextRetrievalAgentNode(state: typeof KaizenState.State) {
   let targetFiles = state.targetFiles && state.targetFiles.length > 0 
@@ -22,7 +23,9 @@ export async function contextRetrievalAgentNode(state: typeof KaizenState.State)
   }
 
   if (targetFiles.length === 0) {
-    targetFiles = ['src/sandbox/main.ts'];
+    // Bug 10 Fix: derive the target file from user input language, not hardcoded main.ts
+    const resolvedLang = resolveLanguage(state.userInput || '');
+    targetFiles = [deriveTargetFile(state.userInput || '', resolvedLang)];
   }
 
   targetFiles = targetFiles.map(f => f.replace(/\\/g, '/'));

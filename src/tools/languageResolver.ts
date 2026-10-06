@@ -144,5 +144,34 @@ export function validateCodeSyntax(code: string, language: string, filePath: str
     }
   }
 
+  // Bug 9 Fix: Basic structural checks for TypeScript / JavaScript
+  if (['typescript', 'javascript', 'ts', 'js', 'tsx', 'jsx'].includes(language) ||
+      /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(filePath)) {
+    // Unbalanced braces check
+    let depth = 0;
+    let inStr = false;
+    let strChar = '';
+    for (let i = 0; i < code.length; i++) {
+      const ch = code[i];
+      if (inStr) {
+        if (ch === strChar && code[i - 1] !== '\\') inStr = false;
+      } else if (ch === '"' || ch === "'" || ch === '`') {
+        inStr = true; strChar = ch;
+      } else if (ch === '{') {
+        depth++;
+      } else if (ch === '}') {
+        depth--;
+        if (depth < 0) return { isValid: false, error: 'Syntax Error: Unexpected closing brace "}" — unmatched.' };
+      }
+    }
+    if (depth !== 0) {
+      return { isValid: false, error: `Syntax Error: ${depth} unclosed brace(s) "{" detected.` };
+    }
+    // Detect common placeholder / stub code that should not be committed
+    if (/\/\/\s*(TODO|FIXME|PLACEHOLDER|NOT IMPLEMENTED)/i.test(code) && code.trim().split('\n').length < 5) {
+      return { isValid: false, error: 'Stub Violation: File appears to be an unimplemented placeholder.' };
+    }
+  }
+
   return { isValid: true };
 }
