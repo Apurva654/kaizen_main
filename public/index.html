@@ -42,6 +42,10 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
           Telemetry
         </button>
+        <button id="github-auth-btn" class="icon-btn-secondary github-auth-pill" title="Connect or manage GitHub Account">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>
+          <span id="github-user-label">Connect GitHub</span>
+        </button>
         <button id="clear-memory-btn" class="icon-btn-secondary danger-pill" title="Clear Permanent Model Memory">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
           Clear Memory
@@ -232,11 +236,12 @@
                 <button id="close-console-btn" class="icon-btn-secondary" title="Close Console">&times;</button>
               </div>
             </div>
-            <pre id="console-output-body" class="console-output-body">Executing code...</pre>
-            <div class="console-stdin-bar">
-              <span class="stdin-label">⌨️ Stdin Input:</span>
-              <input type="text" id="console-stdin-input" class="stdin-input-field" placeholder="Enter values (e.g., 10 20 or multiple lines)..." />
-              <button id="send-stdin-btn" class="btn-success-xs" title="Execute file with these input values">▶ Run with Input</button>
+            <div id="console-output-body" class="console-output-body" tabindex="0" title="Click anywhere to type terminal input">
+              <pre id="console-text-content" class="console-text-content">Executing code...</pre>
+              <div class="terminal-prompt-line">
+                <span class="prompt-symbol">❯</span>
+                <input type="text" id="terminal-active-input" class="terminal-active-input" placeholder="Type input here and press Enter..." autocomplete="off" spellcheck="false" />
+              </div>
             </div>
           </div>
         </div>
@@ -255,16 +260,6 @@
               <button class="graph-mode-btn" data-mode="generated" title="Emphasize generated & modified files">Generated Files</button>
               <button class="graph-mode-btn" data-mode="dependencies" title="Focus on dependency relationships">Dependencies</button>
               <button class="graph-mode-btn" data-mode="full" title="Show full workspace graph context">Full Context</button>
-            </div>
-
-            <div class="graph-edge-filters">
-              <span class="filter-label">Edge Type:</span>
-              <button class="edge-filter-btn active" data-edge="all">All</button>
-              <button class="edge-filter-btn" data-edge="calls">Calls</button>
-              <button class="edge-filter-btn" data-edge="imports">Imports</button>
-              <button class="edge-filter-btn" data-edge="defines">Defines</button>
-              <button class="edge-filter-btn" data-edge="tests">Tests</button>
-              <button class="edge-filter-btn" data-edge="depends_on">Dependencies</button>
             </div>
 
             <div class="graphify-actions">
@@ -295,14 +290,6 @@
               <span class="legend-item"><span class="node-icon symbol"></span> Symbol</span>
               <span class="legend-item"><span class="node-icon external"></span> External</span>
               <span class="legend-item"><span class="node-icon unresolved"></span> Unresolved</span>
-            </div>
-            <div class="legend-group">
-              <span class="legend-group-title">EDGE TYPES:</span>
-              <span class="legend-item"><span class="edge-line calls"></span> CALLS</span>
-              <span class="legend-item"><span class="edge-line imports"></span> IMPORTS</span>
-              <span class="legend-item"><span class="edge-line defines"></span> DEFINES</span>
-              <span class="legend-item"><span class="edge-line tests"></span> TESTS</span>
-              <span class="legend-item"><span class="edge-line depends"></span> DEPENDS_ON</span>
             </div>
           </div>
 
@@ -416,6 +403,47 @@
         </div>
         <div id="telemetry-body" class="modal-body">
           <div class="trace-placeholder">No trace logs recorded yet. Run a prompt to capture telemetry.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- GitHub Authentication & Login Modal -->
+    <div id="github-modal" class="modal-overlay hidden">
+      <div class="modal-card github-modal-card">
+        <div class="modal-header">
+          <h3>🐙 GitHub Authentication & Account</h3>
+          <button id="close-github-modal-btn" class="icon-btn-tiny">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div id="github-logged-in-view" class="github-profile-view hidden">
+            <div class="github-profile-header">
+              <img id="github-avatar" class="github-avatar" src="" alt="Avatar" />
+              <div class="github-profile-info">
+                <div id="github-profile-name" class="github-profile-name">Username</div>
+                <div id="github-profile-badge" class="github-profile-badge">Token Authenticated</div>
+              </div>
+            </div>
+            <div class="github-details-list">
+              <div class="github-detail-row"><span>Status:</span> <strong style="color:#10b981;">Connected 🟢</strong></div>
+              <div class="github-detail-row"><span>Profile:</span> <a id="github-profile-link" href="#" target="_blank" rel="noopener">View GitHub Profile</a></div>
+            </div>
+            <button id="github-logout-btn" class="btn-secondary danger-btn" style="margin-top: 16px; width: 100%;">Log Out of GitHub</button>
+          </div>
+
+          <div id="github-login-form-view" class="github-login-form">
+            <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 14px; line-height: 1.5;">
+              Connect your GitHub account using a <strong>Personal Access Token (PAT)</strong> to enable automatic repository actions, commits, and pushes directly from Kaizen.
+            </p>
+            <div class="input-group">
+              <label for="github-pat-input" style="font-size: 12px; font-weight: 500; color: var(--text-primary); display: block; margin-bottom: 6px;">GitHub Personal Access Token (PAT):</label>
+              <input type="password" id="github-pat-input" class="modal-text-input" placeholder="ghp_xxxxxxxxxxxxxxxxxxxxxxxx" autocomplete="off" />
+            </div>
+            <div style="margin-top: 8px; font-size: 11px; color: var(--text-muted);">
+              Need a token? <a href="https://github.com/settings/tokens/new?scopes=repo,user" target="_blank" rel="noopener" style="color: var(--accent-blue);">Generate PAT on GitHub</a> (requires <code>repo</code> scope).
+            </div>
+            <div id="github-auth-error" class="auth-error-msg hidden" style="color: #ef4444; font-size: 12px; margin-top: 10px;"></div>
+            <button id="github-save-token-btn" class="btn-primary" style="margin-top: 16px; width: 100%;">Authenticate & Save Token</button>
+          </div>
         </div>
       </div>
     </div>

@@ -391,8 +391,12 @@ export async function preprocessUserRequest(rawPrompt: string): Promise<{ enhanc
     };
   }
 
-  const workspaceContext = await contextManager.buildEnrichedContext(rawPrompt);
+  const { enhanceUserPrompt } = await import('../agents/promptEnhancerAgent');
+  const enhancementRes = await enhanceUserPrompt(rawPrompt);
+  const promptToUse = enhancementRes.isEnhanced ? enhancementRes.enhancedPrompt : rawPrompt;
 
-  return { enhancedPrompt: rawPrompt, workspaceContext, isCommand: false };
+  const workspaceContext = await contextManager.buildEnrichedContext(promptToUse);
+
+  return { enhancedPrompt: promptToUse, workspaceContext, isCommand: false };
 }
 

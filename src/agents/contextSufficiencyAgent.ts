@@ -1,4 +1,4 @@
-import { ChatGroq } from '@langchain/groq';
+import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import * as dotenv from 'dotenv';
 import { KaizenStateType } from '../state';
 
@@ -104,84 +104,39 @@ export async function evaluateContextSufficiency(state: KaizenStateType): Promis
     return fallbackResult;
   }
 
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey || apiKey === 'your_groq_api_key_here') {
-    return fallbackResult;
-  }
-
-  try {
-    const modelCandidates = [
-      'openai/gpt-oss-120b',
-      'openai/gpt-oss-20b',
-      'qwen/qwen3.8-27b',
-      'llama-3.3-70b-versatile',
-      'llama-3.1-8b-instant'
-    ];
-
-    const systemPrompt = `You are Kaizen's Adaptive Context Sufficiency & Ambiguity Evaluation Agent.
-Determine if the user's prompt has sufficient context to answer confidently, or if crucial information is missing.
-
-Classifications:
-1. SUFFICIENT_CONTEXT: Prompt or retrieved CODEBASE CONTEXT contains enough information.
-2. PARTIAL_CONTEXT: Enough info to provide an initial partial answer with explicit assumptions, plus 1 targeted question.
-3. INSUFFICIENT_CONTEXT: Request is ambiguous/underspecified (e.g. "Why is my model performing badly?" with no metrics/architecture, "Fix my code" with no code/logs, or asking about a non-existent feature like "Stripe integration" when no Stripe code exists in CODEBASE CONTEXT).
-
-IMPORTANT DIRECTIVES:
-- DO NOT address the user as "Alice" or invent user names/personal details.
-- DO NOT ask the user for code or information that ALREADY EXISTS in the CODEBASE CONTEXT.
-- If the user asks about a specific feature (e.g. Stripe, Firebase) and NO evidence exists in CODEBASE CONTEXT, classify as INSUFFICIENT_CONTEXT and state that no evidence of that feature was found in the codebase.
-- For ambiguous questions like "Why is my model performing badly?", DO NOT output a large bulleted checklist. Provide a natural 1-2 sentence response asking for the specific missing metrics (model type, train vs validation accuracy).
-- If specific metrics are provided (e.g. "98% train accuracy, 65% val accuracy"), classify as SUFFICIENT_CONTEXT and diagnose overfitting directly without asking basic questions.
-
-Respond in JSON:
-{
-  "sufficiency": "SUFFICIENT_CONTEXT" | "PARTIAL_CONTEXT" | "INSUFFICIENT_CONTEXT",
-  "missingContextSummary": "string",
-  "unsupportedSubject": "string or null",
-  "conversationalResponse": "string",
-  "assumptionsStated": ["string"],
-  "suggestedQuestions": ["string"]
-}`;
-
-    const userPayload = `[USER PROMPT]:
-${rawUserInput}
-
-[CODEBASE CONTEXT RETRIEVED FROM REPOSITORY]:
-${extractedContext.slice(0, 3000) || '(No codebase context found)'}
-
-[TARGET FILES]:
-${targetFiles.join(', ') || 'None'}`;
-
-    for (const modelName of modelCandidates) {
+  const geminiApiKey = process.env.GEMINI_API_KEY;
+  if (geminiApiKey && geminiApiKey !== 'your_gemini_api_key_here') {
+    const geminiCandidates = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-3.5-flash-lite'];
+    for (const modelName of geminiCandidates) {
       try {
-        const model = new ChatGroq({ apiKey, model: modelName, temperature: 0 });
+        const model = new ChatGoogleGenerativeAI({ apiKey: geminiApiKey, model: modelName, temperature: 0 });
+        const userPayload = `USER PROMPT: "${rawUserInput}"\n\nTARGET FILES: ${targetFiles.join(', ') || 'None'}\n\nRETRIEVED CODEBASE CONTEXT:\n${extractedContext.slice(0, 10000)}`;
         const res: any = await model.invoke([
-          { role: 'system', content: systemPrompt },
+          { role: 'system', content: `Analyze prompt sufficiency. Return JSON with keys: sufficiency (SUFFICIENT_CONTEXT|PARTIAL_CONTEXT|INSUFFICIENT_CONTEXT), missingContextSummary, conversationalResponse, assumptionsStated.` },
           { role: 'user', content: userPayload }
         ]);
-
-        const text = typeof res.content === 'string' ? res.content : String(res.content ?? '');
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]);
-          if (parsed.sufficiency) {
+        const text = typeof res.content === 'string' ? res.content : JSON.stringify(res.content);
+        const match = text.match(/\{[\s\S]*\}/);
+        if (match) {
+          const parsed = JSON.parse(match[0]);
+          if (parsed && parsed.sufficiency) {
             return {
               sufficiency: parsed.sufficiency,
               missingContextSummary: parsed.missingContextSummary,
               unsupportedSubject: parsed.unsupportedSubject,
               conversationalResponse: parsed.conversationalResponse,
-              assumptionsStated: parsed.assumptionsStated || [],
-              suggestedQuestions: parsed.suggestedQuestions || []
+              assumptionsStated: parsed.assumptionsStated,
+              suggestedQuestions: parsed.suggestedQuestions
             };
           }
         }
-      } catch (err) {
-        console.warn(`ContextSufficiencyAgent LLM invocation failed for model '${modelName}':`, err);
+      } catch (err: any) {
+        console.warn(`Gemini context sufficiency model '${modelName}' failed:`, err?.message || err);
       }
     }
-  } catch (err) {
-    console.warn('ContextSufficiencyAgent error, using fallback:', err);
   }
+
+  return fallbackResult;
 
   return fallbackResult;
 }

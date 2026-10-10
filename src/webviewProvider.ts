@@ -512,29 +512,24 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
         skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
 
         let answer = `Hello! I am Kaizen, an advanced AI Coding Agent. How can I assist you with your project today?`;
-        const apiKey = process.env.GROQ_API_KEY;
-        if (apiKey && apiKey !== 'your_groq_api_key_here') {
-          try {
-            const { ChatGroq } = await import('@langchain/groq');
-            const model = new ChatGroq({ apiKey, model: 'groq/compound-mini', temperature: 0.3 });
-            const systemContent = `You are Kaizen, an advanced AI Coding Agent.
+        try {
+          const { invokeModel } = await import('./tools/modelProvider');
+          const { memoryEngine } = await import('./context/memory/memoryEngine');
+          const contextBlock = memoryEngine.formatGeneralQueryContext();
+          const systemContent = `You are Kaizen, an advanced AI Coding Agent.
 Always check the USER PROFILE & KNOWN FACTS and RECENT CONVERSATION HISTORY provided below to answer user queries:
 
-${enhancedUserInput}
+${contextBlock}
 
 Directives:
-- You are KAIZEN, an advanced AI Coding Agent (never identify as ChatGPT or OpenAI).
-- If the user asks for their name, identity, or previous details (e.g. "my name?", "whats my name?", "Jannik"), state their name/identity directly from the KNOWN FACTS and CONVERSATION HISTORY above.
+- You are KAIZEN, an advanced AI Coding Agent.
+- If the user asks for their name, identity, preferences, or previous details (e.g. "my name?", "what is my name?"), state their name/identity directly from the USER PROFILE & KNOWN FACTS or RECENT CONVERSATION HISTORY above.
+- If the user provides a short name or answer (e.g. "APURVA"), connect it with the recent conversation context and acknowledge it warmly.
 - Provide concise, friendly, and direct answers without generating code unless explicitly requested.`;
 
-            const res: any = await model.invoke([
-              { role: 'system', content: systemContent },
-              { role: 'user', content: rawUserInput }
-            ]);
-            answer = typeof res.content === 'string' ? res.content : String(res.content ?? '');
-          } catch (err) {
-            console.warn('General query LLM invocation failed:', err);
-          }
+          answer = await invokeModel(systemContent, rawUserInput, { temperature: 0.3 });
+        } catch (err) {
+          console.warn('General query LLM invocation failed:', err);
         }
 
         completedStages.push('response');

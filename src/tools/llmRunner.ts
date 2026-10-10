@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ChatGroq } from '@langchain/groq';
+import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { langfuseTracer } from './langfuseTracer';
 
 export interface RunStructuredOptions<S extends z.ZodTypeAny> {
@@ -16,97 +16,59 @@ export interface RunStructuredOptions<S extends z.ZodTypeAny> {
 export async function runStructured<S extends z.ZodTypeAny>(
   opts: RunStructuredOptions<S>
 ): Promise<{ result: z.infer<S>; model: string }> {
-  const apiKey = process.env.GROQ_API_KEY;
+  const geminiApiKey = process.env.GEMINI_API_KEY;
   const timeoutMs = opts.timeoutMs ?? 8000;
-  
-  let modelList: string[] = [];
-  if (opts.models && opts.models.length > 0) {
-    modelList = opts.models;
-  } else if (process.env.GROQ_MODELS) {
-    modelList = process.env.GROQ_MODELS.split(',').map(m => m.trim()).filter(Boolean);
-  } else {
-    modelList = [
-      'openai/gpt-oss-120b',
-      'openai/gpt-oss-20b',
-      'qwen/qwen3.8-27b',
-      'llama-3.3-70b-versatile',
-      'llama-3.1-8b-instant',
-      'llama3-70b-8192',
-      'llama3-8b-8192',
-      'qwen-2.5-coder-32b',
-      'deepseek-r1-distill-llama-70b'
-    ];
-  }
-
-  if (!apiKey) {
-    throw new Error('GROQ_API_KEY environment variable is missing or empty.');
-  }
-
   const errors: string[] = [];
 
-  for (const model of modelList) {
-    let timerHandle: NodeJS.Timeout | null = null;
-    const startTime = Date.now();
-    try {
-      const chatModel = new ChatGroq({
-        apiKey,
-        model,
-        temperature: opts.temperature
-      });
+  if (geminiApiKey && geminiApiKey !== 'your_gemini_api_key_here') {
+    const geminiModels = opts.models && opts.models.length > 0
+      ? opts.models
+      : ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-3.5-flash-lite'];
 
-      const runnable = chatModel.withStructuredOutput(opts.schema, { method: 'jsonMode' });
+    for (const model of geminiModels) {
+      let timerHandle: NodeJS.Timeout | null = null;
+      const startTime = Date.now();
+      try {
+        const chatModel = new ChatGoogleGenerativeAI({
+          apiKey: geminiApiKey,
+          model,
+          temperature: opts.temperature ?? 0
+        });
 
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        timerHandle = setTimeout(() => {
-          reject(new Error(`Model '${model}' timed out after ${timeoutMs}ms`));
-        }, timeoutMs);
-      });
+        const runnable = chatModel.withStructuredOutput(opts.schema);
 
-      const invokePromise = runnable.invoke([
-        { role: 'system', content: opts.system },
-        { role: 'user', content: opts.user }
-      ]);
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timerHandle = setTimeout(() => {
+            reject(new Error(`Gemini Model '${model}' timed out after ${timeoutMs}ms`));
+          }, timeoutMs);
+        });
 
-      const rawResult = await Promise.race([invokePromise, timeoutPromise]);
-      const latencyMs = Date.now() - startTime;
+        const invokePromise = runnable.invoke([
+          { role: 'system', content: opts.system },
+          { role: 'user', content: opts.user }
+        ]);
 
-      if (!rawResult) {
-        throw new Error(`Model '${model}' returned empty result`);
-      }
+        const rawResult = await Promise.race([invokePromise, timeoutPromise]);
+        const latencyMs = Date.now() - startTime;
 
-      const result = rawResult as z.infer<S>;
-
-      if (opts.validate) {
-        const validationError = opts.validate(result);
-        if (validationError) {
-          throw new Error(`Validation failed for model '${model}': ${validationError}`);
+        if (rawResult) {
+          const result = rawResult as z.infer<S>;
+          if (opts.validate) {
+            const validationError = opts.validate(result);
+            if (validationError) {
+              throw new Error(`Validation failed for Gemini model '${model}': ${validationError}`);
+            }
+          }
+          await langfuseTracer.recordGeneration(opts.agent, model, opts.user, JSON.stringify(result), latencyMs, 50, 150);
+          return { result, model };
         }
-      }
-
-      // Estimate tokens based on 4 characters per token (approximate estimate)
-      const approxInputTokens = Math.ceil((opts.system.length + opts.user.length) / 4);
-      const approxOutputTokens = Math.ceil(JSON.stringify(result).length / 4);
-
-      await langfuseTracer.recordGeneration(
-        opts.agent,
-        model,
-        opts.user,
-        JSON.stringify(result),
-        latencyMs,
-        approxInputTokens,
-        approxOutputTokens
-      );
-
-      return { result, model };
-    } catch (err: any) {
-      const errMsg = err?.message || String(err);
-      errors.push(`[${model}]: ${errMsg}`);
-    } finally {
-      if (timerHandle) {
-        clearTimeout(timerHandle);
+      } catch (err: any) {
+        errors.push(`[Gemini:${model}]: ${err?.message || String(err)}`);
+      } finally {
+        if (timerHandle) clearTimeout(timerHandle);
       }
     }
   }
 
-  throw new Error(errors.join(' | '));
+  throw new Error(errors.join(' | ') || 'No Gemini LLM model succeeded.');
 }

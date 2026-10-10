@@ -41,31 +41,26 @@ async function searchGemini(query: string): Promise<WebSearchResult[]> {
   try {
     emitSearchProgress(`🔍 Searching Google via Gemini AI Grounding for "${query}"...`);
 
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+    const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash'];
+    let response: Response | null = null;
+    for (const model of modelsToTry) {
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const res = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: `Perform a web search and return standard search findings for query: "${query}". Format response clearly.` }] }],
+          tools: [{ google_search: {} }]
+        })
+      });
+      if (res.ok) {
+        response = res;
+        break;
+      }
+    }
 
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              {
-                text: `Perform a web search and return standard search findings for query: "${query}". Format response clearly.`
-              }
-            ]
-          }
-        ],
-        tools: [
-          {
-            google_search: {}
-          }
-        ]
-      })
-    });
-
-    if (!response.ok) {
-      console.warn(`[WebSearch] Gemini API returned ${response.status}`);
+    if (!response || !response.ok) {
+      console.warn(`[WebSearch] Gemini API search grounding failed`);
       return [];
     }
 

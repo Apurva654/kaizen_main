@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ChatGroq } from '@langchain/groq';
+import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import * as dotenv from 'dotenv';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -20,13 +20,24 @@ export const IntentSchema = z.object({
 });
 
 export function extractRawUserPrompt(input: string): string {
-  if (input.includes('USER REQUEST:\n==============\n')) {
-    return input.split('USER REQUEST:\n==============\n')[1].split('\n---\n')[0].trim();
+  let cleaned = input;
+
+  if (cleaned.includes('USER REQUEST:\n==============\n')) {
+    cleaned = cleaned.split('USER REQUEST:\n==============\n')[1].split('\n---\n')[0];
+  } else if (cleaned.includes('USER REQUEST:\n')) {
+    cleaned = cleaned.split('USER REQUEST:\n')[1];
   }
-  if (input.includes('USER REQUEST:\n')) {
-    return input.split('USER REQUEST:\n')[1].trim();
-  }
-  return input.trim();
+
+  // Strip injected background execution logs / metadata lines to prevent heuristic false-positives
+  cleaned = cleaned
+    .replace(/^🌐\s*Browser Inspection:.*$/gm, '')
+    .replace(/^MCP Server:.*$/gm, '')
+    .replace(/^Browser Action Executed:.*$/gm, '')
+    .replace(/^Mode:\s*Read-Only Inspection.*$/gm, '')
+    .replace(/^\[automated test.*?\]/gm, '')
+    .trim();
+
+  return cleaned;
 }
 
 export function isGitQuery(input: string): boolean {
@@ -44,7 +55,7 @@ export function isGitQuery(input: string): boolean {
   if (/\bgit\s+(status|diff|commit|push|pull|log|branch|checkout|merge|rebase|stash)\b/i.test(rawPrompt)) {
     return true;
   }
-
+4
   // 2. Explicit repository / version-control intent queries
   const gitIntentPatterns = [
     /\b(show|check|view|display|get)\s+.*?\b(status|diff|log|history|branches|branch)\b/i,
@@ -199,7 +210,8 @@ export function isGeneralQuery(input: string): boolean {
     'calculator', 'utils', 'main.ts', 'solution', 'import', 'export', 'const', 'let', 'var',
     'git', 'status', 'diff', 'commit', 'push', 'branch', 'repository', 'log', 'checkout', 'stash',
     'terminal', 'command', 'shell', 'rm', 'del', 'sudo', 'chmod',
-    'website', 'webpage', 'web', 'landing', 'page', 'site', 'index.html', 'style.css', 'styles.css', 'script.js', 'frontend'
+    'website', 'webpage', 'web', 'landing', 'page', 'site', 'index.html', 'style.css', 'styles.css', 'script.js', 'frontend',
+    'agent', 'agents', 'llm', 'model', 'models', 'mcp', 'intent', 'pipeline', 'router', 'classification'
   ];
 
   const hasCodingKeyword = codingKeywords.some(kw => {
@@ -589,30 +601,19 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
   }
 
   const promptExtracted = extractTargetFilesFromPrompt(state.userInput);
-  const apiKey = process.env.GROQ_API_KEY;
+  const geminiApiKey = process.env.GEMINI_API_KEY;
 
-  if (apiKey && apiKey !== 'your_groq_api_key_here') {
-    const modelCandidates = [
-      'openai/gpt-oss-120b',
-      'openai/gpt-oss-20b',
-      'qwen/qwen3.8-27b',
-      'llama-3.3-70b-versatile',
-      'llama-3.1-8b-instant',
-      'llama3-70b-8192',
-      'llama3-8b-8192',
-      'qwen-2.5-coder-32b',
-      'deepseek-r1-distill-llama-70b'
-    ];
-
-    for (const modelName of modelCandidates) {
+  if (geminiApiKey && geminiApiKey !== 'your_gemini_api_key_here') {
+    const geminiCandidates = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-3.5-flash-lite'];
+    for (const modelName of geminiCandidates) {
       try {
-        const model = new ChatGroq({
-          apiKey: apiKey,
+        const model = new ChatGoogleGenerativeAI({
+          apiKey: geminiApiKey,
           model: modelName,
           temperature: 0
         });
 
-        const structuredModel = model.withStructuredOutput(IntentSchema, { method: 'jsonMode' });
+        const structuredModel = model.withStructuredOutput(IntentSchema);
 
         const systemPrompt = `You are an intent classification and target file selector agent. Respond in valid json format.
 Analyze the user's prompt and classify their intent into one of:
@@ -631,35 +632,21 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
           { role: 'user', content: state.userInput }
         ]);
         const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error(`ChatGroq model '${modelName}' execution timed out after 6000ms`)), 6000);
+          setTimeout(() => reject(new Error(`Gemini model '${modelName}' execution timed out after 6000ms`)), 6000);
         });
 
         const result = await Promise.race([invokePromise, timeoutPromise]);
         const latencyMs = Date.now() - startTime;
 
-        await langfuseTracer.recordGeneration(
-          'IntentAgent',
-          modelName,
-          state.userInput,
-          JSON.stringify(result),
-          latencyMs,
-          60,
-          80
-        );
+        await langfuseTracer.recordGeneration('IntentAgent', modelName, state.userInput, JSON.stringify(result), latencyMs, 60, 80);
 
         const intent = result.intent || 'GENERATE_CODE';
         if (intent === 'GENERAL_QUERY') {
-          return {
-            status: 'ROUTED_GENERAL_QUERY',
-            targetFiles: [],
-            requestedLanguage,
-            languageInfo
-          };
+          return { status: 'ROUTED_GENERAL_QUERY', targetFiles: [], requestedLanguage, languageInfo };
         }
 
         const rawFiles = result.targetFiles || result.target_files;
         let extractedFiles: string[] = [];
-
         if (promptExtracted.length > 0) {
           extractedFiles = [...promptExtracted];
           if (rawFiles && rawFiles.length > 0) {
@@ -683,9 +670,7 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
         });
 
         for (const pe of promptExtracted) {
-          if (!extractedFiles.includes(pe)) {
-            extractedFiles.push(pe);
-          }
+          if (!extractedFiles.includes(pe)) extractedFiles.push(pe);
         }
 
         return {
@@ -694,12 +679,13 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
           requestedLanguage,
           languageInfo
         };
-      } 
-      catch (error: any) {
-        console.warn(`ChatGroq intent model '${modelName}' execution failed:`, error?.message || error);
+      } catch (error: any) {
+        console.warn(`Gemini intent model '${modelName}' execution failed:`, error?.message || error);
       }
     }
   }
+
+
 
   const input = state.userInput.toLowerCase();
   let intent: z.infer<typeof IntentSchema>['intent'] = 'GENERATE_CODE';
@@ -738,4 +724,4 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
     requestedLanguage,
     languageInfo
   };
-}
+}

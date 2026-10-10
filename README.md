@@ -42,3 +42,14 @@ npm run typecheck
 # Start local server (http://localhost:3000)
 npm run server
 ```
+html 
+Open http://localhost:3000/sandbox/filename.html
+python:-
+python src\sandbox\filename.py
+typescript:-
+npx ts-node --transpile-only src\sandbox\main.ts
+react app:-
+cd src/sandbox
+npx vite
+
+

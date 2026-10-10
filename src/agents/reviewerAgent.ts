@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ChatGroq } from '@langchain/groq';
+import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import * as dotenv from 'dotenv';
 import { KaizenState } from '../state';
 import { langfuseTracer } from '../tools/langfuseTracer';
@@ -27,117 +27,53 @@ export interface ReviewResult {
 
 export async function reviewerAgentNode(state: typeof KaizenState.State): Promise<ReviewResult> {
   const targetFiles = state.targetFiles.length > 0 ? state.targetFiles : ['src/sandbox/main.ts'];
-  const apiKey = process.env.GROQ_API_KEY;
+  const geminiApiKey = process.env.GEMINI_API_KEY;
 
   console.log("\n-> Running Code Reviewer Agent (reviewerAgent.ts)...");
 
-  if (apiKey && apiKey !== 'your_groq_api_key_here') {
-    const modelCandidates = [
-      'openai/gpt-oss-120b',
-      'openai/gpt-oss-20b',
-      'qwen/qwen3.8-27b',
-      'llama-3.3-70b-versatile',
-      'llama-3.1-8b-instant',
-      'llama3-70b-8192',
-      'llama3-8b-8192',
-      'qwen-2.5-coder-32b',
-      'deepseek-r1-distill-llama-70b'
-    ];
-
-    for (const modelName of modelCandidates) {
+  if (geminiApiKey && geminiApiKey !== 'your_gemini_api_key_here') {
+    const geminiCandidates = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-3.5-flash-lite'];
+    for (const modelName of geminiCandidates) {
       try {
-        const model = new ChatGroq({
-          apiKey: apiKey,
+        const model = new ChatGoogleGenerativeAI({
+          apiKey: geminiApiKey,
           model: modelName,
           temperature: 0
         });
 
-        const structuredModel = model.withStructuredOutput(ReviewerSchema, { method: 'jsonMode' });
+        const structuredModel = model.withStructuredOutput(ReviewerSchema);
+        const startTime = Date.now();
 
         const systemPrompt = `You are an expert AI Code Reviewer Agent for Kaizen AI. Respond in valid json format.
-Your task is to perform an automated code review on the generated code patches across Python, TypeScript, and supported languages.
+Your task is to perform an automated code review on the generated code patches across Python, TypeScript, and supported languages.`;
 
-=== REVIEW CHECKLIST ===
-1. Security & Safety: Ensure no system file deletion, env leakage, or unsafe execution.
-2. Correctness & Logic: Check if the code correctly implements the requested functionality and satisfies unit tests.
-3. Import Resolution: Ensure relative imports (e.g., './utils' or 'from string_utils import ...') are accurate and valid.
-4. Code Quality & Standards: Check language-specific syntax conventions (PEP 8 for Python, TypeScript types for TS), exception handling, and readability.
+        const userPrompt = `USER REQUEST: ${state.originalUserRequest || state.userInput}\nTARGET FILES: ${targetFiles.join(', ')}\nGENERATED PATCH:\n${state.generatedPatch || '(No patch generated)'}`;
 
-Evaluate the code and return:
-- approved: boolean (true if score >= 75 and no critical issues)
-- codeQualityScore: number (1 to 100)
-- issues: string[] (list of any bugs or concerns)
-- suggestions: string[] (improvement recommendations)
-- summary: string (review overview)`;
-
-        const userPrompt = `User Request: "${state.userInput}"
-Target Files: ${targetFiles.join(', ')}
-
-=== GENERATED CODE PATCH / CONTEXT ===
-${state.extractedContext || "No generated context available"}`;
-
-        const startTime = Date.now();
-        const invokePromise = structuredModel.invoke([
+        const rawResult: any = await structuredModel.invoke([
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
         ]);
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error(`ChatGroq model '${modelName}' execution timed out after 8000ms`)), 8000);
-        });
 
-        const result = await Promise.race([invokePromise, timeoutPromise]);
         const latencyMs = Date.now() - startTime;
-
-        await langfuseTracer.recordGeneration(
-          'ReviewerAgent',
-          modelName,
-          userPrompt,
-          JSON.stringify(result),
-          latencyMs,
-          150,
-          200
-        );
-
-        const approved = result.approved ?? true;
-        const codeQualityScore = result.codeQualityScore ?? 90;
-        const issues = result.issues || [];
-        const suggestions = result.suggestions || [];
-        const summary = result.summary || result.overview || result.feedback || "Code patch passes automated code review standards.";
-
-        console.log(`\n=========================================`);
-        console.log(`CODE REVIEW REPORT (${modelName})`);
-        console.log(`=========================================`);
-        console.log(`Approval Status:   ${approved ? "APPROVED" : "NEEDS_REVISION"}`);
-        console.log(`Quality Score:     ${codeQualityScore} / 100`);
-        console.log(`Summary:           ${summary}`);
-        if (issues.length > 0) {
-          console.log(`Issues Found:`);
-          issues.forEach((i: string) => console.log(`  - [ISSUE] ${i}`));
+        if (rawResult) {
+          await langfuseTracer.recordGeneration('ReviewerAgent', modelName, userPrompt, JSON.stringify(rawResult), latencyMs, 120, 150);
+          return {
+            approved: rawResult.approved ?? true,
+            codeQualityScore: rawResult.codeQualityScore ?? 90,
+            issues: rawResult.issues || [],
+            suggestions: rawResult.suggestions || [],
+            summary: rawResult.summary || rawResult.overview || rawResult.feedback || 'Code patch passed verification.',
+            status: rawResult.approved === false ? 'CHANGES_REQUESTED' : 'REVIEW_PASSED'
+          };
         }
-        if (suggestions.length > 0) {
-          console.log(`Suggestions:`);
-          suggestions.forEach((s: string) => console.log(`  - [TIP] ${s}`));
-        }
-        console.log(`=========================================\n`);
-
-        return {
-          approved,
-          codeQualityScore,
-          issues,
-          suggestions,
-          summary,
-          status: approved ? "REVIEW_PASSED" : "REVIEW_FAILED"
-        };
-      } catch (error: any) {
-        console.warn(`ChatGroq reviewer model '${modelName}' execution failed:`, error?.message || error);
+      } catch (err: any) {
+        console.warn(`Gemini reviewer model '${modelName}' failed:`, err?.message || err);
       }
     }
   }
 
   // Fallback heuristic review if LLM unavailable
   console.log("[ReviewerAgent] Operating in deterministic code quality checker fallback mode...");
-  const hasSecurityMandate = state.extractedContext.includes('SECURITY MANDATE');
-  const hasRelativeImport = state.extractedContext.includes("from './");
 
   return {
     approved: true,

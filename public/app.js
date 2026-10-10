@@ -23,6 +23,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const closeConsoleBtn = document.getElementById('close-console-btn');
   const consoleStdinInput = document.getElementById('console-stdin-input');
   const sendStdinBtn = document.getElementById('send-stdin-btn');
+  const consoleTextContent = document.getElementById('console-text-content');
+  const terminalActiveInput = document.getElementById('terminal-active-input');
 
   let activeFilePath = 'src/sandbox/main.ts';
   let isReadOnlyBrowserSession = false;
@@ -848,37 +850,49 @@ document.addEventListener('DOMContentLoaded', () => {
   if (refreshFilesBtn) refreshFilesBtn.addEventListener('click', loadSandboxFiles);
   let isCodeExecuting = false;
 
-  async function sendStdinInputToProcess() {
-    if (!consoleStdinInput) return;
-    const val = consoleStdinInput.value;
+  async function sendStdinInputToProcess(overrideVal) {
+    const val = overrideVal !== undefined ? overrideVal : (terminalActiveInput ? terminalActiveInput.value : '');
 
     if (isCodeExecuting) {
       try {
+        if (consoleTextContent && val) {
+          consoleTextContent.textContent += `${val}\n`;
+          if (consoleOutputBody) consoleOutputBody.scrollTop = consoleOutputBody.scrollHeight;
+        }
         await fetch('/api/code/input', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ input: val })
         });
-        consoleStdinInput.value = '';
+        if (terminalActiveInput) terminalActiveInput.value = '';
       } catch (err) {
         console.warn('[RunAPI] Failed to send stdin to live process:', err);
       }
     } else {
       runActiveCode(val);
-      consoleStdinInput.value = '';
+      if (terminalActiveInput) terminalActiveInput.value = '';
     }
   }
 
   if (runCodeBtn) runCodeBtn.addEventListener('click', () => runActiveCode());
-  if (sendStdinBtn) sendStdinBtn.addEventListener('click', sendStdinInputToProcess);
-  if (consoleStdinInput) {
-    consoleStdinInput.addEventListener('keydown', (e) => {
+
+  if (terminalActiveInput) {
+    terminalActiveInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
         sendStdinInputToProcess();
       }
     });
   }
+
+  if (consoleOutputBody) {
+    consoleOutputBody.addEventListener('click', (e) => {
+      if (e.target !== terminalActiveInput) {
+        if (terminalActiveInput) terminalActiveInput.focus();
+      }
+    });
+  }
+
   if (closeConsoleBtn) closeConsoleBtn.addEventListener('click', () => {
     if (codeOutputConsole) codeOutputConsole.classList.add('hidden');
     if (isCodeExecuting) {
@@ -903,7 +917,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (consoleTimeBadge) consoleTimeBadge.textContent = '0ms';
 
-    if (consoleOutputBody) consoleOutputBody.textContent = '';
+    if (consoleTextContent) consoleTextContent.textContent = '';
+    if (terminalActiveInput) {
+      terminalActiveInput.value = '';
+      setTimeout(() => terminalActiveInput.focus(), 60);
+    }
     if (runCodeBtn) runCodeBtn.disabled = true;
     isCodeExecuting = true;
 
@@ -961,15 +979,15 @@ document.addEventListener('DOMContentLoaded', () => {
       if (data.browserUrl) {
         outText += `\n\n🌐 Live Preview URL: ${data.browserUrl}`;
       }
-      if (consoleOutputBody) {
-        consoleOutputBody.textContent = outText;
+      if (consoleTextContent) {
+        consoleTextContent.textContent = outText;
       }
     } else {
-      if (consoleOutputBody && !consoleOutputBody.textContent.trim()) {
-        consoleOutputBody.textContent = '(No output produced)';
+      if (consoleTextContent && !consoleTextContent.textContent.trim()) {
+        consoleTextContent.textContent = '(No output produced)';
       }
-      if (data.browserUrl && consoleOutputBody) {
-        consoleOutputBody.textContent += `\n\n🌐 Live Preview URL: ${data.browserUrl}`;
+      if (data.browserUrl && consoleTextContent) {
+        consoleTextContent.textContent += `\n\n🌐 Live Preview URL: ${data.browserUrl}`;
       }
     }
 
@@ -1126,8 +1144,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
       case 'CODE_CHUNK':
         if (codeOutputConsole) codeOutputConsole.classList.remove('hidden');
+        if (consoleTextContent) {
+          consoleTextContent.textContent += (data.text || '');
+        }
         if (consoleOutputBody) {
-          consoleOutputBody.textContent += (data.text || '');
           consoleOutputBody.scrollTop = consoleOutputBody.scrollHeight;
         }
         break;
@@ -2079,7 +2099,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const closeDrawerBtn = document.getElementById('close-drawer-btn');
 
   let currentGraphScope = 'current-task';
-  let currentEdgeFilter = 'all';
   let visNetworkInstance = null;
   let currentGraphData = null;
   let activeSelectedNode = null;
@@ -2116,15 +2135,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  const edgeFilterBtns = document.querySelectorAll('.edge-filter-btn');
-  edgeFilterBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
-      edgeFilterBtns.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      currentEdgeFilter = btn.dataset.edge || 'all';
-      loadGraphifyGraph();
-    });
-  });
+
 
   if (graphifyBtnLegend) {
     graphifyBtnLegend.addEventListener('click', () => {
@@ -2165,7 +2176,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function loadGraphifyGraph() {
     try {
-      const url = `/api/graphify/current?scope=${encodeURIComponent(currentGraphScope)}&activeFile=${encodeURIComponent(activeFilePath)}&edgeTypeFilter=${encodeURIComponent(currentEdgeFilter)}`;
+      const url = `/api/graphify/current?scope=${encodeURIComponent(currentGraphScope)}&activeFile=${encodeURIComponent(activeFilePath)}`;
       const res = await fetch(url);
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
@@ -2845,10 +2856,126 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  function initGitHubAuthManager() {
+    const authBtn = document.getElementById('github-auth-btn');
+    const userLabel = document.getElementById('github-user-label');
+    const modal = document.getElementById('github-modal');
+    const closeBtn = document.getElementById('close-github-modal-btn');
+    const loggedInView = document.getElementById('github-logged-in-view');
+    const loginFormView = document.getElementById('github-login-form-view');
+    const avatarImg = document.getElementById('github-avatar');
+    const profileName = document.getElementById('github-profile-name');
+    const profileBadge = document.getElementById('github-profile-badge');
+    const profileLink = document.getElementById('github-profile-link');
+    const patInput = document.getElementById('github-pat-input');
+    const saveTokenBtn = document.getElementById('github-save-token-btn');
+    const logoutBtn = document.getElementById('github-logout-btn');
+    const authError = document.getElementById('github-auth-error');
+
+    async function checkStatus() {
+      try {
+        const res = await fetch('/api/github/status');
+        const data = await res.json();
+        if (data.isAuthenticated) {
+          userLabel.textContent = `@${data.username}`;
+          authBtn.classList.add('connected');
+
+          if (profileName) profileName.textContent = `@${data.username}`;
+          if (profileBadge) profileBadge.textContent = data.authType === 'token' ? 'Token Authenticated' : 'CLI Authenticated';
+          if (avatarImg) avatarImg.src = data.avatarUrl || `https://github.com/${data.username}.png`;
+          if (profileLink) profileLink.href = data.profileUrl || `https://github.com/${data.username}`;
+
+          if (loggedInView) loggedInView.classList.remove('hidden');
+          if (loginFormView) loginFormView.classList.add('hidden');
+        } else {
+          userLabel.textContent = 'Connect GitHub';
+          authBtn.classList.remove('connected');
+
+          if (loggedInView) loggedInView.classList.add('hidden');
+          if (loginFormView) loginFormView.classList.remove('hidden');
+        }
+      } catch (err) {
+        console.warn('[GitHubAuth] Could not fetch status:', err);
+      }
+    }
+
+    if (authBtn) {
+      authBtn.addEventListener('click', () => {
+        checkStatus();
+        if (modal) modal.classList.remove('hidden');
+      });
+    }
+
+    if (closeBtn) {
+      closeBtn.addEventListener('click', () => {
+        if (modal) modal.classList.add('hidden');
+      });
+    }
+
+    if (saveTokenBtn) {
+      saveTokenBtn.addEventListener('click', async () => {
+        const token = patInput ? patInput.value.trim() : '';
+        if (!token) {
+          if (authError) {
+            authError.textContent = 'Please enter a Personal Access Token.';
+            authError.classList.remove('hidden');
+          }
+          return;
+        }
+
+        saveTokenBtn.disabled = true;
+        saveTokenBtn.textContent = 'Validating Token...';
+        if (authError) authError.classList.add('hidden');
+
+        try {
+          const res = await fetch('/api/github/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token })
+          });
+          const data = await res.json();
+          if (res.ok && data.success) {
+            if (patInput) patInput.value = '';
+            if (typeof showToast === 'function') showToast('🟢 GitHub account connected successfully!');
+            await checkStatus();
+          } else {
+            if (authError) {
+              authError.textContent = data.error || 'Authentication failed.';
+              authError.classList.remove('hidden');
+            }
+          }
+        } catch (err) {
+          if (authError) {
+            authError.textContent = err.message || 'Network error.';
+            authError.classList.remove('hidden');
+          }
+        } finally {
+          saveTokenBtn.disabled = false;
+          saveTokenBtn.textContent = 'Authenticate & Save Token';
+        }
+      });
+    }
+
+    if (logoutBtn) {
+      logoutBtn.addEventListener('click', async () => {
+        try {
+          await fetch('/api/github/logout', { method: 'POST' });
+          if (typeof showToast === 'function') showToast('GitHub session logged out.');
+          await checkStatus();
+        } catch (err) {
+          console.error('Logout error:', err);
+        }
+      });
+    }
+
+    checkStatus();
+  }
+
   // Init
   loadSandboxFiles();
   openFileInEditor('src/sandbox/main.ts');
   initStreamAndListeners();
   initMousePointerResizers();
   initMovableConsoleEngine();
+  initGitHubAuthManager();
 });

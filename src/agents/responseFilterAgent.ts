@@ -1,4 +1,4 @@
-import { ChatGroq } from '@langchain/groq';
+import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 
 export interface ResponseFilterOptions {
   userQuery: string;
@@ -22,17 +22,9 @@ export async function generateFilteredResponse(
     return "Please provide a query or question to answer.";
   }
 
-  const apiKey = process.env.GROQ_API_KEY;
+  const geminiApiKey = process.env.GEMINI_API_KEY;
 
-  if (apiKey && apiKey !== 'your_groq_api_key_here') {
-    const modelCandidates = [
-      'openai/gpt-oss-120b',
-      'llama-3.3-70b-versatile',
-      'qwen/qwen3.8-27b',
-      'llama-3.1-8b-instant'
-    ];
-
-    const systemPrompt = `You are Kaizen AI's Relevance-Based Response Filter & Synthesizer.
+  const systemPrompt = `You are Kaizen AI's Relevance-Based Response Filter & Synthesizer.
 Your sole job is to answer the user's specific query using the provided workspace context strictly as INTERNAL EVIDENCE.
 
 CRITICAL RESPONSE DIRECTIVES:
@@ -42,7 +34,7 @@ CRITICAL RESPONSE DIRECTIVES:
 4. NO CODE BLOCKS UNLESS REQUESTED: Do NOT output full code blocks or file contents unless the user explicitly requested code snippets or file implementation details.
 5. NO HALLUCINATION: Rely strictly on the evidence provided in the workspace context.`;
 
-    const userPayload = `USER QUERY: "${queryText}"
+  const userPayload = `USER QUERY: "${queryText}"
 
 RELEVANT TARGET FILES:
 ${targetFiles.length > 0 ? targetFiles.join(', ') : 'None specified'}
@@ -50,9 +42,11 @@ ${targetFiles.length > 0 ? targetFiles.join(', ') : 'None specified'}
 INTERNAL EVIDENCE / WORKSPACE CONTEXT:
 ${rawContext.slice(0, 12000)}`;
 
-    for (const modelName of modelCandidates) {
+  if (geminiApiKey && geminiApiKey !== 'your_gemini_api_key_here') {
+    const geminiCandidates = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-3.5-flash-lite'];
+    for (const modelName of geminiCandidates) {
       try {
-        const model = new ChatGroq({ apiKey, model: modelName, temperature: 0.1 });
+        const model = new ChatGoogleGenerativeAI({ apiKey: geminiApiKey, model: modelName, temperature: 0.1 });
         const res: any = await model.invoke([
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPayload }
@@ -62,7 +56,7 @@ ${rawContext.slice(0, 12000)}`;
           return responseText;
         }
       } catch (err: any) {
-        console.warn(`[ResponseFilterAgent][WARN] Model '${modelName}' execution failed:`, err?.message || err);
+        console.warn(`Gemini response filter model '${modelName}' failed:`, err?.message || err);
       }
     }
   }

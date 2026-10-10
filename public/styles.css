@@ -741,8 +741,55 @@ body {
   color: #e2e8f0;
   background-color: #06070a;
   overflow-y: auto;
+  outline: none;
+  cursor: text;
+  display: flex;
+  flex-direction: column;
+}
+
+.console-text-content {
+  margin: 0;
+  padding: 0;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  color: #e2e8f0;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+.terminal-prompt-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.12);
+}
+
+.prompt-symbol {
+  color: #38bdf8;
+  font-weight: bold;
+  font-size: 13px;
+  user-select: none;
+}
+
+.terminal-active-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #38bdf8;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  caret-color: #38bdf8;
+}
+
+.terminal-active-input::placeholder {
+  color: #475569;
+  font-weight: 400;
+  font-style: italic;
 }
 
 .console-stdin-bar {
@@ -2477,5 +2524,103 @@ kbd {
 #clear-memory-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+/* GitHub Auth Header Pill */
+.github-auth-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  border-radius: 6px;
+  color: #60a5fa;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.github-auth-pill:hover {
+  background: rgba(59, 130, 246, 0.25);
+  border-color: rgba(59, 130, 246, 0.6);
+  color: #93c5fd;
+}
+
+.github-auth-pill.connected {
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #34d399;
+}
+
+.github-auth-pill.connected:hover {
+  background: rgba(16, 185, 129, 0.25);
+  border-color: rgba(16, 185, 129, 0.7);
+}
+
+/* GitHub Modal Card */
+.github-modal-card {
+  max-width: 440px;
+  width: 90%;
+}
+
+.github-profile-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 14px;
+}
+
+.github-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 2px solid var(--primary);
+  object-fit: cover;
+}
+
+.github-profile-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.github-profile-badge {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.github-details-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.github-detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--text-secondary);
+}
+
+.modal-text-input {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg-input, #1e293b);
+  border: 1px solid var(--border-color, #334155);
+  border-radius: 6px;
+  color: var(--text-primary, #f8fafc);
+  font-size: 13px;
+  box-sizing: border-box;
+}
+
+.modal-text-input:focus {
+  border-color: var(--primary, #3b82f6);
+  outline: none;
 }
 

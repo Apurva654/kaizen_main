@@ -27,6 +27,7 @@ import { dockerSandbox } from './tools/dockerSandbox';
 import { parseBrowserInspectionResult, formatBrowserInspectionMarkdown, extractRequestedBrowserAction, resolveAccessibilityTarget } from './tools/browserSnapshotParser';
 import { performWebSearch, setSSEEmitter } from './tools/webSearchTool';
 import { GraphifyEngine } from './tools/graphifyEngine';
+import { githubAuthManager } from './tools/githubAuthManager';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -117,6 +118,41 @@ app.post('/api/permission/dryrun', (req: Request, res: Response) => {
   }
 });
 
+// GitHub Authentication Status Endpoint
+app.get('/api/github/status', async (req: Request, res: Response) => {
+  try {
+    const status = await githubAuthManager.getStatus();
+    res.json(status);
+  } catch (err: any) {
+    res.status(500).json({ isAuthenticated: false, authType: 'none', error: err?.message || String(err) });
+  }
+});
+
+// GitHub Authentication Login / Token Endpoint
+app.post('/api/github/login', async (req: Request, res: Response) => {
+  const { token } = req.body;
+  if (!token || typeof token !== 'string') {
+    res.status(400).json({ success: false, error: 'GitHub Personal Access Token is required.' });
+    return;
+  }
+  try {
+    const status = await githubAuthManager.setToken(token);
+    res.json({ success: true, status });
+  } catch (err: any) {
+    res.status(401).json({ success: false, error: err?.message || 'Invalid token or API error' });
+  }
+});
+
+// GitHub Authentication Logout Endpoint
+app.post('/api/github/logout', (req: Request, res: Response) => {
+  try {
+    githubAuthManager.clearToken();
+    res.json({ success: true, message: 'GitHub session logged out.' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || String(err) });
+  }
+});
+
 let activeLiveProcess: {
   child: ChildProcess;
   filePath: string;
@@ -177,13 +213,13 @@ app.post('/api/code/run', async (req: Request, res: Response) => {
       executable = 'python';
       args = ['-u', targetFile];
     } else if (ext === '.ts' || ext === '.js') {
-      executable = 'npx';
+      executable = process.platform === 'win32' ? 'npx.cmd' : 'npx';
       args = ['ts-node', '--transpile-only', targetFile];
     }
 
     const child = spawn(executable, args, {
       cwd: process.cwd(),
-      shell: true,
+      shell: false,
       env: { ...process.env, PYTHONUNBUFFERED: '1' }
     });
 
@@ -1099,40 +1135,25 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
           }
         }
 
-        if (apiKey && apiKey !== 'your_groq_api_key_here') {
-          const modelCandidates = [
-            'openai/gpt-oss-120b',
-            'openai/gpt-oss-20b',
-            'qwen/qwen3.8-27b',
-            'llama-3.3-70b-versatile',
-            'llama-3.1-8b-instant'
-          ];
-
-          for (const modelName of modelCandidates) {
-            try {
-              const { ChatGroq } = await import('@langchain/groq');
-              const model = new ChatGroq({ apiKey, model: modelName, temperature: 0.3 });
-              const systemContent = `You are Kaizen, an experienced developer and AI assistant.
+        try {
+          const { invokeModel } = await import('./tools/modelProvider');
+          const contextBlock = memoryEngine.formatGeneralQueryContext();
+          const systemContent = `You are Kaizen, an experienced developer and AI assistant.
   ${systemPromptClockExtension}
   Always check the USER PROFILE & KNOWN FACTS, CONVERSATION HISTORY, and LIVE WEB SEARCH RESULTS provided below to answer user queries:
 
-  ${state.extractedContext || userInput}
+  ${contextBlock}
   ${webSearchResultsText}
 
   Directives:
   - NEVER address the user as "Alice" or invent personal names/details unless explicitly provided in trusted context.
+  - If the user asks for their name, identity, preferences, or previous details (e.g. "my name?", "what is my name?"), state their name/identity directly from the USER PROFILE & KNOWN FACTS or RECENT CONVERSATION HISTORY above.
+  - If the user provides a short name or answer (e.g. "APURVA"), connect it with the recent conversation context and acknowledge it warmly.
   - Provide concise, friendly, human-like, and direct answers without generating code unless explicitly requested.`;
 
-              const res: any = await model.invoke([
-                { role: 'system', content: systemContent },
-                { role: 'user', content: rawUserInput }
-              ]);
-              answer = typeof res.content === 'string' ? res.content : String(res.content ?? '');
-              if (answer) break;
-            } catch (err) {
-              console.warn(`General query LLM invocation failed for model '${modelName}':`, err);
-            }
-          }
+          answer = await invokeModel(systemContent, rawUserInput, { temperature: 0.3 });
+        } catch (err) {
+          console.warn('General query LLM invocation failed:', err);
         }
       }
 

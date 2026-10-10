@@ -145,6 +145,28 @@ ${longTermBlock}
 ${episodicBlock}
 `;
   }
+
+  public formatGeneralQueryContext(workspaceId: string = 'default'): string {
+    const longTermFacts = this.longTermMemory.getAllFacts(workspaceId);
+    const shortTermEvents = this.shortTermMemory.getEvents(12);
+
+    let factsSection = '';
+    if (longTermFacts.length > 0) {
+      factsSection = longTermFacts.map(f => `- ${f.key}: ${f.value}`).join('\n');
+    } else {
+      factsSection = '(No saved user facts)';
+    }
+
+    let historySection = '';
+    const recentDialog = shortTermEvents.filter(e => e.role === 'user' || e.role === 'assistant');
+    if (recentDialog.length > 0) {
+      historySection = recentDialog.map(e => `${e.role === 'user' ? 'User' : 'Assistant'}: ${e.content}`).join('\n');
+    } else {
+      historySection = '(No previous messages)';
+    }
+
+    return `=== USER PROFILE & KNOWN FACTS ===\n${factsSection}\n\n=== RECENT CONVERSATION HISTORY ===\n${historySection}`;
+  }
 }
 
 export const memoryEngine = new MemoryEngine();

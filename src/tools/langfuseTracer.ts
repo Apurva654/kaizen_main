@@ -17,12 +17,12 @@ export interface LLMMetrics {
 
 // Estimated pricing per 1,000,000 tokens (USD)
 const MODEL_PRICING: Record<string, { prompt: number; completion: number }> = {
-  'llama-3.3-70b-versatile': { prompt: 0.59, completion: 0.79 },
-  'llama-3.1-8b-instant': { prompt: 0.05, completion: 0.08 },
-  'llama3-70b-8192': { prompt: 0.59, completion: 0.79 },
-  'llama3-8b-8192': { prompt: 0.05, completion: 0.08 },
-  'qwen-2.5-coder-32b': { prompt: 0.20, completion: 0.50 },
-  'deepseek-r1-distill-llama-70b': { prompt: 0.59, completion: 0.79 }
+  'gemini-2.5-flash': { prompt: 0.075, completion: 0.30 },
+  'gemini-2.0-flash': { prompt: 0.10, completion: 0.40 },
+  'gemini-1.5-flash': { prompt: 0.075, completion: 0.30 },
+  'gemini-1.5-pro': { prompt: 1.25, completion: 5.00 },
+  'gemini-3.5-flash-lite': { prompt: 0.075, completion: 0.30 },
+  'gemini-2.0-flash-lite': { prompt: 0.075, completion: 0.30 }
 };
 
 export class LangfuseTracerManager {

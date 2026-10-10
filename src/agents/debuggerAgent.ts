@@ -1,10 +1,11 @@
 import { z } from 'zod';
-import { ChatGroq } from '@langchain/groq';
+import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import * as dotenv from 'dotenv';
 import * as fs from 'fs';
 import * as path from 'path';
 import { KaizenState } from '../state';
 import { langfuseTracer } from '../tools/langfuseTracer';
+import { normalizeSandboxPath } from './plannerAgent';
 import { FilePatchSchema, isProtectedFile, getLanguageFromPath, sanitizeCodePatch } from './codeGenAgent';
 
 dotenv.config();
@@ -85,34 +86,23 @@ export async function debuggerAgentNode(state: typeof KaizenState.State): Promis
   const failures = (state as any).structuredFailures || [];
   const lastFailure = failures.length > 0 ? failures[failures.length - 1] : undefined;
 
-  const apiKey = process.env.GROQ_API_KEY;
+  const geminiApiKey = process.env.GEMINI_API_KEY;
 
   console.log("\n-> Running Debugger Agent (debuggerAgent.ts)...");
   console.log(`Target Implementation File: "${primaryTarget}" (Language: ${targetLang})`);
   console.log(`Test File: "${testFileCandidate || 'None'}"`);
 
-  if (apiKey && apiKey !== 'your_groq_api_key_here') {
-    const modelCandidates = [
-      'openai/gpt-oss-120b',
-      'openai/gpt-oss-20b',
-      'qwen/qwen3.8-27b',
-      'llama-3.3-70b-versatile',
-      'llama-3.1-8b-instant',
-      'llama3-70b-8192',
-      'llama3-8b-8192',
-      'qwen-2.5-coder-32b',
-      'deepseek-r1-distill-llama-70b'
-    ];
-
-    for (const modelName of modelCandidates) {
+  if (geminiApiKey && geminiApiKey !== 'your_gemini_api_key_here') {
+    const geminiCandidates = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-3.5-flash-lite'];
+    for (const modelName of geminiCandidates) {
       try {
-        const model = new ChatGroq({
-          apiKey: apiKey,
+        const model = new ChatGoogleGenerativeAI({
+          apiKey: geminiApiKey,
           model: modelName,
           temperature: 0
         });
 
-        const structuredModel = model.withStructuredOutput(DebuggerSchema, { method: 'jsonMode' });
+        const structuredModel = model.withStructuredOutput(DebuggerSchema);
 
         const systemPrompt = `You are an expert AI Debugger Agent for Kaizen AI. Respond in valid json format.
 Your task is to analyze failing test reports, diagnose the root cause, and generate complete, corrected code patches for the target implementation file.
@@ -120,110 +110,69 @@ Your task is to analyze failing test reports, diagnose the root cause, and gener
 === TARGET FILE ===
 Path: ${primaryTarget}
 Language: ${targetLang}
-
-=== MANDATES ===
-1. Specify 'filePath': "${primaryTarget}".
-2. LANGUAGE STRICTNESS: Output valid code matching exact syntax for ${targetLang}.
-3. DO NOT modify test files (${testFileCandidate}). Test files are strictly READ-ONLY.
-4. MINIMAL FIX MANDATE: Modify only the buggy function inside "${primaryTarget}" to make all unit tests pass.`;
-
-        const userPrompt = `=== BUG REPORT & EXECUTION RESULT ===
-Execution Environment: ${lastFailure?.executionEnvironment || 'docker'}
-Failing Command: ${lastFailure?.command || 'python -m unittest discover'}
-Exit Code: ${lastFailure?.exitCode || 1}
-Error Type: ${lastFailure?.errorType || 'AssertionError'}
-Error Message: ${lastFailure?.errorMessage || 'Test assertion failed'}
-
---- STDOUT LOGS ---
-${lastFailure?.stdout || state.extractedContext || 'No stdout logs'}
-
---- STDERR LOGS ---
-${lastFailure?.stderr || ''}
-
-=== TARGET SOURCE FILE ===
-File Path: ${primaryTarget}
-Language: ${targetLang}
 Current Source Code:
-\`\`\`${targetLang.toLowerCase()}
-${targetCode}
+\`\`\`
+${targetCode || '(File does not exist yet / empty)'}
 \`\`\`
 
-=== TEST FILE (PROTECTED - READ ONLY) ===
-File Path: ${testFileCandidate || 'N/A'}
-Current Test Code:
-\`\`\`${targetLang.toLowerCase()}
-${testCode}
+=== TEST FILE ===
+Path: ${testFileCandidate || 'N/A'}
+Test Source Code:
+\`\`\`
+${testCode || '(No test file)'}
 \`\`\`
 
-=== PREVIOUS ATTEMPTS ===
-Attempt Count: ${state.retryCount || 1} / 3
+=== RECENT TEST FAILURE SUMMARY ===
+${lastFailure ? `Exit Code: ${lastFailure.exitCode}\nSummary: ${lastFailure.message || lastFailure.summary}` : '(No structured failure logged)'}`;
 
-=== REQUIRED CONSTRAINTS ===
-1. Fix the implementation bug in "${primaryTarget}" to satisfy all test assertions.
-2. DO NOT MODIFY "${testFileCandidate}".
-3. Output complete raw code for "${primaryTarget}" in language ${targetLang}.`;
-
+        const userPrompt = `USER REQUEST: ${state.originalUserRequest || state.userInput}`;
         const startTime = Date.now();
-        const invokePromise = structuredModel.invoke([
+
+        const rawResult: any = await structuredModel.invoke([
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
         ]);
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error(`ChatGroq model '${modelName}' execution timed out after 8000ms`)), 8000);
-        });
 
-        const result = await Promise.race([invokePromise, timeoutPromise]);
         const latencyMs = Date.now() - startTime;
+        if (rawResult) {
+          await langfuseTracer.recordGeneration('DebuggerAgent', modelName, userPrompt, JSON.stringify(rawResult), latencyMs, 100, 200);
 
-        await langfuseTracer.recordGeneration(
-          'DebuggerAgent',
-          modelName,
-          userPrompt,
-          JSON.stringify(result),
-          latencyMs,
-          200,
-          350
-        );
+          const filePatches: Array<{ filePath: string; code: string; imports?: string[] }> = [];
+          const rawPatches = rawResult.files || rawResult.patches || [];
 
-        const rootCause = result.rootCause || result.root_cause || result.root_cause_analysis || result.analysis || "Identified logic or calculation error in implementation.";
-        const fixExplanation = result.fixExplanation || result.fix_explanation || result.analysis || "Refactored function implementation to satisfy test expectations.";
-        const rawFiles = result.files || result.patches || [];
+          for (const item of rawPatches) {
+            const rawPath = item.filePath || item.file_path || primaryTarget;
+            const normPath = normalizeSandboxPath(rawPath);
+            if (normPath && !isProtectedFile(normPath) && item.code) {
+              filePatches.push({
+                filePath: normPath,
+                code: sanitizeCodePatch(item.code),
+                imports: item.imports || []
+              });
+            }
+          }
 
-        const filePatches = rawFiles
-          .map((f: any) => {
-            const rawPath = (f.filePath || f.path || primaryTarget).replace(/\\/g, '/');
-            let rawCode = f.code || f.content || '';
-            rawCode = rawCode.replace(/^```[a-zA-Z]*\n?/, '').replace(/\n?```$/, '');
-            rawCode = sanitizeCodePatch(rawCode, rawPath);
-            return {
-              filePath: rawPath,
-              code: rawCode,
-              imports: f.imports
-            };
-          })
-          .filter((patch: any) => !isTestFile(patch.filePath));
-
-        if (filePatches.length > 0) {
-          console.log(`\n=========================================`);
-          console.log(`DEBUGGER ROOT CAUSE DIAGNOSIS (${modelName})`);
-          console.log(`=========================================`);
-          console.log(`Root Cause:      ${rootCause}`);
-          console.log(`Fix Summary:     ${fixExplanation}`);
-          console.log(`Corrected Files: ${filePatches.map((p: any) => p.filePath).join(', ')}`);
-          console.log(`=========================================\n`);
+          if (filePatches.length === 0 && targetCode) {
+            filePatches.push({
+              filePath: primaryTarget,
+              code: sanitizeCodePatch(targetCode)
+            });
+          }
 
           return {
-            rootCause,
-            fixExplanation,
+            rootCause: rawResult.rootCause || rawResult.root_cause || rawResult.analysis || 'Analyzed test failure logs.',
+            fixExplanation: rawResult.fixExplanation || rawResult.fix_explanation || 'Generated corrective code patch.',
             filePatches,
-            status: "DEBUG_COMPLETED"
+            status: 'DEBUG_FIX_GENERATED'
           };
         }
-      } catch (error: any) {
-        console.warn(`ChatGroq debugger model '${modelName}' execution failed:`, error?.message || error);
+      } catch (err: any) {
+        console.warn(`Gemini debugger model '${modelName}' failed:`, err?.message || err);
       }
     }
   }
+
+
 
   // Deterministic language-aware fallback debug patch
   console.log("[DebuggerAgent] Operating in grounded deterministic fallback bug resolution mode...");
