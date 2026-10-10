@@ -132,11 +132,11 @@ export function isTerminalQuery(input: string): boolean {
   if (hasTerminalPhrase) return true;
 
   // 2. Direct command invocation starting with executable command or having explicit command syntax
-  const startsWithCommand = /^\s*(pytest|python\s+-[a-zA-Z0-9_\-]+|python3?\s+|npm\s+|node\s+|npx\s+|tsc\s+|git\s+|rm\s+|del\s+|dir\b|ls\b|cat\s+|pwd\b|mkdir\s+|docker\s+|cargo\s+|go\s+)/i.test(lower);
+  const startsWithCommand = /^\s*(pytest|pip3?\s+|python3?\s+|npm\s+|node\s+|npx\s+|tsc\s+|git\s+|rm\s+|del\s+|dir\b|ls\b|cat\s+|pwd\b|mkdir\s+|docker\s+|cargo\s+|go\s+|bun\s+|pnpm\s+|yarn\s+|conda\s+|poetry\s+|uv\s+|pipenv\s+|gem\s+|dotnet\s+|composer\s+)/i.test(lower);
   if (startsWithCommand) return true;
 
   // 3. Command inside backticks or quotes without code creation context (e.g. `pytest src/...`)
-  if (/^\s*[`'"](pytest|python|npm|node|npx|tsc|git|rm|del|dir|ls|cat|pwd|mkdir|docker|cargo|go)\b/i.test(lower)) {
+  if (/^\s*[`'"](pytest|pip|pip3|python|python3|npm|node|npx|tsc|git|rm|del|dir|ls|cat|pwd|mkdir|docker|cargo|go|bun|pnpm|yarn|conda|poetry|uv|pipenv|gem|dotnet|composer)\b/i.test(lower)) {
     return true;
   }
 
@@ -160,8 +160,8 @@ export function extractTerminalCommand(input: string): string {
     }
   }
 
-  // 2. Check for explicit shell command syntax like pytest, python, rm, del, npm, node, dir, ls, etc.
-  const explicitCmdMatch = raw.match(/\b(pytest\s+[^\s,;]+|python\s+-[a-zA-Z0-9_\-\s"'\/\.\\]+|rm\s+-[a-zA-Z]+\s+[^\s,;]+|rm\s+[^\s,;]+|del\s+[^\s,;]+|rmdir\s+[^\s,;]+|npm\s+[^\s,;]+|node\s+[^\s,;]+|dir\b|ls\b|cat\s+[^\s,;]+|pwd\b|mkdir\s+[^\s,;]+)\b/i);
+  // 2. Check for explicit shell command syntax like pytest, pip, python, rm, del, npm, node, dir, ls, etc.
+  const explicitCmdMatch = raw.match(/\b(pytest\s+[^\s,;]+|pip3?\s+install\s+[^\s,;]+|pip3?\s+[^\s,;]+|python3?\s+-[a-zA-Z0-9_\-\s"'\/\.\\]+|rm\s+-[a-zA-Z]+\s+[^\s,;]+|rm\s+[^\s,;]+|del\s+[^\s,;]+|rmdir\s+[^\s,;]+|npm\s+[^\s,;]+|node\s+[^\s,;]+|dir\b|ls\b|cat\s+[^\s,;]+|pwd\b|mkdir\s+[^\s,;]+)\b/i);
   if (explicitCmdMatch) {
     return explicitCmdMatch[0].trim();
   }
@@ -186,7 +186,12 @@ export function extractTerminalCommand(input: string): string {
     return '';
   }
 
-  const validCmdPrefixes = ['pytest', 'python', 'npm', 'node', 'npx', 'tsc', 'git', 'rm', 'del', 'dir', 'ls', 'cat', 'pwd', 'mkdir', 'cp', 'mv', 'echo', 'touch', 'docker', 'cargo', 'go'];
+  const validCmdPrefixes = [
+    'pytest', 'pip', 'pip3', 'python', 'python3', 'conda', 'poetry', 'uv', 'pipenv',
+    'npm', 'node', 'npx', 'tsc', 'bun', 'pnpm', 'yarn',
+    'git', 'rm', 'del', 'dir', 'ls', 'cat', 'pwd', 'mkdir', 'cp', 'mv', 'echo', 'touch',
+    'docker', 'cargo', 'go', 'gem', 'dotnet', 'composer'
+  ];
   const firstWord = clean.split(/\s+/)[0].toLowerCase();
   
   if (validCmdPrefixes.includes(firstWord) || firstWord.endsWith('.exe') || firstWord.endsWith('.bat') || firstWord.endsWith('.cmd') || firstWord.startsWith('./') || firstWord.startsWith('.\\')) {

@@ -258,9 +258,23 @@ export class KaizenMCPServer {
           }
 
           case 'terminal_exec': {
-            const command = String(args?.command || '');
+            let command = String(args?.command || '');
             const cwd = String(args?.cwd || rootDir);
             const useSandbox = Boolean(args?.useSandbox);
+
+            // Smart auto-resolution: If target script is in src/sandbox, rewrite relative path
+            const scriptMatch = command.match(/^\s*(python3?|node|npx\s+ts-node)\s+([^\s]+)(.*)$/i);
+            if (scriptMatch) {
+              const execTool = scriptMatch[1];
+              const scriptPath = scriptMatch[2];
+              const restArgs = scriptMatch[3] || '';
+              if (!fs.existsSync(path.resolve(cwd, scriptPath))) {
+                const sandboxScriptPath = path.resolve(rootDir, 'src/sandbox', path.basename(scriptPath));
+                if (fs.existsSync(sandboxScriptPath)) {
+                  command = `${execTool} src/sandbox/${path.basename(scriptPath)}${restArgs}`;
+                }
+              }
+            }
 
             if (useSandbox) {
               const sandboxRes = await dockerSandbox.executeSandboxedCommand(command, cwd);
