@@ -30,6 +30,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let isReadOnlyBrowserSession = false;
   let sseSource = null;
   let pastedImagePayload = null;
+  let currentSessionId = null;
 
   // Detect VS Code Extension Environment
   const vscode = (typeof acquireVsCodeApi === 'function') ? acquireVsCodeApi() : null;
@@ -1021,7 +1022,55 @@ document.addEventListener('DOMContentLoaded', () => {
       sseSource.addEventListener('pipeline_error', (e) => handleIncomingEvent('PIPELINE_ERROR', JSON.parse(e.data)));
       sseSource.addEventListener('code_chunk', (e) => handleIncomingEvent('CODE_CHUNK', JSON.parse(e.data)));
       sseSource.addEventListener('code_exit', (e) => handleIncomingEvent('CODE_EXIT', JSON.parse(e.data)));
+      checkBackendHealthStandalone();
     }
+  }
+
+  function updateBackendStatusUI(data) {
+    const pill = document.getElementById('backend-status-pill');
+    const text = document.getElementById('backend-status-text');
+    if (!pill || !text) return;
+
+    if (data.connected) {
+      pill.className = 'connection-status-pill connected';
+      const model = data.health?.modelProvider === 'gemini' ? 'Gemini 2.5' : 'Local';
+      text.textContent = `Backend: Online (${model})`;
+      pill.title = `Connected to ${data.url || 'http://localhost:3000'}\nModel Provider: ${data.health?.modelProvider || 'unknown'}\nClick to re-check connection`;
+    } else if (data.state === 'connecting') {
+      pill.className = 'connection-status-pill connecting';
+      text.textContent = 'Backend: Connecting...';
+      pill.title = `Connecting to ${data.url || 'http://localhost:3000'}...`;
+    } else {
+      pill.className = 'connection-status-pill disconnected';
+      text.textContent = 'Backend: Offline';
+      pill.title = `Kaizen Backend is offline at ${data.url || 'http://localhost:3000'}\nRun "npm run server" to start it.\nClick to re-check.`;
+    }
+  }
+
+  async function checkBackendHealthStandalone() {
+    updateBackendStatusUI({ state: 'connecting' });
+    try {
+      const res = await fetch('/api/health');
+      if (res.ok) {
+        const health = await res.json();
+        updateBackendStatusUI({ connected: true, health, url: window.location.origin });
+      } else {
+        updateBackendStatusUI({ connected: false, url: window.location.origin });
+      }
+    } catch {
+      updateBackendStatusUI({ connected: false, url: window.location.origin });
+    }
+  }
+
+  const backendStatusPill = document.getElementById('backend-status-pill');
+  if (backendStatusPill) {
+    backendStatusPill.addEventListener('click', async () => {
+      if (isVsCodeEnv) {
+        vscode.postMessage({ type: 'CHECK_BACKEND' });
+      } else {
+        await checkBackendHealthStandalone();
+      }
+    });
   }
 
   function updateRiskScoreBadge(score) {
@@ -1079,6 +1128,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Run ID guard to ignore stale events from old runs
     if (type === 'PIPELINE_START') {
       currentRunId = data.runId || `run_${Date.now()}`;
+      if (data.sessionId) currentSessionId = data.sessionId;
       if (data.route !== 'MCP_BROWSER' && data.route !== 'ROUTED_MCP_BROWSER') {
         exitReadOnlyBrowserMode();
       }
@@ -1089,6 +1139,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     switch (type) {
+      case 'BACKEND_STATUS':
+        updateBackendStatusUI(data);
+        break;
       case 'AGENT_STEP':
         updateStepper(data.agent, data.status, data.message, data.runId);
         if (data.result && data.result.targetFiles) {
@@ -1599,23 +1652,42 @@ document.addEventListener('DOMContentLoaded', () => {
       </div>
       <p style="font-size: 12px; color: var(--text-main);">${data.message}</p>
       ${stepsHtml}
-      <textarea class="choice-input" placeholder="Provide feedback or guidance (optional)..." rows="2"></textarea>
+      <textarea class="choice-input" placeholder="Provide feedback or guidance to modify the plan (optional)..." rows="2"></textarea>
       <div class="choice-actions">
         <button class="btn-reject">Reject Plan</button>
+        <button class="btn-feedback" style="background: rgba(99, 102, 241, 0.15); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500;">Modify Plan with Feedback</button>
         <button class="btn-approve">Approve & Generate Code</button>
       </div>
     `;
 
     const feedbackInput = card.querySelector('.choice-input');
     const approveBtn = card.querySelector('.btn-approve');
+    const feedbackBtn = card.querySelector('.btn-feedback');
     const rejectBtn = card.querySelector('.btn-reject');
+
+    feedbackBtn?.addEventListener('click', async () => {
+      const feedback = feedbackInput.value.trim();
+      if (!feedback) {
+        feedbackInput.focus();
+        feedbackInput.placeholder = 'Please enter your feedback to modify the plan...';
+        return;
+      }
+      await sendHitlResponse('feedback', feedback);
+      card.innerHTML = `<div class="choice-card-header" style="color: #818cf8">🔄 Feedback Submitted — Modifying Plan...</div>`;
+      if (stepperInlineStatus) stepperInlineStatus.textContent = '🔄 Updating plan with user feedback...';
+    });
 
     approveBtn.addEventListener('click', async () => {
       const feedback = feedbackInput.value.trim();
-      const action = feedback ? 'feedback' : 'approve';
-      await sendHitlResponse(action, feedback);
-      card.innerHTML = `<div class="choice-card-header" style="color: var(--success)">✔ Plan Approved by Developer</div>`;
-      if (stepperInlineStatus) stepperInlineStatus.textContent = '⚡ Plan approved. Starting Coder...';
+      if (feedback) {
+        await sendHitlResponse('feedback', feedback);
+        card.innerHTML = `<div class="choice-card-header" style="color: #818cf8">🔄 Feedback Submitted — Modifying Plan...</div>`;
+        if (stepperInlineStatus) stepperInlineStatus.textContent = '🔄 Updating plan with user feedback...';
+      } else {
+        await sendHitlResponse('approve');
+        card.innerHTML = `<div class="choice-card-header" style="color: var(--success)">✔ Plan Approved by Developer</div>`;
+        if (stepperInlineStatus) stepperInlineStatus.textContent = '⚡ Plan approved. Starting Coder...';
+      }
     });
 
     rejectBtn.addEventListener('click', async () => {
@@ -1630,12 +1702,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function sendHitlResponse(action, message = '') {
     if (isVsCodeEnv) {
-      vscode.postMessage({ type: 'HITL_RESPOND', action, message });
+      vscode.postMessage({ type: 'HITL_RESPOND', action, message, sessionId: currentSessionId });
     } else {
       await fetch('/api/hitl/respond', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, message })
+        body: JSON.stringify({ action, message, sessionId: currentSessionId })
       });
     }
   }

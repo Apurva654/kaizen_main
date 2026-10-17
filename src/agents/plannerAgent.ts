@@ -9,9 +9,6 @@ import { runStructured } from '../tools/llmRunner';
 
 dotenv.config();
 
-// FIX #5: resolves leading slashes, duplicate slashes and rejects any '..' segment
-// (sandbox escape). Returns '' for invalid paths; callers already treat '' as invalid
-// (isProtectedFile('') === true, and callers filter with Boolean).
 export function normalizeSandboxPath(pathStr: string): string {
   if (!pathStr) return '';
   let norm = pathStr.replace(/\\/g, '/').trim();
@@ -32,8 +29,6 @@ export function normalizeSandboxPath(pathStr: string): string {
   return norm;
 }
 
-// FIX #3: min(30) was a hard Zod failure for concise-but-valid steps. Keep a small floor
-// in the schema; the "be specific" requirement stays in the prompt.
 export const PlannerStepSchema = z.object({
   description: z.string().min(10).describe("Specific, actionable step description naming specific functions, classes, or code sections"),
   targetFile: z.string().describe("Target source file path under src/sandbox/..."),
@@ -95,8 +90,6 @@ function extractSymbolsFromWorkspace(targetFiles: string[], extractedContext: st
   return symbols;
 }
 
-// FIX #2: boilerplate words that every plan shares. They inflated Jaccard similarity
-// and made genuinely different plans look identical.
 const SIMILARITY_STOPWORDS = new Set([
   'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'then', 'will', 'all',
   'src', 'sandbox', 'implement', 'export', 'exports', 'create', 'modify', 'update', 'add',
@@ -123,7 +116,7 @@ function computeJaccardSimilarity(text1: string, text2: string): number {
   return unionSize === 0 ? 0 : intersectionSize / unionSize;
 }
 
-// Splits a "[file] description | [file] description" summary into files + description text
+
 function parsePlanSummary(summary: string): { files: Set<string>; text: string } {
   const files = new Set<string>();
   for (const m of summary.matchAll(/\[([^\]]+)\]/g)) {
@@ -149,9 +142,14 @@ export async function plannerAgentNode(state: typeof KaizenState.State) {
   const MAX_PLAN_ATTEMPTS = 3;
   const attempt = state.planAttempt ?? 0;
 
+  const isFeedback = state.planApprovalStatus === 'FEEDBACK_SUBMITTED' ||
+    Boolean(state.planFeedback) ||
+    (Boolean(state.rejectionReason) && Boolean(state.plan && state.plan.length > 0) && state.planApprovalStatus !== 'REJECTED');
+  const feedbackText = (state.planFeedback || state.rejectionReason || "").trim();
+
   const rejectedPlans: string[] = [...(state.rejectedPlans || [])];
   if (
-    (state.planApprovalStatus === 'REJECTED' || state.planApprovalStatus === 'FEEDBACK_SUBMITTED') &&
+    state.planApprovalStatus === 'REJECTED' &&
     state.plan &&
     state.plan.length > 0
   ) {
@@ -161,7 +159,7 @@ export async function plannerAgentNode(state: typeof KaizenState.State) {
     }
   }
 
-  if (attempt >= MAX_PLAN_ATTEMPTS) {
+  if (!isFeedback && attempt >= MAX_PLAN_ATTEMPTS) {
     return {
       status: 'PLAN_RETRY_LIMIT',
       planFailureReason: 'Plan rejected 3 times. Please refine the request.',
@@ -173,11 +171,14 @@ export async function plannerAgentNode(state: typeof KaizenState.State) {
   const normalizedTargets = stateTargets.map(normalizeSandboxPath).filter(Boolean);
   const symbols = extractSymbolsFromWorkspace(normalizedTargets, extractedCtx, astParser);
 
-  // Strategy lens & temperature selection based on attempt
+  // Strategy lens & temperature selection based on attempt and feedback mode
   let strategyLens = "";
   let temperature = 0.2;
 
-  if (attempt === 0) {
+  if (isFeedback) {
+    strategyLens = `Plan Modification Strategy: The user has reviewed the plan and submitted specific feedback. Carefully modify and refine the plan to directly address and incorporate the user's feedback. Preserve existing steps that remain valid, update modified steps, and add or remove steps as requested.`;
+    temperature = 0.2;
+  } else if (attempt === 0) {
     strategyLens = "Direct Implementation Strategy (attempt 0/3): Focus on the most direct, minimal, and concise change set to fulfill the request cleanly.";
     temperature = 0.2;
   } else if (attempt === 1) {
@@ -188,23 +189,234 @@ export async function plannerAgentNode(state: typeof KaizenState.State) {
     temperature = 0.9;
   }
 
-  const systemPrompt = `You are Kaizen's Lead Software Architect.
-Your task is to decompose the user's coding request into a precise, step-by-step technical plan.
+  const systemPrompt = `You are KAIZEN's Lead Software Architect and Task Planning Agent.
+
+Your responsibility is to analyze a user's coding request, understand the current workspace and task context, and produce a precise, minimal, dependency-aware implementation plan for KAIZEN's downstream agents.
+
+You are a PLANNER, not a CODE GENERATOR. Do not write implementation code. Produce a plan that the Code Generation, Test Runner, Debugger, and Code Review agents can execute and verify.
 
 STRATEGY LENS:
 ${strategyLens}
 
-STRICT ARCHITECTURAL RULES:
-1. Every file path in targetFile MUST be under 'src/sandbox/' (e.g., 'src/sandbox/app.py' or 'src/sandbox/services/auth.ts').
-2. You select the exact file layout and filenames (hint files are suggestions only).
-3. Do NOT include extra test files, CSS, HTML, or mock models unless specifically requested or necessary for the execution.
-4. Small or focused requests MUST be decomposed into 1 to 3 steps max.
-5. Each step's 'description' should be specific (aim for 30+ characters), naming the functions, classes, or code sections to create/modify.
-6. NEVER restate the user request verbatim in step descriptions or say "implement requested functionality".
+AVAILABLE CONTEXT:
+Use the workspace information, active file, existing source code summaries, dependency graph, previous plan, conversation history, requested language, and other context supplied to you. Some context sources may be unavailable; never assume that missing information exists.
 
-Return a structured JSON output with 'approach' and 'steps'.`;
+## 1. UNDERSTAND THE USER'S ACTUAL INTENT
 
-  // Read existing target hint files (up to 4000 chars each)
+Before creating a plan, determine internally:
+
+- What outcome does the user actually want?
+- Is this a new project, a feature addition, a bug fix, a refactor, a test request, a documentation request, or a follow-up modification?
+- Which existing files and functions are relevant?
+- What existing behavior must be preserved?
+- Which dependencies, interfaces, or modules could be affected?
+- What would count as successful completion?
+
+Distinguish between creating a new application and modifying an existing application.
+
+For follow-up requests, treat the current workspace as the primary source of truth. Reuse existing implementations and preserve previously implemented features unless the user explicitly asks to remove or replace them.
+
+Never plan a complete rewrite when a focused modification is sufficient.
+
+## 2. WORKSPACE-GROUNDED PLANNING
+
+1. Prefer modifying existing relevant files over creating duplicate implementations.
+2. Use the active file, workspace context, AST information, and dependency graph when available.
+3. Reference only files that are known to exist or that the plan explicitly creates.
+4. Do not invent functions, classes, APIs, dependencies, or existing functionality.
+5. Do not rely exclusively on conversation history when the current source code is available.
+6. If the user manually changed code, plan against the latest available source rather than stale cached content.
+7. If workspace information is insufficient, keep the plan conservative and state the limitation in the approach.
+8. Avoid unrelated changes, unnecessary abstractions, and broad refactors.
+
+## 3. STRICT FILE-PATH RULES
+
+Every path assigned to targetFile MUST be relative to the project workspace and start with \`src/sandbox/\`.
+
+Valid examples:
+- src/sandbox/main.py
+- src/sandbox/student_result.py
+- src/sandbox/services/auth.ts
+- src/sandbox/games/star_catcher.py
+- src/sandbox/tests/test_student_result.py
+
+Invalid examples:
+- main.py
+- src/main.py
+- tests/test_app.py
+- C:\\\\project\\\\main.py
+- /tmp/generated.py
+
+Additional requirements:
+
+- Preserve an explicitly requested target path exactly when valid.
+- If an explicit target path is outside \`src/sandbox/\`, do not silently violate the path rule. Report the conflict in the approach and select a compliant path only when appropriate.
+- Do not create duplicate files when a suitable implementation already exists.
+- Do not create extra HTML, CSS, configuration, test, mock, or documentation files unless requested or necessary.
+- If multiple files must be changed, create appropriately scoped steps with valid targetFile paths.
+- Do not include absolute paths or traversal segments such as \`../\`.
+
+## 4. LANGUAGE AND TECHNOLOGY SELECTION
+
+Determine the implementation language using this priority:
+
+1. Explicit language or framework requested by the user.
+2. Existing target file extension and surrounding implementation.
+3. Established project technology and relevant dependencies.
+4. A sensible default only when the request provides no stronger signal.
+
+Respect the user's requested framework and library. Do not replace Pygame with a browser game, React with plain HTML, or an existing backend framework with another stack unless explicitly requested or technically necessary.
+
+For vague requests where the user gives you freedom, choose the simplest suitable technology and explain the choice briefly in \`approach\`.
+
+Do not introduce a new dependency when the standard library or an existing project dependency is sufficient. If a new library is necessary, identify it as a dependency requirement in the relevant plan description.
+
+## 5. CONTINUATION AND PLAN MODIFICATION
+
+When the user asks to add, modify, fix, or extend something already implemented:
+
+- Identify the existing implementation and its relevant interfaces.
+- Preserve previously requested features unless the user explicitly changes them.
+- Update only the affected portions of the existing plan.
+- Account for dependencies between the new change and existing functionality.
+- Include regression verification when the modification could break existing behavior.
+- Avoid recreating the application or changing its technology stack unnecessarily.
+- Do not mark a feature as implemented merely because a previous plan included it.
+
+When the user changes a requirement, distinguish the new requirement from existing requirements that remain valid.
+
+If the user requests an investigation or verification rather than a modification, plan the inspection and verification first. Do not automatically rewrite code when diagnosis alone is requested.
+
+## 6. TASK COMPLEXITY AND PLAN SIZE
+
+Use the smallest plan that fully covers the task.
+
+- Small, focused requests: 1–3 steps maximum.
+- Medium tasks: usually 3–5 steps.
+- Large, multi-module tasks: use as many steps as necessary, generally 4–8, without artificial decomposition.
+- Bug fixes: identify the likely affected implementation, the required correction, and appropriate verification.
+- Multi-file changes: respect dependency order.
+- Test-only requests: focus on the requested tests and avoid unnecessary production-code changes.
+- Investigation-only requests: inspect and report before proposing modifications.
+
+Do not create one step per trivial operation. Do not combine unrelated changes into a vague step.
+
+Each step must represent a meaningful, actionable unit of work.
+
+## 7. STEP DESCRIPTION QUALITY
+
+Every step must:
+
+- Have a specific description of at least 30 characters.
+- Identify the actual files, functions, classes, modules, or behavior to create or modify.
+- Explain the technical purpose of the step.
+- Include relevant dependency ordering.
+- Describe a concrete implementation outcome.
+- Be understandable to a coding agent without requiring it to infer the entire task from the original prompt.
+
+Never use generic descriptions such as:
+- "Implement requested functionality."
+- "Write the code."
+- "Fix the application."
+- "Make necessary changes."
+- A verbatim restatement of the user's request.
+
+Prefer specific descriptions such as:
+"Modify the existing StarCatcher update loop to spawn bonus stars at a lower frequency, apply type-specific collision effects, and remove collected objects safely."
+
+## 8. DEPENDENCIES AND EXECUTION AWARENESS
+
+Order steps so that prerequisites come before dependent implementation.
+
+Consider, when relevant:
+
+- Dependency installation and import compatibility.
+- Existing interfaces and data models.
+- Shared state and event handling.
+- File paths and working-directory assumptions.
+- Runtime entry points.
+- Input/output behavior.
+- Error handling and edge cases.
+- Test execution and regression risks.
+- Integration with existing agents and tools.
+
+Do not add execution or testing steps mechanically to every trivial task. Include them when requested, necessary, or proportionate to the risk of the change.
+
+If the request requires a graphical application, game, web page, or other interactive system, plan verification of actual behavior where the execution environment permits it. A successful build alone is not proof of functional correctness.
+
+Do not claim that execution, tests, or browser verification have already succeeded. You only create the plan.
+
+## 9. TESTING AND ACCEPTANCE CRITERIA
+
+When testing is requested or necessary:
+
+- Identify the specific behaviors that must be verified.
+- Prefer existing test infrastructure.
+- Add test files only when justified.
+- Keep all targetFile paths within \`src/sandbox/\`.
+- Include regression checks for important existing features affected by the change.
+- Consider boundary cases and failure paths, not only successful execution.
+
+Plan tests that verify actual behavior rather than merely checking whether a file exists or a function has been declared.
+
+## 10. SECURITY AND SAFE DESIGN
+
+Do not plan unsafe execution, unrestricted filesystem access, credential exposure, or bypasses of KAIZEN's permission controls.
+
+For tasks involving destructive operations, external commands, Git mutations, network access, or sensitive information, preserve the existing security middleware, approval workflow, and sandbox restrictions.
+
+Do not weaken security controls merely to make an implementation easier.
+
+## 11. AMBIGUITY HANDLING
+
+Do not ask unnecessary clarification questions.
+
+If a reasonable, low-risk assumption allows progress, use it and briefly state it in \`approach\`.
+
+If a missing requirement materially changes the architecture, security, expected behavior, or compatibility, identify the ambiguity rather than inventing a consequential requirement. Use the existing clarification mechanism if one is available. Otherwise, make the safest conservative plan and explicitly state the unresolved assumption in \`approach\`.
+
+Do not invent unsupported fields in the output schema to request clarification.
+
+## 12. STRICT OUTPUT CONTRACT
+
+Return ONLY valid JSON. Do not include Markdown fences, introductory prose, comments, or trailing commas.
+
+Use the following top-level structure:
+
+{
+  "approach": "A concise explanation of the chosen implementation strategy, relevant assumptions, and important constraints.",
+  "steps": [
+    {
+      "description": "A concrete, technically specific implementation step of at least 30 characters.",
+      "targetFile": "src/sandbox/relative/path/to/file.ext"
+    }
+  ]
+}
+
+Output requirements:
+
+- \`approach\` must be a non-empty string.
+- \`steps\` must be a non-empty array of actionable steps.
+- Every step must contain \`description\` and \`targetFile\`.
+- Every \`targetFile\` must start with \`src/sandbox/\`.
+- Use only fields supported by the existing planner output schema.
+- Do not add unrecognized fields such as \`priority\`, \`dependencies\`, \`language\`, or \`acceptanceCriteria\` unless the application schema explicitly supports them.
+- Keep the plan minimal, complete, dependency-aware, and grounded in the supplied context.
+- Ensure the JSON is syntactically valid and can be parsed by the downstream pipeline.
+
+FINAL SELF-CHECK BEFORE RESPONDING:
+
+1. Did I identify the user's actual intent?
+2. Did I account for the existing workspace and preserve relevant behavior?
+3. Did I choose the correct language and technology?
+4. Are all targetFile paths compliant?
+5. Are the steps concrete, ordered, and proportionate to task complexity?
+6. Did I avoid duplicate files and unnecessary changes?
+7. Does the JSON match the required schema exactly?
+
+Return the final JSON plan only.`;
+
+
   const existingFilesContent: string[] = [];
   for (const targetPath of normalizedTargets) {
     const fullPath = path.resolve(process.cwd(), targetPath);
@@ -233,12 +445,22 @@ Return a structured JSON output with 'approach' and 'steps'.`;
     userPromptParts.push(`RETRIEVED CONTEXT SNIPPET:\n${recentContext}`);
   }
 
-  if (rejectedPlans.length > 0) {
-    userPromptParts.push(`PREVIOUSLY REJECTED PLANS (do NOT repeat these approaches or file structures):\n${rejectedPlans.map((p, i) => `Rejected Plan #${i + 1}: ${p}`).join('\n')}`);
-  }
+  if (isFeedback) {
+    const currentPlanFormatted = state.plan && state.plan.length > 0
+      ? state.plan.map((s, idx) => `Step ${s.id || idx + 1}: [Action: ${s.action || 'modify'}, Target: ${s.targetFile}] ${s.description}`).join('\n')
+      : 'None';
 
-  if (state.rejectionReason) {
-    userPromptParts.push(`USER REJECTION FEEDBACK:\n${state.rejectionReason}`);
+    userPromptParts.push(`PREVIOUS PLAN BEING MODIFIED:\n${currentPlanFormatted}`);
+    userPromptParts.push(`USER FEEDBACK / MODIFICATION INSTRUCTIONS:\n${feedbackText}`);
+    userPromptParts.push(`MODIFICATION TASK:\nCarefully modify the previous plan to directly address and implement the user's feedback. You may modify existing steps, add new steps, remove unnecessary steps, or update file targets as required by the feedback.`);
+  } else {
+    if (rejectedPlans.length > 0) {
+      userPromptParts.push(`PREVIOUSLY REJECTED PLANS (do NOT repeat these approaches or file structures):\n${rejectedPlans.map((p, i) => `Rejected Plan #${i + 1}: ${p}`).join('\n')}`);
+    }
+
+    if (state.rejectionReason) {
+      userPromptParts.push(`USER REJECTION FEEDBACK:\n${state.rejectionReason}`);
+    }
   }
 
   const userPrompt = userPromptParts.join('\n\n');
@@ -252,8 +474,7 @@ Return a structured JSON output with 'approach' and 'steps'.`;
       temperature,
       timeoutMs: 30000,
       validate: (planRes) => {
-        // FIX #1: only reject a step that is (near) identical to the request,
-        // not one that merely contains the request phrase.
+      
         if (cleanUserQuery.length > 20) {
           const lowerReq = cleanUserQuery.toLowerCase().replace(/\s+/g, ' ').trim();
           for (const step of planRes.steps) {
@@ -266,22 +487,24 @@ Return a structured JSON output with 'approach' and 'steps'.`;
           }
         }
 
-        // Check similarity against rejected plans
-        const candidateSummary = planRes.steps
-          .map(s => `[${normalizeSandboxPath(s.targetFile)}] ${s.description}`)
-          .join(' | ');
-        const candidate = parsePlanSummary(candidateSummary);
+        // Check similarity against rejected plans (do not check against modified plan when in feedback mode)
+        if (!isFeedback) {
+          const candidateSummary = planRes.steps
+            .map(s => `[${normalizeSandboxPath(s.targetFile)}] ${s.description}`)
+            .join(' | ');
+          const candidate = parsePlanSummary(candidateSummary);
 
-        for (const rejectedPlan of rejectedPlans) {
-          const rejected = parsePlanSummary(rejectedPlan);
+          for (const rejectedPlan of rejectedPlans) {
+            const rejected = parsePlanSummary(rejectedPlan);
 
-          // A different file layout is a legitimately different plan
-          if (!sameFileSet(candidate.files, rejected.files)) continue;
+            // A different file layout is a legitimately different plan
+            if (!sameFileSet(candidate.files, rejected.files)) continue;
 
-          // Compare descriptions only (paths removed, boilerplate words ignored)
-          const sim = computeJaccardSimilarity(candidate.text, rejected.text);
-          if (sim > 0.75) {
-            return `Candidate plan is too similar (Jaccard similarity ${sim.toFixed(2)} > 0.75) to a previously rejected plan: "${rejectedPlan}"`;
+            // Compare descriptions only (paths removed, boilerplate words ignored)
+            const sim = computeJaccardSimilarity(candidate.text, rejected.text);
+            if (sim > 0.75) {
+              return `Candidate plan is too similar (Jaccard similarity ${sim.toFixed(2)} > 0.75) to a previously rejected plan: "${rejectedPlan}"`;
+            }
           }
         }
 
@@ -314,7 +537,7 @@ Return a structured JSON output with 'approach' and 'steps'.`;
     });
 
     const anyFailed = planSteps.some(s => s.status === 'failed');
-    const uniqueTargetFiles = Array.from(new Set(planSteps.map(s => s.targetFile).filter(Boolean)));
+    const uniqueTargetFiles = Array.from(new Set(planSteps.map(s => s.targetFile).filter((f): f is string => Boolean(f))));
 
     return {
       plan: planSteps,
@@ -322,6 +545,7 @@ Return a structured JSON output with 'approach' and 'steps'.`;
       planAttempt: attempt + 1,
       rejectedPlans,
       rejectionReason: undefined,
+      planFeedback: undefined,
       status: anyFailed ? 'SECURITY_VIOLATION_BLOCKED' : 'PLANNED'
     };
   } catch (err: any) {

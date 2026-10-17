@@ -17,6 +17,7 @@ export interface LLMMetrics {
 
 // Estimated pricing per 1,000,000 tokens (USD)
 const MODEL_PRICING: Record<string, { prompt: number; completion: number }> = {
+  'gemini-2.5-pro': { prompt: 1.25, completion: 5.00 },
   'gemini-2.5-flash': { prompt: 0.075, completion: 0.30 },
   'gemini-2.0-flash': { prompt: 0.10, completion: 0.40 },
   'gemini-1.5-flash': { prompt: 0.075, completion: 0.30 },

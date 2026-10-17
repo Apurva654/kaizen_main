@@ -38,12 +38,32 @@
       {
         "command": "kaizen.applyPatch",
         "title": "Kaizen: Apply Code Patch"
+      },
+      {
+        "command": "kaizen.checkBackend",
+        "title": "Kaizen: Check Backend Connection Status"
+      },
+      {
+        "command": "kaizen.startBackend",
+        "title": "Kaizen: Start Backend Server"
       }
-    ]
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Kaizen AI Configuration",
+      "properties": {
+        "kaizen.backendUrl": {
+          "type": "string",
+          "default": "http://localhost:3000",
+          "description": "Base URL of the Kaizen AI Backend API server"
+        }
+      }
+    }
   },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "test": "npx ts-node test/backend.test.ts",
     "start": "tsc && node dist/index.js",
     "server": "ts-node-dev --respawn --transpile-only src/server.ts",
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts"

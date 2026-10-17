@@ -28,6 +28,7 @@ import { parseBrowserInspectionResult, formatBrowserInspectionMarkdown, extractR
 import { performWebSearch, setSSEEmitter } from './tools/webSearchTool';
 import { GraphifyEngine } from './tools/graphifyEngine';
 import { githubAuthManager } from './tools/githubAuthManager';
+import { getActiveModelProvider, DEFAULT_GEMINI_MODELS } from './tools/modelProvider';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -83,6 +84,23 @@ app.get('/api/stream', (req: Request, res: Response) => {
 
   req.on('close', () => {
     sseClients = sseClients.filter(c => c !== res);
+  });
+});
+
+// Health-Check Endpoint for VS Code Extension Host and Monitoring
+app.get('/api/health', async (req: Request, res: Response) => {
+  const isDockerActive = await dockerSandbox.checkDockerAvailable();
+  res.json({
+    status: 'ok',
+    version: '1.0.0',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+    port: PORT,
+    modelProvider: getActiveModelProvider(),
+    defaultModels: DEFAULT_GEMINI_MODELS,
+    permissionMode: permissionGate.getMode(),
+    isDryRunMode: permissionGate.isDryRunMode(),
+    isDockerActive
   });
 });
 
@@ -575,6 +593,7 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
     extractedContext: "",
     plan: [],
     planApprovalStatus: 'NONE',
+    planFeedback: undefined,
     planAttempt: 0,
     rejectedPlans: [],
     planFailureReason: undefined,
@@ -1334,44 +1353,60 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
         return;
       }
 
-      state.planApprovalStatus = 'PENDING_APPROVAL';
       completedStages.push('planner');
-      persistenceEngine.saveCheckpoint(sessionId, 'PlanApproval_Pending', state);
 
-      emitSSE('agent_step', {
-        agent: 'PlannerAgent',
-        status: 'completed',
-        result: { plan: state.plan, status: state.status, planApprovalStatus: 'PENDING_APPROVAL' }
-      });
+      let planApproved = false;
 
-      // 4. Human-In-The-Loop (HITL) Plan Approval Request Widget
-      emitSSE('hitl_request', {
-        type: 'PLAN_APPROVAL',
-        title: 'Plan Approval Required',
-        message: 'Please review the generated implementation plan before proceeding to code generation.',
-        plan: state.plan,
-        targetFiles: state.targetFiles,
-        planApprovalStatus: 'PENDING_APPROVAL'
-      });
+      while (!planApproved) {
+        state.planApprovalStatus = 'PENDING_APPROVAL';
+        persistenceEngine.saveCheckpoint(sessionId, 'PlanApproval_Pending', state);
 
-      let userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
-        registerHitl(sessionId, resolve);
-      });
+        emitSSE('agent_step', {
+          agent: 'PlannerAgent',
+          status: 'completed',
+          result: { plan: state.plan, status: state.status, planApprovalStatus: 'PENDING_APPROVAL' }
+        });
 
-      emitSSE('hitl_received', { response: userHitlResponse });
+        // 4. Human-In-The-Loop (HITL) Plan Approval Request Widget
+        emitSSE('hitl_request', {
+          type: 'PLAN_APPROVAL',
+          title: (state.planAttempt && state.planAttempt > 1) ? 'Review Modified Plan' : 'Plan Approval Required',
+          message: (state.planAttempt && state.planAttempt > 1)
+            ? 'Please review the modified plan based on your feedback before proceeding to code generation.'
+            : 'Please review the generated implementation plan before proceeding to code generation.',
+          plan: state.plan,
+          targetFiles: state.targetFiles,
+          planApprovalStatus: 'PENDING_APPROVAL'
+        });
 
-      while (userHitlResponse.action === 'reject') {
-        state.planApprovalStatus = 'REJECTED';
-        state.rejectionReason = userHitlResponse.message || undefined;
-        state.retryCount = (state.retryCount || 0) + 1;
-        if (state.retryCount <= 3) {
+        const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
+          registerHitl(sessionId, resolve);
+        });
+
+        emitSSE('hitl_received', { response: userHitlResponse });
+
+        if (userHitlResponse.action === 'reject') {
+          state.planApprovalStatus = 'REJECTED';
+          skippedStages.push('coder', 'testrunner', 'debugger', 'reviewer');
+          await finalizeExecution('ABORTED', { message: 'Plan rejected by user.', planApprovalStatus: 'REJECTED' });
+          return;
+        }
+
+        if (userHitlResponse.action === 'feedback' && userHitlResponse.message) {
+          state.planApprovalStatus = 'FEEDBACK_SUBMITTED';
+          state.rejectionReason = userHitlResponse.message;
+          state.planFeedback = userHitlResponse.message;
+
           emitSSE('agent_step', {
             agent: 'PlannerAgent',
             status: 'running',
-            message: `[Attempt #${state.retryCount}] User rejected plan. Re-planning alternative approach...`
+            message: `Modifying plan with user feedback: "${userHitlResponse.message}"...`
           });
+
           const updatedPlannerOutput = await plannerAgentNode(state);
           state.plan = updatedPlannerOutput.plan || state.plan;
+          state.status = updatedPlannerOutput.status || state.status;
+          if (updatedPlannerOutput.targetFiles) state.targetFiles = updatedPlannerOutput.targetFiles;
           if (updatedPlannerOutput.planAttempt !== undefined) state.planAttempt = updatedPlannerOutput.planAttempt;
           if (updatedPlannerOutput.rejectedPlans !== undefined) state.rejectedPlans = updatedPlannerOutput.rejectedPlans;
           if (updatedPlannerOutput.rejectionReason !== undefined) state.rejectionReason = updatedPlannerOutput.rejectionReason as string | undefined;
@@ -1392,65 +1427,18 @@ async function runPipeline(rawUserInput: string, imagePayload?: string, clientSe
             return;
           }
 
-          emitSSE('hitl_request', {
-            type: 'PLAN_APPROVAL',
-            title: 'Plan Approval Required',
-            message: 'Please review the generated implementation plan before proceeding to code generation.',
-            plan: state.plan,
-            targetFiles: state.targetFiles,
-            planApprovalStatus: 'PENDING_APPROVAL'
-          });
+          persistenceEngine.saveCheckpoint(sessionId, 'PlannerAgent_Feedback', state);
 
-          userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
-            registerHitl(sessionId, resolve);
-          });
-
-          emitSSE('hitl_received', { response: userHitlResponse });
-        } else {
-          state.planApprovalStatus = 'REJECTED';
-          skippedStages.push('coder', 'testrunner', 'debugger', 'reviewer');
-          await finalizeExecution('ABORTED', { message: 'Plan rejected by user max retries reached.', planApprovalStatus: 'REJECTED' });
-          return;
-        }
-      }
-
-      if (userHitlResponse.action === 'feedback' && userHitlResponse.message) {
-        state.planApprovalStatus = 'FEEDBACK_SUBMITTED';
-        state.rejectionReason = userHitlResponse.message;
-        emitSSE('agent_step', { agent: 'PlannerAgent', status: 'running', message: 'Updating plan with user feedback...' });
-        const updatedPlannerOutput = await plannerAgentNode(state);
-        state.plan = updatedPlannerOutput.plan || state.plan;
-        if (updatedPlannerOutput.planAttempt !== undefined) state.planAttempt = updatedPlannerOutput.planAttempt;
-        if (updatedPlannerOutput.rejectedPlans !== undefined) state.rejectedPlans = updatedPlannerOutput.rejectedPlans;
-        if (updatedPlannerOutput.rejectionReason !== undefined) state.rejectionReason = updatedPlannerOutput.rejectionReason as string | undefined;
-
-        if (updatedPlannerOutput.status === 'SECURITY_VIOLATION_BLOCKED' || updatedPlannerOutput.status === 'PLAN_FAILED' || updatedPlannerOutput.status === 'PLAN_RETRY_LIMIT') {
-          state.status = updatedPlannerOutput.status;
-          state.planFailureReason = updatedPlannerOutput.planFailureReason;
-          emitSSE('agent_step', {
-            agent: 'PlannerAgent',
-            status: 'failed',
-            message: updatedPlannerOutput.planFailureReason || 'Plan generation failed.'
-          });
-          skippedStages.push('coder', 'testrunner', 'debugger', 'reviewer');
-          await finalizeExecution('FAILED', {
-            message: updatedPlannerOutput.planFailureReason || 'Plan generation failed.',
-            status: updatedPlannerOutput.status
-          });
-          return;
+          // Loop repeats! The modified plan will be presented again to the user for approval!
+          continue;
         }
 
-        persistenceEngine.saveCheckpoint(sessionId, 'PlannerAgent_Feedback', state);
-
-        emitSSE('agent_step', {
-          agent: 'PlannerAgent',
-          status: 'completed',
-          result: { plan: state.plan, status: state.status }
-        });
+        if (userHitlResponse.action === 'approve') {
+          planApproved = true;
+          state.planApprovalStatus = 'APPROVED';
+          persistenceEngine.saveCheckpoint(sessionId, 'PlanApproval_Approved', state);
+        }
       }
-
-      state.planApprovalStatus = 'APPROVED';
-      persistenceEngine.saveCheckpoint(sessionId, 'PlanApproval_Approved', state);
 
       // 5. Coder Agent
       logDiagnostic('GRAPH', 'ENTER CoderAgent', {});
@@ -1891,6 +1879,8 @@ validateGroqApiKey().then(() => {
     console.log(`\n==================================================`);
     console.log(`🚀 Kaizen AI Client Tier & Generative UI Server`);
     console.log(`   Running at: http://localhost:${PORT}`);
+    console.log(`   Model Provider: ${getActiveModelProvider() === 'gemini' ? 'Google Gemini (Gemini 2.5 Pro / Flash)' : 'Offline / Mock'}`);
+    console.log(`   Health Check: http://localhost:${PORT}/api/health`);
     console.log(`==================================================\n`);
   });
 

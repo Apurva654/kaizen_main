@@ -209,6 +209,11 @@ export const KaizenState = Annotation.Root({
     default: () => 'NONE'
   }),
 
+  planFeedback: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
+
   originalUserRequest: Annotation<string | undefined>({
     reducer: (_, y) => y,
     default: () => undefined

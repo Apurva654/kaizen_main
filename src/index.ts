@@ -47,6 +47,7 @@ async function executeAgentPipeline(userInput: string) {
     extractedContext: "",
     plan: [],
     planApprovalStatus: 'NONE',
+    planFeedback: undefined,
     planAttempt: 0,
     rejectedPlans: [],
     planFailureReason: undefined,
@@ -223,43 +224,58 @@ async function executeAgentPipeline(userInput: string) {
     };
 
     // Human-in-the-Loop (HITL) Approval Step
-    console.log("\n=========================================");
-    console.log("HUMAN-IN-THE-LOOP (HITL): PLAN APPROVAL");
-    console.log("=========================================");
-    const answer = await promptUserApproval(
-      "Do you approve this plan to proceed with code generation? [Y/n or enter feedback]: "
-    );
+    let planApproved = false;
 
-    const lowerAns = answer.toLowerCase();
-    if (lowerAns === 'n' || lowerAns === 'no' || lowerAns === 'cancel' || lowerAns === 'reject') {
-      console.log("\n[HITL] Plan rejected by user. Aborting code generation.");
-      return;
-    }
+    while (!planApproved) {
+      console.log("\n=========================================");
+      console.log("HUMAN-IN-THE-LOOP (HITL): PLAN APPROVAL");
+      console.log("=========================================");
+      console.log("Plan Steps:");
+      state.plan?.forEach(step => {
+        console.log(`- Step ${step.id} [${step.status}] (${step.targetFile || 'no target'}): ${step.description}`);
+      });
 
-    if (lowerAns !== 'y' && lowerAns !== 'yes' && lowerAns !== 'approve' && lowerAns !== '') {
+      const answer = await promptUserApproval(
+        "\nDo you approve this plan to proceed with code generation? [Y/n or enter feedback]: "
+      );
+
+      const lowerAns = answer.toLowerCase().trim();
+      if (lowerAns === 'n' || lowerAns === 'no' || lowerAns === 'cancel' || lowerAns === 'reject') {
+        console.log("\n[HITL] Plan rejected by user. Aborting code generation.");
+        return;
+      }
+
+      if (lowerAns === 'y' || lowerAns === 'yes' || lowerAns === 'approve' || lowerAns === '') {
+        console.log("\n[HITL] Plan approved by user. Proceeding to code generation...");
+        planApproved = true;
+        state.planApprovalStatus = 'APPROVED';
+        break;
+      }
+
       console.log(`\n[HITL] User provided feedback: "${answer}"`);
       console.log("-> Re-running Planner Agent with feedback...");
-      state.userInput = `${state.userInput} (User plan feedback: ${answer})`;
+      state.planApprovalStatus = 'FEEDBACK_SUBMITTED';
+      state.rejectionReason = answer;
+      state.planFeedback = answer;
+
       const updatedPlannerOutput = await plannerAgentNode(state);
       console.log(`Updated Planner Status: ${updatedPlannerOutput.status}`);
       if (updatedPlannerOutput.status === 'SECURITY_VIOLATION_BLOCKED' || updatedPlannerOutput.status === 'PLAN_FAILED' || updatedPlannerOutput.status === 'PLAN_RETRY_LIMIT') {
         console.error(`Plan Generation Failed: ${updatedPlannerOutput.planFailureReason}`);
         return;
       }
-      console.log("Updated Steps:");
-      updatedPlannerOutput.plan?.forEach(step => {
-        console.log(`- Step ${step.id} [${step.status}]: ${step.description}`);
-      });
-      state.plan = updatedPlannerOutput.plan || state.plan;
 
-      const confirmAns = await promptUserApproval("\nApprove updated plan? [Y/n]: ");
-      if (confirmAns.toLowerCase() === 'n' || confirmAns.toLowerCase() === 'no') {
-        console.log("\n[HITL] Updated plan rejected by user. Aborting code generation.");
-        return;
-      }
+      state = {
+        ...state,
+        plan: updatedPlannerOutput.plan || state.plan,
+        status: updatedPlannerOutput.status || state.status,
+        targetFiles: updatedPlannerOutput.targetFiles || state.targetFiles,
+        planAttempt: updatedPlannerOutput.planAttempt ?? state.planAttempt,
+        rejectedPlans: updatedPlannerOutput.rejectedPlans || state.rejectedPlans
+      };
+
+      console.log("\nUpdated plan generated based on your feedback. Presenting for your approval...");
     }
-
-    console.log("\n[HITL] Plan approved! Proceeding to code generation...");
 
     console.log("\n-> Running Coder Agent...");
     let coderOutput = await codeGenAgentNode(state);

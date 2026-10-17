@@ -1,29 +1,30 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { KaizenStateType } from './state';
-import { intentAgentNode, extractTerminalCommand, extractGitActions, extractBrowserUrl } from './agents/intentAgent';
-import { parseBrowserInspectionResult, formatBrowserInspectionMarkdown, extractRequestedBrowserAction, resolveAccessibilityTarget } from './tools/browserSnapshotParser';
-import { contextRetrievalAgentNode } from './agents/contextRetrievalAgent';
-import { plannerAgentNode } from './agents/plannerAgent';
-import { codeGenAgentNode, isProtectedFile, GeneratedFilePatch } from './agents/codeGenAgent';
-import { reviewerAgentNode } from './agents/reviewerAgent';
-import { debuggerAgentNode } from './agents/debuggerAgent';
-import { runWorkspaceTests, extractFailingFilesFromLogs } from './tools/testRunner';
-import { preprocessUserRequest, saveAgentState, loadAgentState, recordConversationTurn } from './context/contextManager';
-import { memoryEngine } from './context/memory/memoryEngine';
-import { ocrService } from './tools/ocrService';
+import { isProtectedFile } from './tools/sandboxPathUtils';
+
+export interface GeneratedFilePatch {
+  filePath: string;
+  code: string;
+  imports?: string[];
+}
+import { KaizenBackendClient, HealthStatus, BackendStreamEvent, ConnectionState } from './client/backendClient';
 
 export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'kaizen.sidebarView';
   private _view?: vscode.WebviewView;
-  private _pendingHitlResolver: ((value: { action: 'approve' | 'reject' | 'feedback'; message?: string }) => void) | null = null;
+  private _activeSessionId: string | null = null;
+  private _streamUnsubscribe: (() => void) | null = null;
+  private _stateUnsubscribe: (() => void) | null = null;
 
-  constructor(private readonly _extensionUri: vscode.Uri) { }
+  constructor(
+    private readonly _extensionUri: vscode.Uri,
+    private readonly _backendClient: KaizenBackendClient
+  ) {}
 
   public resolveWebviewView(
     webviewView: vscode.WebviewView,
-    context: vscode.WebviewViewResolveContext,
+    _context: vscode.WebviewViewResolveContext,
     _token: vscode.CancellationToken
   ) {
     this._view = webviewView;
@@ -44,23 +45,116 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
 
     webview.html = this._getHtmlForWebview(webview);
 
+    // Clean up previous listeners if any
+    if (this._streamUnsubscribe) {
+      this._streamUnsubscribe();
+      this._streamUnsubscribe = null;
+    }
+    if (this._stateUnsubscribe) {
+      this._stateUnsubscribe();
+      this._stateUnsubscribe = null;
+    }
+
+    // Subscribe to backend connection state updates
+    this._stateUnsubscribe = this._backendClient.onConnectionStateChange((state: ConnectionState, health?: HealthStatus | null) => {
+      this.postMessageToWebview('BACKEND_STATUS', {
+        connected: state === 'connected',
+        state,
+        url: this._backendClient.getBaseUrl(),
+        health
+      });
+    });
+
+    // Subscribe to backend SSE events and forward to webview
+    this._streamUnsubscribe = this._backendClient.onStreamEvent(async (event: BackendStreamEvent) => {
+      switch (event.event) {
+        case 'pipeline_start':
+          this._activeSessionId = event.data?.sessionId || null;
+          this.postMessageToWebview('PIPELINE_START', event.data);
+          break;
+
+        case 'agent_step':
+          this.postMessageToWebview('AGENT_STEP', event.data);
+          break;
+
+        case 'hitl_request':
+          this.postMessageToWebview('HITL_REQUEST', event.data);
+          break;
+
+        case 'pipeline_complete': {
+          let diffCards = undefined;
+          if (event.data?.filePatches && Array.isArray(event.data.filePatches) && event.data.filePatches.length > 0) {
+            diffCards = await this.prepareDiffCards(event.data.filePatches);
+          }
+          this.postMessageToWebview('PIPELINE_COMPLETE', {
+            ...event.data,
+            diffCards: diffCards || event.data?.diffCards
+          });
+          break;
+        }
+
+        case 'code_chunk':
+          this.postMessageToWebview('CODE_CHUNK', event.data);
+          break;
+
+        case 'code_exit':
+          this.postMessageToWebview('CODE_EXIT', event.data);
+          break;
+
+        default:
+          this.postMessageToWebview(event.event.toUpperCase(), event.data);
+          break;
+      }
+    });
+
+    // Start background SSE stream
+    this._backendClient.connectStream();
+
+    // Check backend health immediately on open
+    this._backendClient.checkHealth().catch(() => {
+      // Handled by state listener
+    });
+
+    // Handle messages coming from Webview UI
     webview.onDidReceiveMessage(async (message: any) => {
       switch (message.type) {
         case 'RUN_PIPELINE': {
-          this.runAgentPipeline(message.userInput || '', message.imagePayload);
+          await this.handleRunPipeline(message.userInput || '', message.imagePayload, message.sessionId);
           break;
         }
+
         case 'HITL_RESPOND': {
-          if (this._pendingHitlResolver) {
-            this._pendingHitlResolver({ action: message.action, message: message.message });
-            this._pendingHitlResolver = null;
+          await this.handleHitlResponse(message.action, message.message, message.sessionId);
+          break;
+        }
+
+        case 'CHECK_BACKEND': {
+          try {
+            const health = await this._backendClient.checkHealth();
+            vscode.window.showInformationMessage(`Kaizen Backend connected on ${this._backendClient.getBaseUrl()}`);
+            this.postMessageToWebview('BACKEND_STATUS', {
+              connected: true,
+              state: 'connected',
+              url: this._backendClient.getBaseUrl(),
+              health
+            });
+          } catch (err: any) {
+            vscode.window.showErrorMessage(`Kaizen Backend offline: ${err?.message || err}`);
+            this.postMessageToWebview('BACKEND_STATUS', {
+              connected: false,
+              state: 'disconnected',
+              url: this._backendClient.getBaseUrl(),
+              error: err?.message || String(err)
+            });
           }
           break;
         }
+
         case 'APPLY_PATCH': {
           await this.applyPatchToVSCodeDocument(message.filePath, message.code);
           break;
         }
+
         case 'OPEN_NATIVE_DIFF': {
           await this.openVSCodeNativeDiff(message.filePath, message.code);
           break;
@@ -69,61 +163,19 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
         case 'GET_ACTIVE_FILE': {
           const activeEditor = vscode.window.activeTextEditor;
           if (activeEditor) {
-            const relPath = vscode.workspace.asRelativePath(activeEditor.document.uri);
+            const relPath = vscode.workspace.asRelativePath(activeEditor.document.uri).replace(/\\/g, '/');
             this.postMessageToWebview('ACTIVE_FILE_INFO', {
               path: relPath,
               content: activeEditor.document.getText()
             });
+          } else {
+            this.postMessageToWebview('ACTIVE_FILE_INFO', { path: null, content: null });
           }
           break;
         }
 
         case 'RUN_CODE': {
-          const targetFile = message.filePath || 'src/sandbox/main.ts';
-          const fullPath = path.resolve(process.cwd(), targetFile);
-          const startTime = Date.now();
-
-          if (!fs.existsSync(fullPath)) {
-            this.postMessageToWebview('CODE_EXECUTION_RESULT', {
-              success: false,
-              filePath: targetFile,
-              output: `File not found: ${targetFile}`,
-              executionTimeMs: 0,
-              exitCode: 1
-            });
-            break;
-          }
-
-          const ext = path.extname(targetFile).toLowerCase();
-          if (ext === '.html') {
-            const fileName = path.basename(targetFile);
-            const browserUrl = `http://localhost:3000/sandbox/${fileName}`;
-            this.postMessageToWebview('CODE_EXECUTION_RESULT', {
-              success: true,
-              filePath: targetFile,
-              language: 'html',
-              output: `Webpage hosted statically at ${browserUrl}. Opening live preview...`,
-              executionTimeMs: Date.now() - startTime,
-              exitCode: 0,
-              browserUrl
-            });
-            break;
-          }
-
-          const command = ext === '.py' ? `python "${targetFile}"` : (ext === '.ts' || ext === '.js' ? `npx ts-node --transpile-only "${targetFile}"` : `node "${targetFile}"`);
-          const cp = require('child_process');
-          cp.exec(command, { cwd: process.cwd() }, (err: any, stdout: string, stderr: string) => {
-            const durationMs = Date.now() - startTime;
-            const outputStr = (stdout + (stderr ? '\n' + stderr : '')).trim() || err?.message || '(Clean execution output)';
-            this.postMessageToWebview('CODE_EXECUTION_RESULT', {
-              success: !err,
-              filePath: targetFile,
-              language: ext === '.py' ? 'python' : 'typescript',
-              output: outputStr,
-              executionTimeMs: durationMs,
-              exitCode: err ? (err.code || 1) : 0
-            });
-          });
+          await this.handleRunCode(message.filePath);
           break;
         }
       }
@@ -136,868 +188,127 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  public async runAgentPipeline(rawUserInput: string, imagePayload?: string) {
-    memoryEngine.stateMemory.clearState();
-    this.postMessageToWebview('PIPELINE_START', { userInput: rawUserInput, timestamp: new Date().toISOString() });
-
-    let extractedImageText = '';
-    if (imagePayload) {
-      this.postMessageToWebview('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '🔍 Vision OCR: Extracting text from screenshot...' });
-      extractedImageText = await ocrService.extractTextFromImage(imagePayload);
-    }
-
-    let userInput = rawUserInput;
-    if (extractedImageText) {
-      userInput = `[Extracted Text from Screenshot]:\n${extractedImageText}\n\n[User Instructions]:\n${rawUserInput || 'Analyze and process attached screenshot code/instructions.'}`;
-    }
-
-    // Determine target file from active editor if open
-    let initialTargets: string[] = [];
-    const activeEditor = vscode.window.activeTextEditor;
-    if (activeEditor) {
-      const relPath = vscode.workspace.asRelativePath(activeEditor.document.uri).replace(/\\/g, '/');
-      if (relPath.startsWith('src/sandbox/')) {
-        initialTargets = [relPath];
-      }
-    }
-
-    const runId = `run_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const createdAt = new Date().toISOString();
-
-    const postWebviewEvent = (type: string, data: any) => {
-      this.postMessageToWebview(type, { ...data, runId });
-    };
-
-    const promptToPreprocess = userInput || '';
-    const processed = await preprocessUserRequest(promptToPreprocess);
-    if (processed.isCommand && processed.commandResult) {
-      this.postMessageToWebview('PIPELINE_COMPLETE', {
-        status: 'GENERAL_COMPLETE',
-        explanation: processed.commandResult
+  private async handleRunPipeline(rawUserInput: string, imagePayload?: string, clientSessionId?: string) {
+    // 1. Verify backend connectivity first
+    try {
+      await this._backendClient.checkHealth();
+    } catch (err: any) {
+      const errorMsg = `Kaizen Backend is unreachable at ${this._backendClient.getBaseUrl()}.\nPlease ensure the backend is running with "npm run server".`;
+      vscode.window.showErrorMessage(errorMsg, 'Start Backend Server', 'Retry').then(async (selection) => {
+        if (selection === 'Start Backend Server') {
+          vscode.commands.executeCommand('kaizen.startBackend');
+        } else if (selection === 'Retry') {
+          await this.handleRunPipeline(rawUserInput, imagePayload, clientSessionId);
+        }
+      });
+      this.postMessageToWebview('PIPELINE_ERROR', {
+        status: 'FAILED',
+        error: errorMsg
       });
       return;
     }
 
-    const enhancedUserInput = processed.enhancedPrompt || promptToPreprocess;
-
-    let state: KaizenStateType = {
-      sessionId: `sess_${Date.now()}`,
-      runId,
-      createdAt,
-      userInput: promptToPreprocess,
-      originalUserRequest: promptToPreprocess,
-      targetFiles: initialTargets,
-      extractedContext: processed.workspaceContext || "",
-      plan: [],
-      planApprovalStatus: 'NONE',
-      planAttempt: 0,
-      rejectedPlans: [],
-      planFailureReason: undefined,
-      generatedPatch: "",
-      filePatches: [],
-      choices: [],
-      retryCount: 0,
-      status: "INITIALIZED",
-      lifecycleStatus: "RUNNING",
-      currentStage: "intent",
-      completedStages: [],
-      skippedStages: [],
-      generalAnswer: undefined,
-      imagePayload,
-      extractedImageText: extractedImageText || undefined,
-      permissionMode: 'deny_first',
-      riskScore: 25,
-      permissionStatus: 'APPROVED',
-      mcpActions: [],
-      dockerSandboxActive: false,
-      structuredFailures: [],
-      errorsEncountered: 0,
-      lastPlan: undefined,
-      planTimestamp: undefined,
-      canRetry: true,
-      rejectionReason: undefined,
-      requestedLanguage: undefined,
-      languageInfo: undefined,
-      generationSource: undefined,
-      generationFailureReason: undefined
-    };
-
-    const completedStages: string[] = [];
-    const skippedStages: string[] = [];
-
-    const finalizeExecution = async (finalStatus: string, extraData: Record<string, any> = {}) => {
-      state.lifecycleStatus = finalStatus;
-      state.completedStages = Array.from(new Set(completedStages));
-      state.skippedStages = Array.from(new Set(skippedStages));
-
-      const isFailure = finalStatus === 'FAILED' || finalStatus === 'ABORTED';
-      const normalizedStatus = isFailure ? finalStatus : 'COMPLETED';
-
-      saveAgentState({
-        conversationId: state.sessionId || 'sess_default',
-        currentTask: rawUserInput,
-        completedSteps: completedStages,
-        generatedFiles: new Map((state.targetFiles || []).map(f => [f, 'updated'])),
-        errors: (state as any).reviewReport?.issues || [],
-        status: normalizedStatus,
-        timestamp: new Date()
-      });
-
-      if (extraData.explanation || state.userInput) {
-        recordConversationTurn(rawUserInput, extraData.explanation || 'Task executed successfully.');
+    // 2. Read context from active text editor if relevant
+    let userInput = rawUserInput;
+    const activeEditor = vscode.window.activeTextEditor;
+    if (activeEditor && !rawUserInput.includes('[Active File Context]')) {
+      const relPath = vscode.workspace.asRelativePath(activeEditor.document.uri).replace(/\\/g, '/');
+      const selection = activeEditor.selection;
+      const selectedText = activeEditor.document.getText(selection);
+      if (selectedText && selectedText.trim().length > 0) {
+        userInput = `${rawUserInput}\n\n[Active File Context: ${relPath} (Selected Lines ${selection.start.line + 1}-${selection.end.line + 1})]:\n\`\`\`\n${selectedText}\n\`\`\``;
       }
-
-      postWebviewEvent('PIPELINE_COMPLETE', {
-        status: finalStatus,
-        targetFiles: state.targetFiles,
-        plan: state.plan,
-        completedStages,
-        skippedStages,
-        retryCount: state.retryCount,
-        ...extraData
-      });
-    };
+    }
 
     try {
-      // 1. Intent Agent
-      postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: 'Classifying intent...' });
-      const intentOutput = await intentAgentNode(state);
-      state.status = intentOutput.status;
-      state.targetFiles = intentOutput.targetFiles;
-      if (intentOutput.requestedLanguage) {
-        state.requestedLanguage = intentOutput.requestedLanguage;
-        state.languageInfo = intentOutput.languageInfo;
-      }
-      completedStages.push('intent');
-
-      postWebviewEvent('AGENT_STEP', {
-        agent: 'IntentAgent',
-        status: 'completed',
-        result: { status: state.status, targetFiles: state.targetFiles }
+      this.postMessageToWebview('PIPELINE_START', {
+        userInput: rawUserInput,
+        timestamp: new Date().toISOString()
       });
 
-      // Routing Logic for MCP Git Operations
-      if (state.status === "ROUTED_MCP_GIT") {
-        skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
-        postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '⚡ Executing Git MCP operations...' });
-
-        const { permissionGate } = await import('./tools/permissionGate');
-        const { mcpInterface } = await import('./mcp/mcpInterface');
-
-        const requestedActions = extractGitActions(rawUserInput);
-
-        let combinedOutput = '### 🐙 Git MCP Operation Results\n\n';
-        let hasBlockedAction = false;
-
-        for (const action of requestedActions) {
-          const evalResult = permissionGate.evaluate(`git_${action}`, { command: `git ${action}` });
-
-          let isApproved = true;
-
-          if (evalResult.requiresApproval && !evalResult.allowed) {
-            hasBlockedAction = true;
-            combinedOutput += `> [!WARNING]\n> **Git ${action.toUpperCase()} Permission Intercepted** (Risk Score: ${evalResult.riskScore}/100)\n> ${evalResult.reason}\n\n`;
-
-            postWebviewEvent('HITL_REQUEST', {
-              type: 'GIT_PERMISSION_APPROVAL',
-              title: `Permission Gate Intercept: Git ${action.toUpperCase()}`,
-              message: evalResult.reason,
-              action,
-              riskScore: evalResult.riskScore
-            });
-
-            const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
-              this._pendingHitlResolver = resolve;
-            });
-            isApproved = userHitlResponse.action === 'approve';
-          }
-
-          const mcpResult = await mcpInterface.executeGitAction(action, rawUserInput, {
-            dryRun: permissionGate.isDryRunMode(),
-            approved: isApproved
-          });
-
-          const actionLabel = action.toUpperCase();
-          if (mcpResult.success) {
-            combinedOutput += `#### ${actionLabel} Output (${mcpResult.isSimulated ? 'SIMULATED' : 'EXECUTED'})\n\`\`\`\n${mcpResult.output || '(No changes / clean output)'}\n\`\`\`\n\n`;
-          } else {
-            combinedOutput += `#### ${actionLabel} Result (${mcpResult.isSimulated ? 'SIMULATED' : 'BLOCKED'})\n\`\`\`\n${mcpResult.output || mcpResult.error}\n\`\`\`\n\n`;
-          }
-        }
-
-        completedStages.push('response');
-        await finalizeExecution(hasBlockedAction ? 'HITL_REQUIRED' : 'COMPLETED', {
-          route: 'MCP_GIT',
-          explanation: combinedOutput.trim()
-        });
-        return;
-      }
-
-      // Routing Logic for MCP Terminal Operations
-      if (state.status === "ROUTED_MCP_TERMINAL") {
-        skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
-        postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '⚡ Executing Terminal MCP operation...' });
-
-        const { permissionGate } = await import('./tools/permissionGate');
-        const { mcpInterface } = await import('./mcp/mcpInterface');
-
-        const command = extractTerminalCommand(rawUserInput);
-        const evalResult = permissionGate.evaluate('terminal_exec', { command });
-        let isApproved = true;
-        let hasBlockedAction = false;
-
-        if (evalResult.requiresApproval && !evalResult.allowed) {
-          hasBlockedAction = true;
-
-          postWebviewEvent('HITL_REQUEST', {
-            type: 'TERMINAL_PERMISSION_APPROVAL',
-            title: `Permission Gate Intercept: Terminal Execution`,
-            message: evalResult.reason,
-            command: command,
-            riskScore: evalResult.riskScore
-          });
-
-          const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
-            this._pendingHitlResolver = resolve;
-          });
-          isApproved = userHitlResponse.action === 'approve';
-        }
-
-        const isSimulatedPrompt = /\b(simulat|dry-run|dry run|fake|mock|permission gate)\b/i.test(rawUserInput);
-        const isDryRun = permissionGate.isDryRunMode() || isSimulatedPrompt;
-
-        const mcpResult = await mcpInterface.executeTerminalCommand(command, process.cwd(), {
-          dryRun: isDryRun,
-          approved: isApproved
-        });
-
-        let combinedOutput = `### 💻 Terminal MCP Operation Results\n\n`;
-        if (mcpResult.success) {
-          combinedOutput += `#### Command Output (${mcpResult.isSimulated ? 'SIMULATED' : 'EXECUTED'})\n\`\`\`\n${mcpResult.output || '(Clean output)'}\n\`\`\`\n\n`;
-        } else {
-          combinedOutput += `#### Command Result (${mcpResult.isSimulated ? 'SIMULATED' : 'BLOCKED'})\n\`\`\`\n${mcpResult.output || mcpResult.error}\n\`\`\`\n\n`;
-        }
-
-        completedStages.push('response');
-        await finalizeExecution(hasBlockedAction ? 'HITL_REQUIRED' : 'COMPLETED', {
-          route: 'MCP_TERMINAL',
-          explanation: combinedOutput.trim()
-        });
-        return;
-      }
-
-      // Routing Logic for MCP Browser Operations
-      if (state.status === "ROUTED_MCP_BROWSER") {
-        skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
-        state.targetFiles = [];
-        postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '🌐 Connecting to External Playwright MCP Server Process...' });
-
-        const { permissionGate } = await import('./tools/permissionGate');
-        const { mcpInterface } = await import('./mcp/mcpInterface');
-
-        const targetUrl = extractBrowserUrl(rawUserInput);
-
-        await mcpInterface.connectServer('playwright-mcp-stdio');
-
-        const evalNav = permissionGate.evaluate('browser_navigate', { url: targetUrl });
-        let isApproved = true;
-        let hasBlockedAction = false;
-
-        if (evalNav.requiresApproval && !evalNav.allowed) {
-          hasBlockedAction = true;
-          postWebviewEvent('HITL_REQUEST', {
-            type: 'BROWSER_PERMISSION_APPROVAL',
-            title: 'Permission Gate Intercept: Browser Navigation',
-            message: evalNav.reason,
-            url: targetUrl,
-            riskScore: evalNav.riskScore
-          });
-
-          const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
-            this._pendingHitlResolver = resolve;
-          });
-          isApproved = userHitlResponse.action === 'approve';
-        }
-
-        postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: `🌐 Navigating browser to ${targetUrl}...` });
-        const navRes = await mcpInterface.executeBrowserAction('navigate', { url: targetUrl }, { approved: isApproved });
-
-        postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '🌐 Inspecting page accessibility snapshot...' });
-        const snapRes = await mcpInterface.executeBrowserAction('snapshot', {}, { approved: isApproved });
-
-        const combinedBrowserOutput = [navRes.output, snapRes.output, navRes.error, snapRes.error].filter(Boolean).join('\n') || '(No DOM snapshot output returned)';
-        const executedToolsList = ['browser_navigate', 'browser_snapshot'];
-        let finalInspection = parseBrowserInspectionResult(combinedBrowserOutput, targetUrl, executedToolsList);
-
-        const requestedAction = extractRequestedBrowserAction(rawUserInput);
-        if (requestedAction) {
-          postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: `🔍 Resolving target "${requestedAction.target}" against accessibility tree...` });
-          const targetRes = resolveAccessibilityTarget(requestedAction.target, finalInspection);
-
-          if (!targetRes.found) {
-            finalInspection.actionExecuted = {
-              action: requestedAction.action,
-              target: requestedAction.target,
-              success: false,
-              error: targetRes.error
-            };
-          } else {
-            const evalAction = permissionGate.evaluate(`browser_${requestedAction.action}`, {
-              target: requestedAction.target,
-              ref: targetRes.elementRef,
-              action: requestedAction.action
-            });
-
-            let isActionApproved = true;
-            if (evalAction.requiresApproval && !evalAction.allowed) {
-              hasBlockedAction = true;
-              postWebviewEvent('HITL_REQUEST', {
-                type: 'BROWSER_PERMISSION_APPROVAL',
-                title: `Permission Gate Intercept: Browser ${requestedAction.action.toUpperCase()}`,
-                message: evalAction.reason,
-                url: targetUrl,
-                riskScore: evalAction.riskScore
-              });
-
-              const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
-                this._pendingHitlResolver = resolve;
-              });
-              isActionApproved = userHitlResponse.action === 'approve';
-            }
-
-            postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: `⚡ Executing browser_${requestedAction.action} on "${requestedAction.target}" (ref: ${targetRes.elementRef})...` });
-            executedToolsList.push(`browser_${requestedAction.action}`);
-
-            const actionRes = await mcpInterface.executeBrowserAction(
-              requestedAction.action,
-              { element: targetRes.elementRef, ref: targetRes.elementRef, name: targetRes.targetName, text: requestedAction.text },
-              { approved: isActionApproved }
-            );
-
-            postWebviewEvent('AGENT_STEP', { agent: 'IntentAgent', status: 'running', message: '🌐 Inspecting post-action page snapshot...' });
-            executedToolsList.push('browser_snapshot');
-            const postSnapRes = await mcpInterface.executeBrowserAction('snapshot', {}, { approved: isActionApproved });
-
-            const postCombinedOutput = [actionRes.output, postSnapRes.output, actionRes.error, postSnapRes.error].filter(Boolean).join('\n') || combinedBrowserOutput;
-            finalInspection = parseBrowserInspectionResult(postCombinedOutput, targetUrl, executedToolsList);
-            finalInspection.actionExecuted = {
-              action: requestedAction.action,
-              target: requestedAction.target,
-              elementRef: targetRes.elementRef,
-              success: actionRes.success,
-              error: actionRes.error
-            };
-          }
-        }
-
-        const formattedMarkdown = formatBrowserInspectionMarkdown(finalInspection);
-
-        await mcpInterface.disconnectServer();
-        await mcpInterface.connectServer('default-inprocess');
-
-        state.targetFiles = [];
-
-        completedStages.push('response');
-        await finalizeExecution(hasBlockedAction ? 'HITL_REQUIRED' : 'COMPLETED', {
-          route: 'MCP_BROWSER',
-          targetFiles: [],
-          filePatches: [],
-          explanation: formattedMarkdown
-        });
-        return;
-      }
-
-      // Routing Logic for General Knowledge & Greetings
-      if (state.status === "ROUTED_GENERAL_QUERY") {
-        skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
-
-        let answer = `Hello! I am Kaizen, an advanced AI Coding Agent. How can I assist you with your project today?`;
-        try {
-          const { invokeModel } = await import('./tools/modelProvider');
-          const { memoryEngine } = await import('./context/memory/memoryEngine');
-          const contextBlock = memoryEngine.formatGeneralQueryContext();
-          const systemContent = `You are Kaizen, an advanced AI Coding Agent.
-Always check the USER PROFILE & KNOWN FACTS and RECENT CONVERSATION HISTORY provided below to answer user queries:
-
-${contextBlock}
-
-Directives:
-- You are KAIZEN, an advanced AI Coding Agent.
-- If the user asks for their name, identity, preferences, or previous details (e.g. "my name?", "what is my name?"), state their name/identity directly from the USER PROFILE & KNOWN FACTS or RECENT CONVERSATION HISTORY above.
-- If the user provides a short name or answer (e.g. "APURVA"), connect it with the recent conversation context and acknowledge it warmly.
-- Provide concise, friendly, and direct answers without generating code unless explicitly requested.`;
-
-          answer = await invokeModel(systemContent, rawUserInput, { temperature: 0.3 });
-        } catch (err) {
-          console.warn('General query LLM invocation failed:', err);
-        }
-
-        completedStages.push('response');
-        await finalizeExecution('COMPLETED', {
-          route: 'GENERAL_QUERY',
-          explanation: answer
-        });
-        return;
-      }
-
-      // Routing Logic for Memory Write Operations
-      if (state.status === "ROUTED_MEMORY_WRITE") {
-        skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
-        state.targetFiles = [];
-        state.plan = [];
-
-        const { memoryEngine } = await import('./context/memory/memoryEngine');
-        memoryEngine.consolidator.consolidateTurn(rawUserInput, 'Acknowledged memory preference.');
-
-        const factsAdded: { key: string; value: string; category: string }[] = [];
-
-        if (/typescript/i.test(rawUserInput) && /strict/i.test(rawUserInput)) {
-          const f1 = memoryEngine.longTermMemory.addFact('coding_convention', 'TypeScript Strict Mode', 'Enabled / Preferred', 'user_explicit');
-          factsAdded.push({ key: f1.key, value: f1.value, category: f1.category });
-        }
-
-        if (/typescript/i.test(rawUserInput) && /backend/i.test(rawUserInput)) {
-          const f2 = memoryEngine.longTermMemory.addFact('project_fact', 'Backend Language', 'TypeScript', 'user_explicit');
-          factsAdded.push({ key: f2.key, value: f2.value, category: f2.category });
-        }
-
-        if (/tailwind/i.test(rawUserInput)) {
-          const f3 = memoryEngine.longTermMemory.addFact('coding_convention', 'UI Styling Framework', 'Tailwind CSS', 'user_explicit');
-          factsAdded.push({ key: f3.key, value: f3.value, category: f3.category });
-        }
-
-        if (factsAdded.length === 0) {
-          const keyMatch = rawUserInput.match(/(?:remember|preference|convention|we use|we prefer)\s+([^:.]+)/i);
-          const key = keyMatch && keyMatch[1] ? keyMatch[1].trim() : 'Project Preference';
-          const fGen = memoryEngine.longTermMemory.addFact('project_fact', key, rawUserInput, 'user_explicit');
-          factsAdded.push({ key: fGen.key, value: fGen.value, category: fGen.category });
-        }
-
-        const factItemsMarkdown = factsAdded.map(f => `✓ **${f.key}**: ${f.value}`).join('\n');
-        const explanation = `### 🧠 Memory Updated
-
-${factItemsMarkdown}
-
-- **Memory Type**: Long-Term Project Memory
-- **Files Modified**: 0
-- **Plan Steps**: 0
-- **Persistence**: \`.kaizen/storage/memory/long-term.json\`
-- **Route**: Memory Write`;
-
-        completedStages.push('response');
-        await finalizeExecution('COMPLETED', {
-          route: 'ROUTED_MEMORY_WRITE',
-          memoryUpdated: true,
-          targetFiles: [],
-          plan: [],
-          filePatches: [],
-          memoryRecordsUpdated: factsAdded.length,
-          explanation
-        });
-        return;
-      }
-
-      // Routing Logic for Memory Read Operations
-      if (state.status === "ROUTED_MEMORY_READ") {
-        skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
-        state.targetFiles = [];
-        state.plan = [];
-
-        const { memoryEngine } = await import('./context/memory/memoryEngine');
-        const queryRes = memoryEngine.retrieveRelevant({ prompt: rawUserInput });
-
-        const longTermFacts = queryRes.longTermMemory;
-        const episodicEpisodes = queryRes.episodicMemory;
-
-        let explanation = `### 🧠 Memory Recall\n\n`;
-
-        if (longTermFacts.length > 0) {
-          explanation += `#### 📌 Relevant Project Memories\n`;
-          for (const f of longTermFacts) {
-            explanation += `- **${f.key}**: ${f.value} *(Category: ${f.category})*\n`;
-          }
-          explanation += `\n`;
-        } else {
-          explanation += `*(No long-term project facts match this query)*\n\n`;
-        }
-
-        if (episodicEpisodes.length > 0) {
-          explanation += `#### 📜 Previous Experience Episodes\n`;
-          for (const ep of episodicEpisodes) {
-            explanation += `- **${ep.task}**: ${ep.solution} *(Outcome: ${ep.outcome.toUpperCase()})*\n`;
-          }
-          explanation += `\n`;
-        }
-
-        explanation += `- **Files Modified**: 0\n- **Plan Steps**: 0\n- **Route**: Memory Read`;
-
-        completedStages.push('response');
-        await finalizeExecution('COMPLETED', {
-          route: 'ROUTED_MEMORY_READ',
-          targetFiles: [],
-          plan: [],
-          filePatches: [],
-          explanation
-        });
-        return;
-      }
-
-      // 2. Context Retrieval Agent
-      postWebviewEvent('AGENT_STEP', { agent: 'ContextRetrievalAgent', status: 'running', message: 'Analyzing workspace AST symbols...' });
-      const retrievalOutput = await contextRetrievalAgentNode(state);
-      state.extractedContext = retrievalOutput.extractedContext;
-      state.targetFiles = retrievalOutput.targetFiles;
-      completedStages.push('context');
-
-      postWebviewEvent('AGENT_STEP', {
-        agent: 'ContextRetrievalAgent',
-        status: 'completed',
-        result: { extractedContext: state.extractedContext }
+      const res = await this._backendClient.runPipeline({
+        userInput,
+        imagePayload,
+        sessionId: clientSessionId || this._activeSessionId || undefined
       });
 
-      if (state.status === "ROUTED_EXPLAIN_CODE") {
-        skippedStages.push('planner', 'coder', 'testrunner', 'debugger', 'reviewer');
-        completedStages.push('response');
-
-        const { generateFilteredResponse } = await import('./agents/responseFilterAgent');
-        const filteredExplanation = await generateFilteredResponse(
-          state.userInput || '',
-          state.extractedContext || '',
-          state.targetFiles || []
-        );
-
-        await finalizeExecution('COMPLETED', {
-          route: 'EXPLAIN_CODE',
-          explanation: filteredExplanation
-        });
-        return;
-      }
-
-      // Branch A: Existing Test Run & Debug Workflow
-      if (state.status === "ROUTED_RUN_EXISTING_TESTS" || state.status === "ROUTED_DEBUG_ERROR") {
-        skippedStages.push('planner', 'coder');
-        postWebviewEvent('AGENT_STEP', { agent: 'PlannerAgent', status: 'skipped', message: 'Bypassed for existing test execution' });
-        postWebviewEvent('AGENT_STEP', { agent: 'CoderAgent', status: 'skipped', message: 'Bypassed until test failures detected' });
-
-        postWebviewEvent('AGENT_STEP', { agent: 'TestRunnerAgent', status: 'running', message: 'Executing workspace automated unit test suite...' });
-        let testResult = await runWorkspaceTests(state.targetFiles);
-        completedStages.push('testrunner');
-
-        postWebviewEvent('AGENT_STEP', {
-          agent: 'TestRunnerAgent',
-          status: 'completed',
-          result: { summary: testResult.summary, passed: testResult.passed }
-        });
-
-        const MAX_SELF_HEAL_RETRIES = 3;
-        if (!testResult.passed) {
-          state.errorsEncountered = (state.errorsEncountered || 0) + 1;
-          if (testResult.structuredFailure) {
-            state.structuredFailures = [...(state.structuredFailures || []), testResult.structuredFailure];
-          }
-
-          while (!testResult.passed && state.retryCount < MAX_SELF_HEAL_RETRIES) {
-            const isToolFailure = testResult.failureType === 'TOOL_EXECUTION_FAILURE' || testResult.structuredFailure?.failureType === 'TOOL_EXECUTION_FAILURE';
-            if (isToolFailure) {
-              postWebviewEvent('AGENT_STEP', {
-                agent: 'TestRunnerAgent',
-                status: 'error',
-                result: { summary: `[TOOL_EXECUTION_FAILURE] ${testResult.summary}. Source code files were preserved untouched.`, passed: false }
-              });
-              break;
-            }
-
-            state.retryCount += 1;
-
-            const discoveredFiles = extractFailingFilesFromLogs(`${testResult.summary}\n${testResult.stdout}\n${testResult.stderr}`);
-            if (discoveredFiles.length > 0) {
-              state.targetFiles = Array.from(new Set([...state.targetFiles, ...discoveredFiles]));
-            }
-
-            postWebviewEvent('AGENT_STEP', {
-              agent: 'DebuggerAgent',
-              status: 'running',
-              message: `Self-Healing Test Failure Diagnosis (Attempt #${state.retryCount}/${MAX_SELF_HEAL_RETRIES})...`
-            });
-
-            state.extractedContext = `${state.extractedContext}\n\n[AUTOMATED TEST FAILURE REPORT - ATTEMPT #${state.retryCount}]:\n${testResult.summary}\n${testResult.stderr}\nPlease diagnose the root cause and generate fixed patches to make tests pass.`;
-
-            const debugResult = await debuggerAgentNode(state);
-            completedStages.push('debugger');
-
-            const isTestFile = (filePath: string) => {
-              const norm = filePath.replace(/\\/g, '/');
-              const baseName = path.basename(norm);
-              return norm.includes('/tests/') || baseName.startsWith('test_') || baseName.endsWith('_test.py') || baseName.endsWith('.test.ts');
-            };
-
-            const validPatches = (debugResult.filePatches || []).filter(p => !isTestFile(p.filePath));
-
-            if (validPatches.length > 0) {
-              for (const patch of validPatches) {
-                await this.applyPatchToVSCodeDocument(patch.filePath, patch.code);
-              }
-              completedStages.push('coder');
-              postWebviewEvent('AGENT_STEP', {
-                agent: 'CoderAgent',
-                status: 'completed',
-                result: { filePatches: validPatches, diffCards: await this.prepareDiffCards(validPatches) }
-              });
-            }
-
-            postWebviewEvent('AGENT_STEP', {
-              agent: 'DebuggerAgent',
-              status: 'completed',
-              result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation }
-            });
-
-            postWebviewEvent('AGENT_STEP', { agent: 'TestRunnerAgent', status: 'running', message: `Re-running unit tests after bug fix (Attempt #${state.retryCount})...` });
-            testResult = await runWorkspaceTests(state.targetFiles);
-
-            if (!testResult.passed) {
-              state.errorsEncountered = (state.errorsEncountered || 0) + 1;
-              if (testResult.structuredFailure) {
-                state.structuredFailures = [...(state.structuredFailures || []), testResult.structuredFailure];
-              }
-            }
-
-            postWebviewEvent('AGENT_STEP', { agent: 'TestRunnerAgent', status: 'completed', result: { summary: testResult.summary, passed: testResult.passed } });
-          }
-        } else {
-          skippedStages.push('debugger');
-          postWebviewEvent('AGENT_STEP', { agent: 'DebuggerAgent', status: 'skipped', message: 'No test failures detected' });
-        }
-
-        if (testResult.passed) {
-          postWebviewEvent('AGENT_STEP', { agent: 'ReviewerAgent', status: 'running', message: 'Performing automated code review & quality audit...' });
-          const reviewResult = await reviewerAgentNode(state);
-          completedStages.push('reviewer');
-
-          postWebviewEvent('AGENT_STEP', {
-            agent: 'ReviewerAgent',
-            status: 'completed',
-            result: reviewResult
-          });
-
-          await finalizeExecution('TESTS_PASSED', {
-            route: state.status,
-            testResult,
-            reviewResult,
-            diffCards: await this.prepareDiffCards([])
-          });
-        } else {
-          skippedStages.push('reviewer');
-          postWebviewEvent('AGENT_STEP', { agent: 'DebuggerAgent', status: 'failed', message: 'Self-healing retries exhausted without resolving test failures.' });
-          postWebviewEvent('AGENT_STEP', { agent: 'ReviewerAgent', status: 'skipped', message: 'Code review skipped due to unresolved test failures.' });
-
-          await finalizeExecution('FAILED', {
-            error: `Test failures unresolved after ${MAX_SELF_HEAL_RETRIES} retries.`,
-            testResult
-          });
-        }
-        return;
-      }
-
-      // Branch B: Code Generation & Feature Implementation Workflow
-      if (state.status === "ROUTED_GENERATE_CODE" || state.status === "ROUTED_REFACTOR") {
-        // 3. Planner Agent
-        postWebviewEvent('AGENT_STEP', { agent: 'PlannerAgent', status: 'running', message: 'Generating execution plan...' });
-        const plannerOutput = await plannerAgentNode(state);
-        state.plan = plannerOutput.plan || [];
-        state.status = plannerOutput.status || "PLANNED";
-        if (plannerOutput.planAttempt !== undefined) state.planAttempt = plannerOutput.planAttempt;
-        if (plannerOutput.rejectedPlans !== undefined) state.rejectedPlans = plannerOutput.rejectedPlans;
-
-        if (plannerOutput.status === 'SECURITY_VIOLATION_BLOCKED' || plannerOutput.status === 'PLAN_FAILED' || plannerOutput.status === 'PLAN_RETRY_LIMIT') {
-          state.planFailureReason = plannerOutput.planFailureReason;
-          postWebviewEvent('AGENT_STEP', {
-            agent: 'PlannerAgent',
-            status: 'failed',
-            message: plannerOutput.planFailureReason || 'Plan generation failed.'
-          });
-          skippedStages.push('coder', 'testrunner', 'debugger', 'reviewer');
-          await finalizeExecution('FAILED', { message: plannerOutput.planFailureReason || 'Plan generation failed.' });
-          return;
-        }
-
-        completedStages.push('planner');
-
-        postWebviewEvent('AGENT_STEP', {
-          agent: 'PlannerAgent',
-          status: 'completed',
-          result: { plan: state.plan, status: state.status }
-        });
-
-        state.planApprovalStatus = 'PENDING_APPROVAL';
-
-        // 4. HITL Plan Approval Card
-        postWebviewEvent('HITL_REQUEST', {
-          type: 'PLAN_APPROVAL',
-          title: 'Plan Approval Required',
-          message: 'Please review the generated plan before proceeding to code generation.',
-          plan: state.plan,
-          targetFiles: state.targetFiles,
-          planApprovalStatus: 'PENDING_APPROVAL'
-        });
-
-        const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
-          this._pendingHitlResolver = resolve;
-        });
-
-        if (userHitlResponse.action === 'reject') {
-          state.planApprovalStatus = 'REJECTED';
-          skippedStages.push('coder', 'testrunner', 'debugger', 'reviewer');
-          await finalizeExecution('ABORTED', { message: 'Plan rejected by user.', planApprovalStatus: 'REJECTED' });
-          return;
-        }
-
-        if (userHitlResponse.action === 'feedback' && userHitlResponse.message) {
-          state.planApprovalStatus = 'FEEDBACK_SUBMITTED';
-          state.userInput = `${state.originalUserRequest || state.userInput} (User plan feedback: ${userHitlResponse.message})`;
-          const updatedPlannerOutput = await plannerAgentNode(state);
-          state.plan = updatedPlannerOutput.plan || state.plan;
-          if (updatedPlannerOutput.planAttempt !== undefined) state.planAttempt = updatedPlannerOutput.planAttempt;
-          if (updatedPlannerOutput.rejectedPlans !== undefined) state.rejectedPlans = updatedPlannerOutput.rejectedPlans;
-
-          if (updatedPlannerOutput.status === 'SECURITY_VIOLATION_BLOCKED' || updatedPlannerOutput.status === 'PLAN_FAILED' || updatedPlannerOutput.status === 'PLAN_RETRY_LIMIT') {
-            state.status = updatedPlannerOutput.status;
-            state.planFailureReason = updatedPlannerOutput.planFailureReason;
-            postWebviewEvent('AGENT_STEP', {
-              agent: 'PlannerAgent',
-              status: 'failed',
-              message: updatedPlannerOutput.planFailureReason || 'Plan generation failed.'
-            });
-            skippedStages.push('coder', 'testrunner', 'debugger', 'reviewer');
-            await finalizeExecution('FAILED', { message: updatedPlannerOutput.planFailureReason || 'Plan generation failed.' });
-            return;
-          }
-
-          postWebviewEvent('AGENT_STEP', {
-            agent: 'PlannerAgent',
-            status: 'completed',
-            result: { plan: state.plan, status: state.status }
-          });
-        }
-
-        state.planApprovalStatus = 'APPROVED';
-
-        // 5. Coder Agent
-        postWebviewEvent('AGENT_STEP', { agent: 'CoderAgent', status: 'running', message: 'Generating code patches...' });
-        let coderOutput = await codeGenAgentNode(state);
-
-        if (coderOutput.status === 'CODE_GEN_FAILED' || coderOutput.status === 'PREFLIGHT_SECURITY_BLOCKED') {
-          state.status = coderOutput.status;
-          state.generationFailureReason = coderOutput.generationFailureReason;
-          postWebviewEvent('AGENT_STEP', {
-            agent: 'CoderAgent',
-            status: 'failed',
-            message: coderOutput.generationFailureReason || 'Code generation failed.'
-          });
-          skippedStages.push('testrunner', 'debugger', 'reviewer');
-          await finalizeExecution('FAILED', { message: coderOutput.generationFailureReason || 'Code generation failed.' });
-          return;
-        }
-
-        state.extractedContext = coderOutput.extractedContext || state.extractedContext;
-        completedStages.push('coder');
-
-        const diffCards = await this.prepareDiffCards(coderOutput.filePatches || []);
-        postWebviewEvent('AGENT_STEP', {
-          agent: 'CoderAgent',
-          status: 'completed',
-          result: { filePatches: coderOutput.filePatches, diffCards }
-        });
-
-        // 6. Test Runner & Self-Healing Debugger Loop
-        postWebviewEvent('AGENT_STEP', { agent: 'TestRunnerAgent', status: 'running', message: 'Executing automated unit tests...' });
-        let testResult = await runWorkspaceTests(state.targetFiles);
-        completedStages.push('testrunner');
-
-        postWebviewEvent('AGENT_STEP', {
-          agent: 'TestRunnerAgent',
-          status: 'completed',
-          result: { summary: testResult.summary, passed: testResult.passed }
-        });
-
-        const MAX_SELF_HEAL_RETRIES = 3;
-        if (!testResult.passed) {
-          while (!testResult.passed && state.retryCount < MAX_SELF_HEAL_RETRIES) {
-            const isToolFailure = testResult.failureType === 'TOOL_EXECUTION_FAILURE' || testResult.structuredFailure?.failureType === 'TOOL_EXECUTION_FAILURE';
-            if (isToolFailure) {
-              postWebviewEvent('AGENT_STEP', {
-                agent: 'TestRunnerAgent',
-                status: 'error',
-                result: { summary: `[TOOL_EXECUTION_FAILURE] ${testResult.summary}. Source code files were preserved untouched.`, passed: false }
-              });
-              break;
-            }
-
-            state.retryCount += 1;
-
-            const discoveredFiles = extractFailingFilesFromLogs(`${testResult.summary}\n${testResult.stdout}\n${testResult.stderr}`);
-            if (discoveredFiles.length > 0) {
-              state.targetFiles = Array.from(new Set([...state.targetFiles, ...discoveredFiles]));
-            }
-
-            postWebviewEvent('AGENT_STEP', {
-              agent: 'DebuggerAgent',
-              status: 'running',
-              message: `Self-Healing Test Failure Diagnosis (Attempt #${state.retryCount}/${MAX_SELF_HEAL_RETRIES})...`
-            });
-
-            state.extractedContext = `${state.extractedContext}\n\n[AUTOMATED TEST FAILURE REPORT - ATTEMPT #${state.retryCount}]:\n${testResult.summary}\n${testResult.stderr}\nPlease diagnose the root cause and generate fixed patches to make tests pass.`;
-
-            const debugResult = await debuggerAgentNode(state);
-            completedStages.push('debugger');
-            if (debugResult.filePatches && debugResult.filePatches.length > 0) {
-              for (const patch of debugResult.filePatches) {
-                await this.applyPatchToVSCodeDocument(patch.filePath, patch.code);
-              }
-            }
-
-            postWebviewEvent('AGENT_STEP', {
-              agent: 'DebuggerAgent',
-              status: 'completed',
-              result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation }
-            });
-
-            postWebviewEvent('AGENT_STEP', { agent: 'TestRunnerAgent', status: 'running', message: `Re-running unit tests after bug fix (Attempt #${state.retryCount})...` });
-            testResult = await runWorkspaceTests(state.targetFiles);
-            postWebviewEvent('AGENT_STEP', { agent: 'TestRunnerAgent', status: 'completed', result: { summary: testResult.summary, passed: testResult.passed } });
-          }
-        } else {
-          skippedStages.push('debugger');
-        }
-
-        // 7. Reviewer Agent
-        postWebviewEvent('AGENT_STEP', { agent: 'ReviewerAgent', status: 'running', message: 'Performing automated code review...' });
-        let reviewResult = await reviewerAgentNode(state);
-        completedStages.push('reviewer');
-
-        postWebviewEvent('AGENT_STEP', {
-          agent: 'ReviewerAgent',
-          status: 'completed',
-          result: reviewResult
-        });
-
-        // Apply file patches directly to VS Code Workspace
-        if (coderOutput.filePatches && coderOutput.filePatches.length > 0) {
-          for (const patch of coderOutput.filePatches) {
-            await this.applyPatchToVSCodeDocument(patch.filePath, patch.code);
-          }
-        }
-
-        await finalizeExecution('SUCCESS', {
-          filePatches: coderOutput.filePatches,
-          diffCards: await this.prepareDiffCards(coderOutput.filePatches || []),
-          reviewResult,
-          testResult
-        });
-        return;
-      }
+      console.log('[Kaizen Extension Host] Pipeline initiated on backend:', res.message);
     } catch (err: any) {
-      await finalizeExecution('FAILED', { error: err?.message || String(err) });
+      console.error('[Kaizen Extension Host] Pipeline launch error:', err);
+      vscode.window.showErrorMessage(`Failed to launch pipeline on backend: ${err?.message || err}`);
+      this.postMessageToWebview('PIPELINE_ERROR', {
+        status: 'FAILED',
+        error: err?.message || String(err)
+      });
     }
+  }
+
+  private async handleHitlResponse(action: 'approve' | 'reject' | 'feedback', message?: string, sessionId?: string) {
+    const targetSessionId = sessionId || this._activeSessionId;
+    if (!targetSessionId) {
+      vscode.window.showWarningMessage('No active session ID found for human approval response.');
+      return;
+    }
+
+    try {
+      await this._backendClient.respondHitl(targetSessionId, action, message);
+      console.log(`[Kaizen Extension Host] HITL ${action} dispatched for session ${targetSessionId}`);
+    } catch (err: any) {
+      vscode.window.showErrorMessage(`Failed to send approval response to backend: ${err?.message || err}`);
+    }
+  }
+
+  private async handleRunCode(targetFile?: string) {
+    const file = targetFile || 'src/sandbox/main.ts';
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    const rootPath = workspaceFolders ? workspaceFolders[0].uri.fsPath : process.cwd();
+    const fullPath = path.resolve(rootPath, file);
+    const startTime = Date.now();
+
+    if (!fs.existsSync(fullPath)) {
+      this.postMessageToWebview('CODE_EXECUTION_RESULT', {
+        success: false,
+        filePath: file,
+        output: `File not found: ${file}`,
+        executionTimeMs: 0,
+        exitCode: 1
+      });
+      return;
+    }
+
+    const ext = path.extname(file).toLowerCase();
+    if (ext === '.html') {
+      const fileName = path.basename(file);
+      const browserUrl = `${this._backendClient.getBaseUrl()}/sandbox/${fileName}`;
+      this.postMessageToWebview('CODE_EXECUTION_RESULT', {
+        success: true,
+        filePath: file,
+        language: 'html',
+        output: `Webpage hosted statically at ${browserUrl}. Opening live preview...`,
+        executionTimeMs: Date.now() - startTime,
+        exitCode: 0,
+        browserUrl
+      });
+      return;
+    }
+
+    const command = ext === '.py'
+      ? `python "${file}"`
+      : (ext === '.ts' || ext === '.js' ? `npx ts-node --transpile-only "${file}"` : `node "${file}"`);
+
+    const cp = require('child_process');
+    cp.exec(command, { cwd: rootPath }, (err: any, stdout: string, stderr: string) => {
+      const durationMs = Date.now() - startTime;
+      const outputStr = (stdout + (stderr ? '\n' + stderr : '')).trim() || err?.message || '(Clean execution output)';
+      this.postMessageToWebview('CODE_EXECUTION_RESULT', {
+        success: !err,
+        filePath: file,
+        language: ext === '.py' ? 'python' : 'typescript',
+        output: outputStr,
+        executionTimeMs: durationMs,
+        exitCode: err ? (err.code || 1) : 0
+      });
+    });
   }
 
   private async prepareDiffCards(filePatches: GeneratedFilePatch[]) {
@@ -1020,8 +331,8 @@ ${factItemsMarkdown}
     return cards;
   }
 
-  // Apply Patch using VS Code Native WorkspaceEdit API
-  private async applyPatchToVSCodeDocument(filePath: string, newCode: string) {
+  // Apply Patch using VS Code Native Workspace APIs
+  public async applyPatchToVSCodeDocument(filePath: string, newCode: string) {
     if (isProtectedFile(filePath)) {
       vscode.window.showErrorMessage(`Security Policy Violation: '${filePath}' is protected.`);
       return;
@@ -1037,7 +348,7 @@ ${factItemsMarkdown}
       fs.mkdirSync(dir, { recursive: true });
     }
 
-    // Write file content directly
+    // Write file content
     fs.writeFileSync(fullUri.fsPath, newCode, 'utf-8');
 
     // Open text document in VS Code
@@ -1048,7 +359,7 @@ ${factItemsMarkdown}
   }
 
   // Launch VS Code Native Diff Editor
-  private async openVSCodeNativeDiff(filePath: string, generatedCode: string) {
+  public async openVSCodeNativeDiff(filePath: string, generatedCode: string) {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     const rootPath = workspaceFolders ? workspaceFolders[0].uri.fsPath : process.cwd();
     const originalUri = vscode.Uri.file(path.resolve(rootPath, filePath));

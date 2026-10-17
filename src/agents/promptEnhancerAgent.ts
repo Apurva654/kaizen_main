@@ -74,7 +74,7 @@ export async function enhanceUserPrompt(rawPrompt: string): Promise<EnhancedProm
 
   const geminiApiKey = process.env.GEMINI_API_KEY;
   if (geminiApiKey && geminiApiKey !== 'your_gemini_api_key_here') {
-    const geminiCandidates = ['gemini-2.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.0-flash'];
+    const geminiCandidates = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.0-flash'];
 
     for (const modelName of geminiCandidates) {
       try {

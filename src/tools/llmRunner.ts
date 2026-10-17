@@ -23,7 +23,7 @@ export async function runStructured<S extends z.ZodTypeAny>(
   if (geminiApiKey && geminiApiKey !== 'your_gemini_api_key_here') {
     const geminiModels = opts.models && opts.models.length > 0
       ? opts.models
-      : ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-3.5-flash-lite'];
+      : ['gemini-2.5-pro', 'gemini-3.1-pro-preview', 'gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-3.5-flash-lite'];
 
     for (const model of geminiModels) {
       let timerHandle: NodeJS.Timeout | null = null;
