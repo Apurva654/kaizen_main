@@ -2146,7 +2146,7 @@ document.addEventListener('DOMContentLoaded', () => {
           telemetryBody.innerHTML = data.traces.map(t => `
             <div style="background: var(--bg-card); padding: 10px; border-radius: 6px; margin-bottom: 8px;">
               <div style="color: var(--primary); font-weight: 600;">${t.agentName} (${t.modelName})</div>
-              <div style="font-size: 11px; color: var(--text-muted);">Latency: ${t.latencyMs}ms | Tokens: In ${t.promptTokens} / Out ${t.completionTokens}</div>
+              <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Latency: ${t.latencyMs}ms | Tokens: In ${t.promptTokens} / Out ${t.completionTokens} (${t.totalTokens || (t.promptTokens + t.completionTokens)} total) | Cost: $${typeof t.estimatedCostUsd === 'number' ? t.estimatedCostUsd.toFixed(6) : '0.000000'} USD</div>
             </div>
           `).join('');
         }
