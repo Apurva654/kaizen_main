@@ -29,6 +29,11 @@ export class WorkflowMemoryStore {
     };
 
     if (!this.checkpointCache.has(checkpoint.sessionId)) {
+      // LRU Eviction: prevent memory leak by evicting oldest session when cache exceeds 50 sessions
+      if (this.checkpointCache.size >= 50) {
+        const oldestKey = this.checkpointCache.keys().next().value;
+        if (oldestKey) this.checkpointCache.delete(oldestKey);
+      }
       this.checkpointCache.set(checkpoint.sessionId, []);
     }
 

@@ -34,14 +34,41 @@ export interface MCPServerConfig {
   env?: Record<string, string>;
 }
 
+export interface ActiveServerSession {
+  client: Client;
+  transport: any;
+  config: MCPServerConfig;
+  discoveredTools: Map<string, any>;
+  isConnected: boolean;
+}
+
 export class MCPUnifiedInterface {
-  private mcpClient: Client | null = null;
-  private activeTransport: any = null;
-  private isConnected: boolean = false;
-  private connectionPromise: Promise<void> | null = null;
+  private activeSessions: Map<string, ActiveServerSession> = new Map();
+  private connectionPromises: Map<string, Promise<void>> = new Map();
   private activeConfig: MCPServerConfig | null = null;
   private serverConfigs: Map<string, MCPServerConfig> = new Map();
   private discoveredTools: Map<string, any> = new Map();
+
+  public get mcpClient(): Client | null {
+    if (this.activeConfig) {
+      return this.activeSessions.get(this.activeConfig.id)?.client || null;
+    }
+    return this.activeSessions.get('default-inprocess')?.client || null;
+  }
+
+  public get activeTransport(): any {
+    if (this.activeConfig) {
+      return this.activeSessions.get(this.activeConfig.id)?.transport || null;
+    }
+    return this.activeSessions.get('default-inprocess')?.transport || null;
+  }
+
+  public get isConnected(): boolean {
+    if (this.activeConfig) {
+      return Boolean(this.activeSessions.get(this.activeConfig.id)?.isConnected);
+    }
+    return Boolean(this.activeSessions.get('default-inprocess')?.isConnected);
+  }
 
   constructor() {
     // Register default built-in server configurations
@@ -107,7 +134,7 @@ export class MCPUnifiedInterface {
   }
 
   /**
-   * Connects the MCP Client to a specific MCP server definition
+   * Connects the MCP Client to a specific MCP server definition or reuses an existing active session.
    */
   public async connectServer(target?: MCPServerConfig | string): Promise<void> {
     let configToConnect: MCPServerConfig;
@@ -123,15 +150,23 @@ export class MCPUnifiedInterface {
       this.registerServerConfig(configToConnect);
     }
 
-    if (this.isConnected) {
-      await this.disconnectServer();
+    // Reuse existing connection if active
+    const existing = this.activeSessions.get(configToConnect.id);
+    if (existing && existing.isConnected) {
+      this.activeConfig = configToConnect;
+      this.discoveredTools = existing.discoveredTools;
+      return;
     }
 
-    this.connectionPromise = (async () => {
+    if (this.connectionPromises.has(configToConnect.id)) {
+      return this.connectionPromises.get(configToConnect.id)!;
+    }
+
+    const connectPromise = (async () => {
       try {
         console.log(`[MCPClient] Connecting to MCP Server "${configToConnect.name}" via ${configToConnect.transportType.toUpperCase()} transport...`);
 
-        this.mcpClient = new Client(
+        const client = new Client(
           {
             name: 'kaizen-mcp-client',
             version: '1.0.0'
@@ -139,65 +174,85 @@ export class MCPUnifiedInterface {
           { capabilities: {} }
         );
 
+        let transport: any;
         if (configToConnect.transportType === 'stdio') {
           const command = configToConnect.command || 'node';
           const args = configToConnect.args || [];
           const env = { ...process.env, ...(configToConnect.env || {}) };
 
-          const transport = new StdioClientTransport({
+          transport = new StdioClientTransport({
             command,
             args,
             env: env as Record<string, string>
           });
-
-          this.activeTransport = transport;
-          await this.mcpClient.connect(transport);
+          await client.connect(transport);
         } else {
           const { clientTransport } = await kaizenMCPServer.connectTransportPair();
-          this.activeTransport = clientTransport;
-          await this.mcpClient.connect(clientTransport);
+          transport = clientTransport;
+          await client.connect(clientTransport);
         }
 
-        this.activeConfig = configToConnect;
-        this.isConnected = true;
+        const sessionTools = new Map<string, any>();
+        try {
+          const response = await client.listTools();
+          for (const t of response.tools || []) {
+            sessionTools.set(t.name, t);
+          }
+        } catch (e) {
+          console.warn(`[MCPClient] Warning: failed to list tools for ${configToConnect.name}:`, e);
+        }
 
-        await this.discoverTools();
-        console.log(`[MCPClient] Connected cleanly to "${configToConnect.name}". Discovered ${this.discoveredTools.size} dynamic tools.`);
+        this.activeSessions.set(configToConnect.id, {
+          client,
+          transport,
+          config: configToConnect,
+          discoveredTools: sessionTools,
+          isConnected: true
+        });
+
+        this.activeConfig = configToConnect;
+        this.discoveredTools = sessionTools;
+
+        console.log(`[MCPClient] Connected cleanly to "${configToConnect.name}". Discovered ${sessionTools.size} dynamic tools.`);
       } catch (err) {
         console.error(`[MCPClient] Connection to server "${configToConnect.name}" failed:`, err);
-        this.isConnected = false;
-        this.mcpClient = null;
-        this.activeTransport = null;
-        this.connectionPromise = null;
         throw err;
+      } finally {
+        this.connectionPromises.delete(configToConnect.id);
       }
     })();
 
-    return this.connectionPromise;
+    this.connectionPromises.set(configToConnect.id, connectPromise);
+    return connectPromise;
   }
 
   /**
-   * Disconnects active MCP Client transport cleanly
+   * Disconnects active MCP Client transports cleanly
    */
-  public async disconnectServer(): Promise<void> {
-    if (!this.isConnected && !this.mcpClient) return;
+  public async disconnectServer(targetId?: string): Promise<void> {
+    const serversToClose = targetId
+      ? [this.activeSessions.get(targetId)].filter(Boolean) as ActiveServerSession[]
+      : Array.from(this.activeSessions.values());
 
-    try {
-      if (this.mcpClient) {
-        await this.mcpClient.close();
+    for (const session of serversToClose) {
+      try {
+        if (session.client) {
+          await session.client.close();
+        }
+        if (session.transport && typeof session.transport.close === 'function') {
+          await session.transport.close();
+        }
+        session.isConnected = false;
+        console.log(`[MCPClient] Disconnected from server "${session.config.name}".`);
+      } catch (err) {
+        console.warn(`[MCPClient] Error during disconnect of ${session.config.name}:`, err);
+      } finally {
+        this.activeSessions.delete(session.config.id);
       }
-      if (this.activeTransport && typeof this.activeTransport.close === 'function') {
-        await this.activeTransport.close();
-      }
-      console.log(`[MCPClient] Disconnected from server "${this.activeConfig?.name || 'unknown'}".`);
-    } catch (err) {
-      console.warn('[MCPClient] Error during disconnect:', err);
-    } finally {
-      this.isConnected = false;
-      this.mcpClient = null;
-      this.activeTransport = null;
+    }
+
+    if (!targetId || targetId === this.activeConfig?.id) {
       this.activeConfig = null;
-      this.connectionPromise = null;
       this.discoveredTools.clear();
     }
   }
@@ -205,10 +260,10 @@ export class MCPUnifiedInterface {
   /**
    * Ensures the MCP Client is connected to an active server
    */
-  public async ensureConnected(): Promise<void> {
-    if (this.isConnected && this.mcpClient) return;
-    if (this.connectionPromise) return this.connectionPromise;
-    return this.connectServer('default-inprocess');
+  public async ensureConnected(serverId?: string): Promise<void> {
+    const target = serverId || this.activeConfig?.id || 'default-inprocess';
+    if (this.activeSessions.get(target)?.isConnected) return;
+    return this.connectServer(target);
   }
 
   /**

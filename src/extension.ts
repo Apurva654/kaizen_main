@@ -105,8 +105,12 @@ export function activate(context: vscode.ExtensionContext) {
           cwd: kaizenDir
         });
       terminal.show();
-      terminal.sendText('npm run server');
-      vscode.window.showInformationMessage('Starting Kaizen Backend Server in integrated terminal...');
+      const fs = require('fs');
+      const path = require('path');
+      const hasSrc = fs.existsSync(path.join(kaizenDir, 'src', 'server.ts'));
+      const startCmd = hasSrc ? 'npm run server' : 'node dist/server.js';
+      terminal.sendText(startCmd);
+      vscode.window.showInformationMessage(`Starting Kaizen Backend Server (${startCmd})...`);
     })
   );
 

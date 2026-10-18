@@ -23,7 +23,7 @@ export async function runStructured<S extends z.ZodTypeAny>(
   if (geminiApiKey && geminiApiKey !== 'your_gemini_api_key_here') {
     const geminiModels = opts.models && opts.models.length > 0
       ? opts.models
-      : ['gemini-2.5-pro', 'gemini-3.1-pro-preview', 'gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-3.5-flash-lite'];
+      : ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-3.5-flash-lite'];
 
     for (const model of geminiModels) {
       let timerHandle: NodeJS.Timeout | null = null;
@@ -56,14 +56,25 @@ export async function runStructured<S extends z.ZodTypeAny>(
           if (opts.validate) {
             const validationError = opts.validate(result);
             if (validationError) {
-              throw new Error(`Validation failed for Gemini model '${model}': ${validationError}`);
+              errors.push(`[Validation:${model}]: ${validationError}`);
+              // If validation fails on the output structure, trying every single fallback model
+              // without prompt feedback wastes minutes. Allow at most 1 fallback, then fail fast.
+              const validationFailures = errors.filter(e => e.startsWith('[Validation:'));
+              if (validationFailures.length >= 2) {
+                throw new Error(`Output validation failed: ${validationError}`);
+              }
+              continue;
             }
           }
-          await langfuseTracer.recordGeneration(opts.agent, model, opts.user, JSON.stringify(result), latencyMs, 50, 150);
+          await langfuseTracer.recordGeneration(opts.agent, model, opts.user, JSON.stringify(result), latencyMs);
           return { result, model };
         }
       } catch (err: any) {
         errors.push(`[Gemini:${model}]: ${err?.message || String(err)}`);
+        // If an explicit validation error was thrown, propagate it
+        if (err?.message?.startsWith('Output validation failed:')) {
+          throw err;
+        }
       } finally {
         if (timerHandle) clearTimeout(timerHandle);
       }

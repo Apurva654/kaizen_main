@@ -73,17 +73,31 @@ export class LangfuseTracerManager {
     console.log(`--------------------------------\n`);
   }
 
+  public estimateTokenCount(text: string): number {
+    if (!text) return 0;
+    const words = text.trim().split(/\s+/).filter(Boolean).length;
+    const charEstimate = Math.ceil(text.length / 3.8);
+    return Math.max(1, Math.round((words * 1.3 + charEstimate) / 2));
+  }
+
   public async recordGeneration(
     agentName: string,
     modelName: string,
     prompt: string,
     output: string,
     latencyMs: number,
-    promptTokens: number = 50,
-    completionTokens: number = 150
+    promptTokens?: number,
+    completionTokens?: number
   ): Promise<LLMMetrics> {
-    const totalTokens = promptTokens + completionTokens;
-    const estimatedCostUsd = this.calculateCost(modelName, promptTokens, completionTokens);
+    const computedPromptTokens = (promptTokens !== undefined && promptTokens > 0)
+      ? promptTokens
+      : this.estimateTokenCount(prompt);
+    const computedCompletionTokens = (completionTokens !== undefined && completionTokens > 0)
+      ? completionTokens
+      : this.estimateTokenCount(output);
+
+    const totalTokens = computedPromptTokens + computedCompletionTokens;
+    const estimatedCostUsd = this.calculateCost(modelName, computedPromptTokens, computedCompletionTokens);
     let traceId: string | undefined = undefined;
 
     if (this.isEnabled && this.langfuseClient) {
@@ -100,8 +114,8 @@ export class LangfuseTracerManager {
           input: prompt,
           output: output,
           usage: {
-            promptTokens,
-            completionTokens,
+            promptTokens: computedPromptTokens,
+            completionTokens: computedCompletionTokens,
             totalTokens
           },
           metadata: {
@@ -120,8 +134,8 @@ export class LangfuseTracerManager {
       agentName,
       modelName,
       latencyMs,
-      promptTokens,
-      completionTokens,
+      promptTokens: computedPromptTokens,
+      completionTokens: computedCompletionTokens,
       totalTokens,
       estimatedCostUsd,
       traceId

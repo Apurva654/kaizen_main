@@ -10,16 +10,19 @@ export interface WebSearchResult {
   source: 'google' | 'duckduckgo'; // Which search engine provided this
 }
 
-// SSE emitter callback - will be set by server.ts
+import { DEFAULT_GEMINI_MODELS } from './modelProvider';
+
+// Optional fallback emitter callback for legacy compatibility
 let globalSSEEmitter: ((eventType: string, data: any) => void) | null = null;
 
 export function setSSEEmitter(emitter: (eventType: string, data: any) => void) {
   globalSSEEmitter = emitter;
 }
 
-function emitSearchProgress(message: string) {
-  if (globalSSEEmitter) {
-    globalSSEEmitter('agent_step', {
+function emitSearchProgress(message: string, localEmitter?: (eventType: string, data: any) => void) {
+  const activeEmitter = localEmitter || globalSSEEmitter;
+  if (activeEmitter) {
+    activeEmitter('agent_step', {
       agent: 'IntentAgent',
       status: 'thinking',
       message: message
@@ -31,7 +34,7 @@ function emitSearchProgress(message: string) {
  * Search using Google Gemini API with Google Search Grounding enabled
  * Requires: GEMINI_API_KEY or GOOGLE_GEMINI_API_KEY in .env
  */
-async function searchGemini(query: string): Promise<WebSearchResult[]> {
+async function searchGemini(query: string, localEmitter?: (eventType: string, data: any) => void): Promise<WebSearchResult[]> {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_GEMINI_API_KEY;
 
   if (!apiKey) {
@@ -39,9 +42,9 @@ async function searchGemini(query: string): Promise<WebSearchResult[]> {
   }
 
   try {
-    emitSearchProgress(`🔍 Searching Google via Gemini AI Grounding for "${query}"...`);
+    emitSearchProgress(`🔍 Searching Google via Gemini AI Grounding for "${query}"...`, localEmitter);
 
-    const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash'];
+    const modelsToTry = DEFAULT_GEMINI_MODELS.filter(m => m.includes('flash') || m.includes('pro'));
     let response: Response | null = null;
     for (const model of modelsToTry) {
       const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
@@ -70,30 +73,30 @@ async function searchGemini(query: string): Promise<WebSearchResult[]> {
 
     const candidate = data.candidates?.[0];
     const groundingChunks = candidate?.groundingMetadata?.groundingChunks;
+    const groundedAnswer = candidate?.content?.parts?.[0]?.text?.trim();
+
+    if (groundedAnswer) {
+      results.push({
+        title: `Google Search Grounded Synthesis: "${query}"`,
+        snippet: groundedAnswer.slice(0, 1000),
+        url: groundingChunks?.[0]?.web?.uri || 'https://www.google.com',
+        timestamp,
+        source: 'google' as const
+      });
+    }
 
     if (Array.isArray(groundingChunks) && groundingChunks.length > 0) {
       for (const chunk of groundingChunks) {
-        if (chunk.web) {
+        if (chunk.web && chunk.web.uri) {
           results.push({
-            title: chunk.web.title || 'Google Search Result',
-            snippet: chunk.web.title ? `Web source: ${chunk.web.title}` : '',
-            url: chunk.web.uri || '',
+            title: chunk.web.title || 'Google Search Citation',
+            snippet: chunk.web.title ? `Citation Source: ${chunk.web.title}` : `Web Source: ${chunk.web.uri}`,
+            url: chunk.web.uri,
             timestamp,
             source: 'google' as const
           });
         }
       }
-    }
-
-    if (results.length === 0 && candidate?.content?.parts?.[0]?.text) {
-      const textResponse = candidate.content.parts[0].text;
-      results.push({
-        title: `Google Gemini Grounded Search Summary`,
-        snippet: textResponse.slice(0, 300),
-        url: 'https://google.com',
-        timestamp,
-        source: 'google' as const
-      });
     }
 
     if (results.length > 0) {
@@ -165,20 +168,17 @@ async function searchDuckDuckGo(query: string): Promise<WebSearchResult[]> {
  * Uses Gemini Search Grounding (with DuckDuckGo as keyless fallback)
  */
 export async function performWebSearch(query: string, customEmitter?: (eventType: string, data: any) => void): Promise<WebSearchResult[]> {
-  if (customEmitter) {
-    setSSEEmitter(customEmitter);
-  }
   if (!query || query.trim().length === 0) {
     return [];
   }
 
   const cleanQuery = query.trim().slice(0, 200); // Limit to 200 chars
 
-  emitSearchProgress(`🌐 Initiating web search for: "${cleanQuery}"`);
+  emitSearchProgress(`🌐 Initiating web search for: "${cleanQuery}"`, customEmitter);
 
   // Try search strategies in order
   const searchStrategies = [
-    { name: 'Gemini Search Grounding', fn: () => searchGemini(cleanQuery) },
+    { name: 'Gemini Search Grounding', fn: () => searchGemini(cleanQuery, customEmitter) },
     { name: 'DuckDuckGo Fallback', fn: () => searchDuckDuckGo(cleanQuery) }
   ];
 
@@ -186,7 +186,7 @@ export async function performWebSearch(query: string, customEmitter?: (eventType
     try {
       const results = await strategy.fn();
       if (results && results.length > 0) {
-        emitSearchProgress(`✅ Search complete: ${results.length} results`);
+        emitSearchProgress(`✅ Search complete: ${results.length} results`, customEmitter);
         return results;
       }
     } catch (err) {
@@ -196,7 +196,7 @@ export async function performWebSearch(query: string, customEmitter?: (eventType
   }
 
   // No results from any engine
-  emitSearchProgress(`⚠️ No results found for "${cleanQuery}"`);
+  emitSearchProgress(`⚠️ No results found for "${cleanQuery}"`, customEmitter);
   return [];
 }
 

@@ -102,7 +102,7 @@ export class LongTermMemoryManager {
     const existing = this.findEquivalentFact(category, sanitizedKey, sanitizedVal, workspaceId);
     if (existing) {
       existing.timestamp = new Date().toISOString();
-      if (sanitizedVal && sanitizedVal.length > existing.value.length) {
+      if (sanitizedVal) {
         existing.value = sanitizedVal;
       }
       existing.confidence = Math.max(existing.confidence, confidence);

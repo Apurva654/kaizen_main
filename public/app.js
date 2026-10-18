@@ -21,7 +21,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const consoleTimeBadge = document.getElementById('console-time-badge');
   const consoleOutputBody = document.getElementById('console-output-body');
   const closeConsoleBtn = document.getElementById('close-console-btn');
-  const consoleStdinInput = document.getElementById('console-stdin-input');
   const sendStdinBtn = document.getElementById('send-stdin-btn');
   const consoleTextContent = document.getElementById('console-text-content');
   const terminalActiveInput = document.getElementById('terminal-active-input');
@@ -40,6 +39,15 @@ document.addEventListener('DOMContentLoaded', () => {
     document.body.classList.add('vscode-environment');
     console.log('[UI] Running inside Native VS Code Extension Webview');
   }
+
+  const backendBaseUrl = window.KAIZEN_BACKEND_URL || (isVsCodeEnv || window.location.protocol === 'vscode-webview:' ? 'http://localhost:3000' : '');
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = function(input, init) {
+    if (typeof input === 'string' && input.startsWith('/api/')) {
+      input = `${backendBaseUrl}${input}`;
+    }
+    return originalFetch(input, init);
+  };
 
   // Stepper Header Collapsible Accordion Toggle
   const stepperContainer = document.getElementById('agent-stepper-container');
@@ -846,9 +854,6 @@ document.addEventListener('DOMContentLoaded', () => {
     lineNumbers.innerHTML = numbersHtml;
   }
 
-  if (codeEditor) codeEditor.addEventListener('input', updateLineNumbers);
-  if (saveFileBtn) saveFileBtn.addEventListener('click', saveActiveFile);
-  if (refreshFilesBtn) refreshFilesBtn.addEventListener('click', loadSandboxFiles);
   let isCodeExecuting = false;
 
   async function sendStdinInputToProcess(overrideVal) {

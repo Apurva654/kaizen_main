@@ -40,8 +40,35 @@ export function extractRawUserPrompt(input: string): string {
   return cleaned;
 }
 
+export function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function isCommandInquiryOrExplanation(rawPrompt: string): boolean {
+  const p = rawPrompt.toLowerCase().trim();
+
+  // If asking to explain or describe a codebase source file, it's code explanation, NOT command inquiry
+  if (/\b(src\/|[a-zA-Z0-9_\-\/]+\.(ts|js|py|cpp|c|java|html|css|json)|architecture|codebase|algorithm)\b/i.test(p)) {
+    return false;
+  }
+
+  // Inquiry specifically about shell / git commands or asking for command suggestions
+  const isCommandTarget = /\b(git|status|diff|commit|push|pull|log|branch|terminal|command|cmd|shell|pytest|pip|npm|node|npx|tsc|rm|del|dir|ls|cat|pwd|mkdir|docker|cargo)\b/i.test(p);
+
+  return isCommandTarget && (
+    /^(what\s+does|explain\s+(what\s+)?|how\s+does|how\s+to\s+use|tell\s+me\s+about|give\s+me\s+(a\s+)?command|suggest\s+(a\s+)?command|write\s+(a\s+)?command|show\s+me\s+(how\s+to|the\s+command)|help\s+with)\b/i.test(p) ||
+    /\b(what\s+does\s+.*?\s+do|explanation\s+of|meaning\s+of|syntax\s+for|documentation\s+for|how\s+it\s+works)\b/i.test(p)
+  );
+}
+
 export function isGitQuery(input: string): boolean {
   const rawPrompt = extractRawUserPrompt(input).toLowerCase().trim();
+  if (!rawPrompt) return false;
+
+  // Inquiry / explanation about git commands is NOT an execution request
+  if (isCommandInquiryOrExplanation(rawPrompt)) {
+    return false;
+  }
 
   const hasDomainCodeTerm = /\b(model|enum|property|field|http|code|payment|order|user|event|database|table|column|api|rest)\b/i.test(rawPrompt);
   const hasExplicitGitMarker = /\b(git|github|repository|repo)\b/i.test(rawPrompt);
@@ -55,7 +82,7 @@ export function isGitQuery(input: string): boolean {
   if (/\bgit\s+(status|diff|commit|push|pull|log|branch|checkout|merge|rebase|stash)\b/i.test(rawPrompt)) {
     return true;
   }
-4
+
   // 2. Explicit repository / version-control intent queries
   const gitIntentPatterns = [
     /\b(show|check|view|display|get)\s+.*?\b(status|diff|log|history|branches|branch)\b/i,
@@ -119,6 +146,16 @@ export function isTerminalQuery(input: string): boolean {
 
   const lower = rawPrompt.toLowerCase();
 
+  // Inquiry / explanation about terminal commands is NOT an execution request
+  if (isCommandInquiryOrExplanation(lower)) {
+    return false;
+  }
+
+  // Requests that ask to fix test failures or self-heal code should use the full test & debug graph, not raw terminal
+  if (/\b(and\s+fix|fix\s+(any\s+)?(failures|errors|broken|failing|bugs))\b/i.test(lower)) {
+    return false;
+  }
+
   // If prompt explicitly requests creating, writing, implementing, modifying, editing, building, refactoring files or code, it's NOT a terminal command
   const isCodeCreationOrEditing = /^\s*(create|write|implement|add|modify|edit|build|refactor)\b.*?\b(file|function|class|script|module|component|code|python|typescript|ts|py|js)\b/i.test(lower) ||
     /^\s*(create|write|implement|add|modify|edit|build|refactor)\s+(a\s+)?(python|typescript|js|ts|py|file|code)\b/i.test(lower);
@@ -128,14 +165,14 @@ export function isTerminalQuery(input: string): boolean {
   }
 
   // 1. Explicit terminal execution phrasing: "run command pytest...", "use terminal to run...", "execute shell..."
-  const hasTerminalPhrase = /\b(run\s+command|use\s+terminal|terminal\s+command|execute\s+shell|run\s+shell|terminal\s+exec|run\s+in\s+terminal)\b/i.test(lower);
+  const hasTerminalPhrase = /\b(run\s+command|use\s+terminal|terminal\s+command|execute\s+shell|run\s+shell|terminal\s+exec|run\s+in\s+terminal|execute\s+in\s+terminal)\b/i.test(lower);
   if (hasTerminalPhrase) return true;
 
   // 2. Direct command invocation starting with executable command or having explicit command syntax
-  const startsWithCommand = /^\s*(pytest|pip3?\s+|python3?\s+|npm\s+|node\s+|npx\s+|tsc\s+|git\s+|rm\s+|del\s+|dir\b|ls\b|cat\s+|pwd\b|mkdir\s+|docker\s+|cargo\s+|go\s+|bun\s+|pnpm\s+|yarn\s+|conda\s+|poetry\s+|uv\s+|pipenv\s+|gem\s+|dotnet\s+|composer\s+)/i.test(lower);
+  const startsWithCommand = /^\s*(pytest|pip3?\s+|python3?\s+|npm\s+|node\s+|npx\s+|tsc\s+|git\s+|rm\s+|del\s+|dir\b|ls\b|cat\s+|pwd\b|mkdir\s+|docker\s+|cargo\s+|go\s+(run|build|test|get|mod|vet|fmt|version|install|clean|env|doc)\b|bun\s+|pnpm\s+|yarn\s+|conda\s+|poetry\s+|uv\s+|pipenv\s+|gem\s+|dotnet\s+|composer\s+)/i.test(lower);
   if (startsWithCommand) return true;
 
-  // 3. Command inside backticks or quotes without code creation context (e.g. `pytest src/...`)
+  // 3. Command inside backticks or quotes ONLY with explicit execution phrasing or standalone command
   if (/^\s*[`'"](pytest|pip|pip3|python|python3|npm|node|npx|tsc|git|rm|del|dir|ls|cat|pwd|mkdir|docker|cargo|go|bun|pnpm|yarn|conda|poetry|uv|pipenv|gem|dotnet|composer)\b/i.test(lower)) {
     return true;
   }
@@ -150,13 +187,30 @@ export function extractTerminalCommand(input: string): string {
   if (!raw || /^(permission gate|command result|execution|execution error|\[automated test|status:|result:|error:|[a-z]+ error)/i.test(raw)) {
     return '';
   }
+
+  // If asking for explanation or advice, do not extract a command to execute
+  if (isCommandInquiryOrExplanation(raw.toLowerCase())) {
+    return '';
+  }
   
-  // 1. If quoted with `...`, "...", or '...', extract inside quote
+  // 1. If quoted with `...`, "...", or '...', extract inside quote ONLY IF preceded by execution verb or standalone command
   const matchQuote = raw.match(/[`'"]([^`'"]+)[`'"]/);
   if (matchQuote && matchQuote[1]) {
     const extracted = matchQuote[1].trim();
-    if (!/^(execution|permission gate|command result|status|error)/i.test(extracted)) {
-      return extracted;
+    const hasExecContext = /\b(run|execute|use\s+terminal\s+to\s+run|terminal\s+exec)\b/i.test(raw) ||
+      /^\s*[`'"][a-zA-Z0-9_\-]+/i.test(raw);
+    if (hasExecContext && !/^(execution|permission gate|command result|status|error)/i.test(extracted)) {
+      const firstWord = extracted.split(/\s+/)[0].toLowerCase();
+      const isGoCli = firstWord === 'go' && /^\s*go\s+(run|build|test|get|mod|vet|fmt|version|install|clean|env|doc)\b/i.test(extracted);
+      const validCmdPrefixes = [
+        'pytest', 'pip', 'pip3', 'python', 'python3', 'conda', 'poetry', 'uv', 'pipenv',
+        'npm', 'node', 'npx', 'tsc', 'bun', 'pnpm', 'yarn',
+        'git', 'rm', 'del', 'dir', 'ls', 'cat', 'pwd', 'mkdir', 'cp', 'mv', 'echo', 'touch',
+        'docker', 'cargo', 'gem', 'dotnet', 'composer'
+      ];
+      if ((validCmdPrefixes.includes(firstWord) || isGoCli) || firstWord.endsWith('.exe') || firstWord.endsWith('.bat') || firstWord.endsWith('.cmd') || firstWord.startsWith('./') || firstWord.startsWith('.\\')) {
+        return extracted;
+      }
     }
   }
 
@@ -166,16 +220,7 @@ export function extractTerminalCommand(input: string): string {
     return explicitCmdMatch[0].trim();
   }
 
-  // 3. Match natural language deletion / command intent patterns:
-  const deletionMatch = raw.match(/\b(deletion|delete|remove|cleanup|rm)\s+(of\s+)?([^\s,;]+)/i);
-  if (deletionMatch && deletionMatch[3]) {
-    const targetPath = deletionMatch[3].trim();
-    if (targetPath.includes('/') || targetPath.includes('\\') || targetPath.includes('.')) {
-      return `rm -rf ${targetPath}`;
-    }
-  }
-
-  // 4. Strip common conversational prefixes: "use terminal to run dir", "run command rm -rf src/temp", "execute dir"
+  // 3. Strip common conversational prefixes: "use terminal to run dir", "run command rm -rf src/temp", "execute dir"
   let clean = raw.replace(/^(please\s+)?(use|run|execute|test|simulate)(\s+the)?(\s+terminal|\s+shell|\s+cmd)?(\s+command)?(\s+to\s+run|\s+to\s+execute|\s+to|\s*:)?\s*/i, '');
   clean = clean.replace(/^(terminal|shell|cmd)\s+(exec|run|command)?\s*/i, '');
 
@@ -190,11 +235,12 @@ export function extractTerminalCommand(input: string): string {
     'pytest', 'pip', 'pip3', 'python', 'python3', 'conda', 'poetry', 'uv', 'pipenv',
     'npm', 'node', 'npx', 'tsc', 'bun', 'pnpm', 'yarn',
     'git', 'rm', 'del', 'dir', 'ls', 'cat', 'pwd', 'mkdir', 'cp', 'mv', 'echo', 'touch',
-    'docker', 'cargo', 'go', 'gem', 'dotnet', 'composer'
+    'docker', 'cargo', 'gem', 'dotnet', 'composer'
   ];
   const firstWord = clean.split(/\s+/)[0].toLowerCase();
+  const isGoCli = firstWord === 'go' && /^\s*go\s+(run|build|test|get|mod|vet|fmt|version|install|clean|env|doc)\b/i.test(clean);
   
-  if (validCmdPrefixes.includes(firstWord) || firstWord.endsWith('.exe') || firstWord.endsWith('.bat') || firstWord.endsWith('.cmd') || firstWord.startsWith('./') || firstWord.startsWith('.\\')) {
+  if ((validCmdPrefixes.includes(firstWord) || isGoCli) || firstWord.endsWith('.exe') || firstWord.endsWith('.bat') || firstWord.endsWith('.cmd') || firstWord.startsWith('./') || firstWord.startsWith('.\\')) {
     return clean;
   }
   
@@ -203,10 +249,16 @@ export function extractTerminalCommand(input: string): string {
 
 export function isGeneralQuery(input: string): boolean {
   const rawPrompt = extractRawUserPrompt(input);
-  const trimmed = rawPrompt.toLowerCase();
+  const trimmed = rawPrompt.toLowerCase().trim();
+  if (!trimmed) return true;
+
+  // If asking what a git/terminal command does or asking for command guidance, it's a general/explain query
+  if (isCommandInquiryOrExplanation(trimmed)) {
+    return true;
+  }
 
   if (isGitQuery(input) || isTerminalQuery(input)) return false;
-  
+
   const codingKeywords = [
     'code', 'file', 'function', 'class', 'bug', 'error', 'repo', 'workspace', 'script',
     'app', 'build', 'html', 'css', 'javascript', 'typescript', 'ts', 'js', 'py', 'python',
@@ -219,8 +271,16 @@ export function isGeneralQuery(input: string): boolean {
     'agent', 'agents', 'llm', 'model', 'models', 'mcp', 'intent', 'pipeline', 'router', 'classification'
   ];
 
+  // Conceptual questions about data structures / algorithms (e.g. "what is a binary search tree")
+  // should be classified as GENERAL_QUERY even if they contain keywords
+  const isConceptQuestion = /^(what\s+is|what\s+are|explain|how\s+does|overview\s+of)\s+(a\s+|an\s+|the\s+)?(binary\s+search\s+tree|bst|linked\s+list|stack|queue|hash\s*table|hash\s*map|graph|heap|trie|algorithm|recursion|sorting|quick\s*sort|merge\s*sort)\b/i.test(trimmed);
+  if (isConceptQuestion && !/\b(in\s+my|in\s+our|in\s+workspace|in\s+sandbox|in\s+src|file|create|write|implement|code)\b/i.test(trimmed)) {
+    return true;
+  }
+
   const hasCodingKeyword = codingKeywords.some(kw => {
-    const reg = new RegExp(`\\b${kw}\\b`, 'i');
+    const escaped = escapeRegExp(kw);
+    const reg = new RegExp(`(^|\\W)${escaped}(\\W|$)`, 'i');
     return reg.test(trimmed);
   });
 
@@ -234,12 +294,13 @@ export function isGeneralQuery(input: string): boolean {
   const gkStartersRegex = /^(who is|whats|what is|where is|when did|why is|how is|tell me|explain who|explain what|do you know|is it|are you|can you tell|how far|how many|who was|what was|my name|whats my name|what is my name|who am i)/i;
   if (gkStartersRegex.test(trimmed)) return true;
 
-  // 3. Person, celebrity, sports & entity query patterns (e.g. "djokovic is strong", "is federer good", "nole", "messi stats", "schedule", "time")
+  // 3. Person, celebrity, sports & entity query patterns
   const personEntityPatterns = [
     /\b(who is|who was|who are|tell me about|information on|news about|stats of|details of)\b/i,
     /\b(djokovic|nole|federer|nadal|alcaraz|sinner|messi|ronaldo|lebron|curry|kobe|jordan|mbappe|haaland|kohli|rohit|dhoni)\b/i,
     /\b(is|was|are|does|can|has|will)\s+.*?\s+(strong|good|great|fast|rich|famous|tall|old|young|active|retired|playing|the goat|goat|best|worst|winning|champion|match|player|athlete)\b/i,
-    /\b(weather|temperature|forecast|score|match|schedule|tournament|grand slam|world cup|olympics|championship|time|today|now)\b/i
+    /\b(weather|temperature|forecast|sports\s+score|world\s+cup|olympics|grand\s+slam)\b/i,
+    /\b(what\s+(is\s+the\s+)?(time|date)|what\s+time\s+is\s+it|what\s+day\s+is\s+it|current\s+time|today's\s+date)\b/i
   ];
 
   for (const pattern of personEntityPatterns) {
@@ -247,9 +308,6 @@ export function isGeneralQuery(input: string): boolean {
       return true;
     }
   }
-
-  // 4. Short prompts without any coding keywords (e.g., "who is nole?", "my name is carlitos", "djokovic is strong")
-  if (trimmed.length < 150) return true;
 
   return false;
 }
@@ -259,24 +317,27 @@ export function isBrowserQuery(input: string): boolean {
   if (!rawPrompt) return false;
 
   // Do NOT classify as code mutation if prompt contains explicit read-only / execution / non-mutation directives
-  const isExplicitReadOnly = /\b(do\s+not\s+modify|don't\s+modify|read[\s-]*only|existing|without\s+modifying)\b/i.test(rawPrompt);
+  const isExplicitReadOnly = /\b(do\s+not\s+modify|don't\s+modify|read[\s-]*only|existing|without\s+modifying|just\s+inspect|only\s+inspect|inspect\s+only)\b/i.test(rawPrompt);
 
-  // Filter out explicit code creation/editing requests (e.g. "Build a landing page", "Create an HTML page", "Modify the webpage", "Edit index.html")
-  const isCodeMutationRequest = !isExplicitReadOnly && (
-    /^\s*(build|create|implement|modify|edit|add|write|make|refactor|fix|update)\b/i.test(rawPrompt) ||
-    /\b(build|create|implement|modify|edit|add|write|make|refactor|fix|update)\s+.*?\b(webpage|website|html|page|site|code|file|component|app|style|script)\b/i.test(rawPrompt)
+  // Check for explicit code creation, editing, debugging, or testing requests
+  const hasCodeMutationOrFix = !isExplicitReadOnly && (
+    /\b(fix|repair|resolve|patch|modify|edit|update|implement|add|write|create|build|refactor|change)\b.*?\b(code|button|bug|error|issue|feature|component|file|page|script|style|css|html|function|app|ui)\b/i.test(rawPrompt) ||
+    /\b(fix|repair|resolve|patch)\s+(the\s+)?(broken|failing|error|bug|issue|button)\b/i.test(rawPrompt) ||
+    /^\s*(build|create|implement|modify|edit|add|write|make|refactor|fix|update)\b/i.test(rawPrompt)
   );
+
+  const hasTestRequest = !isExplicitReadOnly && /\b(run\s+test|run\s+tests|test\s+suite|run\s+npm\s+test|run\s+pytest)\b/i.test(rawPrompt);
+
+  // If code editing/fixing or tests are requested, code generation/debugging must take precedence over read-only browser inspection
+  if (hasCodeMutationOrFix || hasTestRequest) {
+    return false;
+  }
 
   const hasExplicitUrl = /\b(https?:\/\/[^\s]+|localhost:\d+[^\s]*)\b/i.test(rawPrompt);
   const hasBrowserToolCall = /\b(browser|playwright|chrome|chromium)\b/i.test(rawPrompt);
 
-  // Normal coding requests containing words like build, create, implement, modify, edit, add must NOT be classified as browser requests
-  if (isCodeMutationRequest && !hasExplicitUrl && !hasBrowserToolCall) {
-    return false;
-  }
-
   // Explicit browser execution verbs
-  const hasBrowserActionVerb = /\b(run|open|preview|launch|show|test|inspect|view|browse|navigate|visit|check)\b/i.test(rawPrompt);
+  const hasBrowserActionVerb = /\b(run|open|preview|launch|show|inspect|view|browse|navigate|visit|check)\b/i.test(rawPrompt);
 
   // Explicit web target nouns
   const hasWebTargetNoun = /\b(webpage|website|page|site|app|ui|frontend|url|index\.html)\b/i.test(rawPrompt) ||
@@ -305,24 +366,36 @@ export function isBrowserQuery(input: string): boolean {
 
 export function isAmbiguousQuery(input: string): boolean {
   const rawPrompt = extractRawUserPrompt(input).toLowerCase().trim();
-  
+  if (!rawPrompt) return true;
+
+  // Single or double-word ultra-vague prompts with no target file or context:
+  // e.g. "fix it", "fix this", "make it work", "help", "broken", "it's broken"
+  const ultraVagueActionPatterns = [
+    /^(fix|debug|repair)\s+(it|this|that)$/i,
+    /^(make\s+it\s+work|do\s+it|help(\s+me)?|it('s|\s+is)\s+broken|broken|not\s+working)$/i
+  ];
+  if (ultraVagueActionPatterns.some(p => p.test(rawPrompt))) {
+    return true;
+  }
+
   const vaguePatterns = [
     /^(make|create|write|add|generate)\s+(\d+\s+)?(code\s+)?files?\s*(in\s+[a-zA-Z0-9+#]+)?$/i,
     /^(make|create|write)\s+(a\s+)?(code|program|file|script)\s*(in\s+[a-zA-Z0-9+#]+)?$/i,
     /^(make|create|write)\s+something\s*(in\s+[a-zA-Z0-9+#]+)?$/i
   ];
-  
+
   return vaguePatterns.some(p => p.test(rawPrompt));
 }
 
 export function isDeleteQuery(input: string): boolean {
   const rawPrompt = extractRawUserPrompt(input).toLowerCase().trim();
 
-  // Guard: Code element edits inside a file (e.g., "remove all comments", "remove unused imports", "remove function", "remove line", "refactor auth.ts")
-  const isCodeEdit = /\b(std::|std|comment|comments|import|imports|function|method|class|variable|line|lines|code|prefix|namespace|log|print|unused)\b/i.test(rawPrompt);
-  const isInsideFileRefactor = /\b(from|inside|in|refactor|update|edit|clean)\s+.*\b(file|files|code|class|cpp|ts|py|js|auth\.ts|main\.ts)\b/i.test(rawPrompt) || /\brefactor\b/i.test(rawPrompt);
+  // Guard: Code element edits inside a file (e.g., "remove all comments", "remove unused imports", "remove function", "remove line", "refactor auth.ts", "delete unused import from intentAgent.ts")
+  const isCodeElement = /\b(std::|std|comment|comments|import|imports|function|method|class|variable|line|lines|code|prefix|namespace|log|print|unused|statement|console\.log|block|tag|attribute)\b/i.test(rawPrompt);
+  const isInsideFileDirective = /\b(from|inside|in|within|of)\s+([a-zA-Z0-9_\-\.\/]+\.(ts|js|py|cpp|c|java|html|css|json)|file|files|class|function)\b/i.test(rawPrompt);
+  const isCodeDeletePhrase = /\b(delete|remove|clear|wipe)\s+(the\s+)?(all\s+)?(inline\s+)?(unused\s+)?(import|imports|function|method|class|variable|line|lines|code|comment|comments|log|print|prefix|namespace|statement|tag|console\.log)\b/i.test(rawPrompt);
 
-  if (isCodeEdit && (isInsideFileRefactor || /\b(remove|delete)\s+(all\s+)?(inline\s+)?(std|comment|comments|import|imports|function|line|lines|log|print|unused|prefix|namespace)\b/i.test(rawPrompt))) {
+  if (isCodeElement && (isInsideFileDirective || isCodeDeletePhrase || /\brefactor\b/i.test(rawPrompt))) {
     return false;
   }
 
@@ -478,10 +551,21 @@ export function extractTargetFilesFromPrompt(prompt: string): string[] {
     return norm;
   };
 
+  const FRAMEWORK_AND_LIB_NAMES = new Set([
+    'three.js', 'express.js', 'node.js', 'vue.js', 'react.js', 'next.js',
+    'chart.js', 'anime.js', 'd3.js', 'day.js', 'moment.js', 'socket.io',
+    'require.js', 'highlight.js', 'lodash.js', 'axios.js', 'p5.js', 'math.js'
+  ]);
+
   const pathRegex = /\b(src\/sandbox\/[a-zA-Z0-9_\-\/]+\.[a-zA-Z0-9]+|src\/[a-zA-Z0-9_\-\/]+\.[a-zA-Z0-9]+|[a-zA-Z0-9_\-]+\/[a-zA-Z0-9_\-\/]+\.[a-zA-Z0-9]+|[a-zA-Z0-9_\-]+\.(py|ts|js|jsx|tsx|json|html|css))\b/gi;
   let match: RegExpExecArray | null;
   while ((match = pathRegex.exec(rawPrompt)) !== null) {
-    const norm = normalizePath(match[0].trim());
+    const rawMatch = match[0].trim();
+    const baseName = path.basename(rawMatch).toLowerCase();
+    if (FRAMEWORK_AND_LIB_NAMES.has(baseName)) {
+      continue;
+    }
+    const norm = normalizePath(rawMatch);
     if (!foundFiles.includes(norm)) {
       foundFiles.push(norm);
     }
@@ -527,9 +611,10 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
 
   // Fast-track heuristic for File Deletion queries
   if (isDeleteQuery(state.userInput)) {
+    const extracted = extractTargetFilesFromPrompt(state.userInput);
     return {
       status: 'ROUTED_DELETE_FILES',
-      targetFiles: [],
+      targetFiles: extracted,
       requestedLanguage,
       languageInfo
     };
@@ -609,7 +694,13 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
   const geminiApiKey = process.env.GEMINI_API_KEY;
 
   if (geminiApiKey && geminiApiKey !== 'your_gemini_api_key_here') {
-    const geminiCandidates = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-3.5-flash-lite'];
+    const geminiCandidates = [
+      'gemini-3.5-flash-lite',
+      'gemini-3.8-flash',
+      'gemini-3.1-pro-preview',
+      'gemini-2.5-pro',
+      'gemini-2.5-flash'
+    ];
     for (const modelName of geminiCandidates) {
       try {
         const model = new ChatGoogleGenerativeAI({
@@ -621,33 +712,76 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
         const structuredModel = model.withStructuredOutput(IntentSchema);
 
         const systemPrompt = `You are an intent classification and target file selector agent. Respond in valid json format.
-Analyze the user's prompt and classify their intent into one of:
-- GENERAL_QUERY: General knowledge, greetings, chit-chat, or questions unrelated to code implementation or editing.
-- GENERATE_CODE: Creating new features, boilerplate, or implementing requested functionality.
-- DEBUG_ERROR: Fixing bugs, addressing runtime errors, broken builds, or troubleshooting code.
-- EXPLAIN_CODE: Explaining how codebase code works, answering architecture/codebase questions.
-- REFACTOR: Cleaning up code, optimizing performance, renaming, or restructuring existing code.
-- RUN_EXISTING_TESTS: Executing existing test suite, identifying test failures.
+Analyze the user's prompt and classify their primary intent into one of:
+- GENERAL_QUERY: General knowledge, greetings, questions about programming concepts (e.g. "what is a binary search tree"), or questions unrelated to modifying codebase files.
+- GENERATE_CODE: Creating new features, boilerplate, writing new files, implementing requested functionality.
+- DEBUG_ERROR: Fixing bugs, addressing runtime errors, broken builds, or troubleshooting code in workspace files.
+- EXPLAIN_CODE: Explaining how codebase code works, answering architecture/codebase questions, explaining commands.
+- REFACTOR: Cleaning up code, optimizing performance, renaming, removing unused imports, or restructuring existing code without changing behavior.
+- RUN_EXISTING_TESTS: Executing existing test suite, verifying test pass/fail status.
+- MCP_GIT: Explicit version control operations (git status, git diff, git commit, git push, git log).
+- MCP_TERMINAL: Explicit terminal command execution requests (running shell commands, npm, pytest, etc.).
+- DELETE_FILES: Explicit workspace file or directory deletion requests.
+- MEMORY_WRITE: Saving user preferences, project conventions, or facts into persistent memory.
+- MEMORY_READ: Querying or recalling remembered preferences, conventions, or past facts.
 
-For GENERAL_QUERY, targetFiles must be an empty array [].`;
+Rules:
+1. For GENERAL_QUERY, MCP_GIT, MCP_TERMINAL, DELETE_FILES, MEMORY_WRITE, and MEMORY_READ, targetFiles must be an empty array [].
+2. If the user asks to explain a command (e.g. "what does git status do?"), classify as EXPLAIN_CODE or GENERAL_QUERY, NOT MCP_GIT.
+3. If the user asks to delete code within a file (e.g. "delete unused imports"), classify as REFACTOR, NOT DELETE_FILES.
+4. If the prompt contains a sequence of actions where code must be fixed or modified (e.g. "Open index.html and fix the broken button"), prioritize the primary code modification intent (DEBUG_ERROR or GENERATE_CODE).
+5. Only identify real target source files mentioned or implied; do not hallucinate arbitrary filenames.`;
 
         const startTime = Date.now();
+        let timeoutId: NodeJS.Timeout | undefined;
         const invokePromise = structuredModel.invoke([
           { role: 'system', content: systemPrompt },
           { role: 'user', content: state.userInput }
         ]);
         const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error(`Gemini model '${modelName}' execution timed out after 6000ms`)), 6000);
+          timeoutId = setTimeout(() => reject(new Error(`Gemini model '${modelName}' execution timed out after 7000ms`)), 7000);
         });
 
-        const result = await Promise.race([invokePromise, timeoutPromise]);
+        let rawResult: any;
+        try {
+          rawResult = await Promise.race([invokePromise, timeoutPromise]);
+        } finally {
+          if (timeoutId) clearTimeout(timeoutId);
+        }
+
         const latencyMs = Date.now() - startTime;
 
-        await langfuseTracer.recordGeneration('IntentAgent', modelName, state.userInput, JSON.stringify(result), latencyMs, 60, 80);
+        // Telemetry failure must never fail classification
+        langfuseTracer.recordGeneration('IntentAgent', modelName, state.userInput, JSON.stringify(rawResult), latencyMs)
+          .catch((err: any) => console.warn('[Langfuse] IntentAgent trace recording failed:', err?.message || err));
 
-        const intent = result.intent || 'GENERATE_CODE';
+        // Validate structured output against IntentSchema
+        const parsed = IntentSchema.safeParse(rawResult);
+        if (!parsed.success) {
+          console.warn(`[IntentAgent] Gemini model '${modelName}' returned invalid schema:`, parsed.error.issues);
+          continue; // Try next candidate model
+        }
+
+        const result = parsed.data;
+        const intent = result.intent;
+
         if (intent === 'GENERAL_QUERY') {
           return { status: 'ROUTED_GENERAL_QUERY', targetFiles: [], requestedLanguage, languageInfo };
+        }
+        if (intent === 'MEMORY_WRITE') {
+          return { status: 'ROUTED_MEMORY_WRITE', targetFiles: [], requestedLanguage, languageInfo };
+        }
+        if (intent === 'MEMORY_READ') {
+          return { status: 'ROUTED_MEMORY_READ', targetFiles: [], requestedLanguage, languageInfo };
+        }
+        if (intent === 'MCP_GIT') {
+          return { status: 'ROUTED_MCP_GIT', targetFiles: [], requestedLanguage, languageInfo };
+        }
+        if (intent === 'MCP_TERMINAL') {
+          return { status: 'ROUTED_MCP_TERMINAL', targetFiles: [], requestedLanguage, languageInfo };
+        }
+        if (intent === 'DELETE_FILES') {
+          return { status: 'ROUTED_DELETE_FILES', targetFiles: promptExtracted, requestedLanguage, languageInfo };
         }
 
         const rawFiles = result.targetFiles || result.target_files;
@@ -690,11 +824,10 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
     }
   }
 
+  // --- ROBUST HEURISTIC FALLBACK (Offline / Missing API Key / Timeout) ---
+  const input = state.userInput.toLowerCase().trim();
 
-
-  const input = state.userInput.toLowerCase();
-  let intent: z.infer<typeof IntentSchema>['intent'] = 'GENERATE_CODE';
-
+  // 1. General query or inquiry about commands
   if (isGeneralQuery(state.userInput)) {
     return {
       status: 'ROUTED_GENERAL_QUERY',
@@ -704,14 +837,60 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
     };
   }
 
-  if (input.includes('run the existing test') || input.includes('run existing test') || input.includes('test suite')) {
-    intent = 'RUN_EXISTING_TESTS';
-  } else if (input.includes('fix') || input.includes('bug') || input.includes('error') || input.includes('failing')) {
-    intent = 'DEBUG_ERROR';
-  } else if (input.includes('explain') || input.includes('how') || input.includes('inspect') || input.includes('analyze')) {
-    intent = 'EXPLAIN_CODE';
-  } else if (input.includes('refactor') || input.includes('clean')) {
-    intent = 'REFACTOR';
+  // 2. Ambiguous query (e.g. "fix it", "make something in python")
+  if (isAmbiguousQuery(state.userInput)) {
+    return {
+      status: 'ROUTED_GENERAL_QUERY',
+      targetFiles: [],
+      requestedLanguage,
+      languageInfo
+    };
+  }
+
+  // 3. Test execution requests (e.g. "run the test suite", "run npm test and fix failures")
+  const isTestRequest = /\b(run|execute)\s+(the\s+)?(existing\s+)?(tests?|test\s+suite|unit\s+tests?|pytest|specs?)\b/i.test(input) ||
+    /\b(run\s+tests?|run\s+npm\s+test|run\s+pytest)\b/i.test(input);
+
+  // 4. Debug / Bug fix requests (with negation guard)
+  const isNegatedFix = /\b(do\s+not|don't|without)\s+(fix|debug|repair)\b/i.test(input);
+  const isBugFix = !isNegatedFix && (
+    /\b(fix|debug|repair|solve|resolve|patch)\s+(the\s+)?(bug|error|issue|problem|failure|crash|exception|failing)\b/i.test(input) ||
+    /\b(fix|resolve)\s+.*?\b(broken|button|code|error|issue)\b/i.test(input) ||
+    /\b(typeerror|syntaxerror|referenceerror|runtime\s+error|build\s+error)\b/i.test(input)
+  );
+
+  // 5. Code explanation requests
+  const isExplain = /\b(explain|how\s+does|walk\s+through|overview\s+of|describe|what\s+does)\b/i.test(input);
+
+  // 6. Refactor requests
+  const isRefactor = /\b(refactor|clean\s+up|optimize|restructure|reorganize|simplify|rename|remove\s+unused)\b/i.test(input);
+
+  // 7. Explicit code creation/generation requests
+  const isCodeGen = /\b(create|make|write|implement|build|add|generate|develop|scaffold|code)\b.*?\b(file|function|class|script|module|component|code|calculator|app|service|endpoint)\b/i.test(input) ||
+    /^\s*(create|make|write|implement|build|add|generate)\b/i.test(input) ||
+    promptExtracted.length > 0;
+
+  let fallbackIntent: z.infer<typeof IntentSchema>['intent'] = 'GENERATE_CODE';
+
+  if (isTestRequest) {
+    fallbackIntent = 'RUN_EXISTING_TESTS';
+  } else if (isBugFix) {
+    fallbackIntent = 'DEBUG_ERROR';
+  } else if (isExplain) {
+    fallbackIntent = 'EXPLAIN_CODE';
+  } else if (isRefactor) {
+    fallbackIntent = 'REFACTOR';
+  } else if (isCodeGen) {
+    fallbackIntent = 'GENERATE_CODE';
+  } else {
+    // Unfamiliar, unsupported, or non-coding prompt: DO NOT default to GENERATE_CODE!
+    // Safely route to GENERAL_QUERY for conversational clarification.
+    return {
+      status: 'ROUTED_GENERAL_QUERY',
+      targetFiles: [],
+      requestedLanguage,
+      languageInfo
+    };
   }
 
   let finalTargets: string[];
@@ -724,7 +903,7 @@ For GENERAL_QUERY, targetFiles must be an empty array [].`;
   }
 
   return {
-    status: `ROUTED_${intent}`,
+    status: `ROUTED_${fallbackIntent}`,
     targetFiles: Array.from(new Set<string>(finalTargets)),
     requestedLanguage,
     languageInfo

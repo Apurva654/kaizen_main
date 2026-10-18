@@ -1,4 +1,7 @@
 import * as Parser from 'web-tree-sitter';
+import * as ts from 'typescript';
+import * as fs from 'fs';
+import * as path from 'path';
 
 export interface ExtractedSymbolParameter {
   name: string;
@@ -30,6 +33,7 @@ export interface ExtractedSymbol {
 export class ASTParserTool {
   private parser: any = null;
   private currentLanguage: string = 'typescript';
+  private isInitialized: boolean = false;
 
   public getLanguageFromPath(filePath: string): string {
     const ext = filePath.split('.').pop()?.toLowerCase();
@@ -58,16 +62,22 @@ export class ASTParserTool {
 
   async init(wasmPath?: string, languageWasmPath?: string, language: string = 'typescript'): Promise<void> {
     this.currentLanguage = language;
-    if (wasmPath && languageWasmPath) {
-      try {
-        const ParserConstructor: any = (Parser as any).default || Parser;
-        await ParserConstructor.init({ locateFile: () => wasmPath });
-        this.parser = new ParserConstructor();
-        const Lang = await ParserConstructor.Language.load(languageWasmPath);
-        this.parser.setLanguage(Lang);
-      } catch {
-        this.parser = null;
+    this.isInitialized = true;
+    try {
+      const ParserConstructor: any = (Parser as any).default || Parser;
+      if (typeof ParserConstructor?.init === 'function') {
+        const defaultWasm = wasmPath || path.resolve(process.cwd(), 'node_modules/web-tree-sitter/tree-sitter.wasm');
+        if (fs.existsSync(defaultWasm)) {
+          await ParserConstructor.init({ locateFile: () => defaultWasm });
+          this.parser = new ParserConstructor();
+          if (languageWasmPath && fs.existsSync(languageWasmPath)) {
+            const Lang = await ParserConstructor.Language.load(languageWasmPath);
+            this.parser.setLanguage(Lang);
+          }
+        }
       }
+    } catch {
+      this.parser = null;
     }
   }
 
@@ -78,41 +88,199 @@ export class ASTParserTool {
       return [];
     }
 
-    if (!this.parser) {
-      return this.regexFallbackExtract(sourceCode, lang);
+    // For TypeScript and JavaScript, use native TypeScript compiler AST parser for 100% fidelity
+    if (lang === 'typescript' || lang === 'javascript') {
+      return this.parseTypeScriptAST(sourceCode, lang);
     }
 
+    if (this.parser) {
+      try {
+        const tree = this.parser.parse(sourceCode);
+        const symbols: ExtractedSymbol[] = [];
+        for (let i = 0; i < tree.rootNode.childCount; i++) {
+          const node = tree.rootNode.child(i);
+          if (node && (node.type.includes('function') || node.type.includes('class') || node.type.includes('method') || node.type.includes('def'))) {
+            const startLine = node.startPosition.row + 1;
+            const endLine = node.endPosition.row + 1;
+            const startColumn = node.startPosition.column + 1;
+            const endColumn = node.endPosition.column + 1;
+            const name = node.childForFieldName('name')?.text || 'anonymous';
+            const loc = endLine - startLine + 1;
+
+            symbols.push({
+              type: node.type,
+              name,
+              text: node.text,
+              language: lang,
+              startLine,
+              endLine,
+              startColumn,
+              endColumn,
+              loc,
+              bodyText: node.text
+            });
+          }
+        }
+        if (symbols.length > 0) return symbols;
+      } catch (err: any) {
+        console.warn(`[CONTEXT][WARN] Tree-sitter AST parse failed for ${lang}, falling back to regex:`, err?.message || err);
+      }
+    }
+
+    return this.regexFallbackExtract(sourceCode, lang);
+  }
+
+  private parseTypeScriptAST(sourceCode: string, language: string): ExtractedSymbol[] {
+    const symbols: ExtractedSymbol[] = [];
+    if (!sourceCode) return symbols;
+
     try {
-      const tree = this.parser.parse(sourceCode);
-      const symbols: ExtractedSymbol[] = [];
-      for (let i = 0; i < tree.rootNode.childCount; i++) {
-        const node = tree.rootNode.child(i);
-        if (node && (node.type.includes('function') || node.type.includes('class') || node.type.includes('method') || node.type.includes('def'))) {
-          const startLine = node.startPosition.row + 1;
-          const endLine = node.endPosition.row + 1;
-          const startColumn = node.startPosition.column + 1;
-          const endColumn = node.endPosition.column + 1;
-          const name = node.childForFieldName('name')?.text || 'anonymous';
-          const loc = endLine - startLine + 1;
+      const isJsx = language === 'javascript' || sourceCode.includes('</') || sourceCode.includes('/>');
+      const scriptKind = language === 'typescript'
+        ? (isJsx ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
+        : (isJsx ? ts.ScriptKind.JSX : ts.ScriptKind.JS);
+
+      const sourceFile = ts.createSourceFile(
+        isJsx ? 'temp.tsx' : (language === 'typescript' ? 'temp.ts' : 'temp.js'),
+        sourceCode,
+        ts.ScriptTarget.Latest,
+        true,
+        scriptKind
+      );
+
+      const lines = sourceCode.split('\n');
+
+      const visit = (node: ts.Node) => {
+        let isSymbol = false;
+        let symType = '';
+        let name = '';
+        let parameters: ExtractedSymbolParameter[] = [];
+        let returnType = 'void';
+        let returnTypeInferred = true;
+        let docstring: string | undefined = undefined;
+
+        // Extract JSDoc if present
+        const jsDoc = (node as any).jsDoc;
+        if (Array.isArray(jsDoc) && jsDoc.length > 0) {
+          docstring = typeof jsDoc[0].comment === 'string'
+            ? jsDoc[0].comment
+            : (Array.isArray(jsDoc[0].comment) ? jsDoc[0].comment.map((c: any) => c.text || '').join('\n') : undefined);
+        }
+
+        if (ts.isFunctionDeclaration(node) && node.name) {
+          isSymbol = true;
+          symType = 'function_declaration';
+          name = node.name.text;
+          parameters = node.parameters.map(p => ({
+            name: p.name.getText(sourceFile),
+            type: p.type?.getText(sourceFile) || 'any',
+            isInferred: !p.type
+          }));
+          returnType = node.type?.getText(sourceFile) || 'void';
+          returnTypeInferred = !node.type;
+        } else if (ts.isClassDeclaration(node) && node.name) {
+          isSymbol = true;
+          symType = 'class_declaration';
+          name = node.name.text;
+          returnType = node.name.text;
+          returnTypeInferred = false;
+        } else if (ts.isInterfaceDeclaration(node)) {
+          isSymbol = true;
+          symType = 'interface_declaration';
+          name = node.name.text;
+          returnType = 'interface';
+          returnTypeInferred = false;
+        } else if (ts.isTypeAliasDeclaration(node)) {
+          isSymbol = true;
+          symType = 'type_alias_declaration';
+          name = node.name.text;
+          returnType = node.type.getText(sourceFile);
+          returnTypeInferred = false;
+        } else if (ts.isEnumDeclaration(node)) {
+          isSymbol = true;
+          symType = 'enum_declaration';
+          name = node.name.text;
+          returnType = 'enum';
+          returnTypeInferred = false;
+        } else if (ts.isVariableStatement(node)) {
+          for (const decl of node.declarationList.declarations) {
+            if (decl.initializer && (ts.isArrowFunction(decl.initializer) || ts.isFunctionExpression(decl.initializer))) {
+              const fn = decl.initializer;
+              const startPos = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+              const endPos = sourceFile.getLineAndCharacterOfPosition(node.getEnd());
+              const bodyText = node.getText(sourceFile);
+              const branchMatches = bodyText.match(/\b(if|else|switch|case|for|while|catch|\?|&&|\|\|)\b/g);
+              const branchCount = branchMatches ? branchMatches.length : 0;
+
+              symbols.push({
+                type: 'arrow_function_declaration',
+                name: decl.name.getText(sourceFile),
+                text: lines[startPos.line]?.trim() || decl.name.getText(sourceFile),
+                language,
+                startLine: startPos.line + 1,
+                endLine: endPos.line + 1,
+                startColumn: startPos.character + 1,
+                endColumn: endPos.character + 1,
+                signature: `const ${decl.name.getText(sourceFile)} = (${fn.parameters.map(p => p.getText(sourceFile)).join(', ')}) => ${fn.type?.getText(sourceFile) || 'any'}`,
+                parameters: fn.parameters.map(p => ({
+                  name: p.name.getText(sourceFile),
+                  type: p.type?.getText(sourceFile) || 'any',
+                  isInferred: !p.type
+                })),
+                returnType: fn.type?.getText(sourceFile) || 'any',
+                returnTypeInferred: !fn.type,
+                documentation: docstring || 'No documentation available',
+                loc: endPos.line - startPos.line + 1,
+                complexity: branchCount + 1,
+                branches: branchCount,
+                parameterCount: fn.parameters.length,
+                bodyText
+              });
+            }
+          }
+        }
+
+        if (isSymbol && name) {
+          const startPos = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+          const endPos = sourceFile.getLineAndCharacterOfPosition(node.getEnd());
+          const bodyText = node.getText(sourceFile);
+          const branchMatches = bodyText.match(/\b(if|else|switch|case|for|while|catch|\?|&&|\|\|)\b/g);
+          const branchCount = branchMatches ? branchMatches.length : 0;
+          const loc = endPos.line - startPos.line + 1;
 
           symbols.push({
-            type: node.type,
+            type: symType,
             name,
-            text: node.text,
-            language: lang,
-            startLine,
-            endLine,
-            startColumn,
-            endColumn,
+            text: lines[startPos.line]?.trim() || name,
+            language,
+            startLine: startPos.line + 1,
+            endLine: endPos.line + 1,
+            startColumn: startPos.character + 1,
+            endColumn: endPos.character + 1,
+            signature: lines[startPos.line]?.trim() || name,
+            parameters,
+            returnType,
+            returnTypeInferred,
+            documentation: docstring || 'No documentation available',
             loc,
-            bodyText: node.text
+            complexity: branchCount + 1,
+            branches: branchCount,
+            parameterCount: parameters.length,
+            bodyText
           });
         }
+
+        ts.forEachChild(node, visit);
+      };
+
+      for (const statement of sourceFile.statements) {
+        visit(statement);
       }
-      return symbols.length > 0 ? symbols : this.regexFallbackExtract(sourceCode, lang);
+
+      return symbols;
     } catch (err: any) {
-      console.warn(`[CONTEXT][WARN] Tree-sitter AST parse failed for ${lang}, falling back to regex:`, err?.message || err);
-      return this.regexFallbackExtract(sourceCode, lang);
+      console.warn(`[ASTParserTool] TypeScript AST parsing fallback:`, err?.message || err);
+      return this.regexFallbackExtract(sourceCode, language);
     }
   }
 

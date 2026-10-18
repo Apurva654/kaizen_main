@@ -98,6 +98,11 @@ export const KaizenState = Annotation.Root({
     default: () => ""
   }),
 
+  originalSnapshots: Annotation<Array<{ filePath: string; originalCode: string }>>({
+    reducer: (x, y) => y !== undefined ? y : x,
+    default: () => []
+  }),
+
   choices: Annotation<string[]>({
     reducer: (_, y) => y,
     default: () => []
@@ -222,7 +227,63 @@ export const KaizenState = Annotation.Root({
   errorsEncountered: Annotation<number>({
     reducer: (x, y) => (y !== undefined ? (x || 0) + y : (x || 0)),
     default: () => 0
+  }),
+
+  failureDetails: Annotation<Record<string, any> | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
+
+  compilerError: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
+
+  workspaceContext: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
+
+  testLogs: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
+  }),
+
+  reviewerFeedback: Annotation<string | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined
   })
 });
 
 export type KaizenStateType = typeof KaizenState.State;
+
+/**
+ * Applies KaizenState Annotation reducers to compute next state from partial updates.
+ * Guarantees that array mergers, stage tracking, error counting, and plan step deduplication
+ * execute through the exact reducers defined in KaizenState.
+ */
+export function applyStateReducers(
+  currentState: KaizenStateType,
+  updates: Partial<KaizenStateType>
+): KaizenStateType {
+  const next: any = { ...currentState };
+  const spec = (KaizenState as any).spec || {};
+
+  for (const [key, value] of Object.entries(updates)) {
+    if (value === undefined) continue;
+
+    const channel = spec[key];
+    if (channel && typeof channel.value === 'function') {
+      try {
+        next[key] = channel.value(currentState[key as keyof KaizenStateType], value);
+      } catch (err) {
+        console.warn(`[StateReducer] Error running reducer for channel "${key}":`, err);
+        next[key] = value;
+      }
+    } else {
+      next[key] = value;
+    }
+  }
+
+  return next as KaizenStateType;
+}

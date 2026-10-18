@@ -1,4 +1,4 @@
-import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
+import { invokeModel } from '../tools/modelProvider';
 import * as dotenv from 'dotenv';
 import { KaizenStateType } from '../state';
 
@@ -24,13 +24,15 @@ export function evaluateContextSufficiencyFallback(
   const lower = rawUserInput.toLowerCase().trim();
 
   // Case 4 Check: Explicit request for specific integration/technology in codebase (e.g. Stripe, Firebase, Redis)
-  const integrationMatch = lower.match(/\b(how does|where is|explain|show)\s+(the\s+)?([a-z0-9_\-]+)\s+(integration|auth|service|module|payment|api|sdk)?\s*(work|exist|implemented)?\s*(in\s+this\s+codebase|in\s+the\s+project|in\s+this\s+repo)?/i);
+  const integrationMatch = lower.match(/\b(how does|where is|explain|show)\s+(the\s+)?([a-z0-9_\-]+)\s+(integration|auth|service|module|payment|api|sdk)\b/i) ||
+    lower.match(/\b(how does|where is|explain|show)\s+(the\s+)?([a-z0-9_\-]+)\s+.*?\b(in\s+this\s+codebase|in\s+the\s+project|in\s+this\s+repo)\b/i);
   
   if (integrationMatch) {
     const candidateSubject = (integrationMatch[3] || '').toLowerCase();
     const commonGenericWords = ['codebase', 'project', 'app', 'application', 'system', 'backend', 'frontend', 'server', 'client', 'code', 'authentication', 'auth', 'it', 'this'];
+    const generalConcepts = ['quicksort', 'mergesort', 'bubblesort', 'heapsort', 'sorting', 'algorithm', 'recursion', 'promise', 'closure', 'tree', 'graph', 'stack', 'queue'];
 
-    if (candidateSubject && !commonGenericWords.includes(candidateSubject)) {
+    if (candidateSubject && !commonGenericWords.includes(candidateSubject) && !generalConcepts.includes(candidateSubject)) {
       const hasRepoEvidence = extractedContext.toLowerCase().includes(candidateSubject) ||
         targetFiles.some(f => f.toLowerCase().includes(candidateSubject));
 
@@ -104,39 +106,31 @@ export async function evaluateContextSufficiency(state: KaizenStateType): Promis
     return fallbackResult;
   }
 
-  const geminiApiKey = process.env.GEMINI_API_KEY;
-  if (geminiApiKey && geminiApiKey !== 'your_gemini_api_key_here') {
-    const geminiCandidates = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-3.5-flash-lite'];
-    for (const modelName of geminiCandidates) {
-      try {
-        const model = new ChatGoogleGenerativeAI({ apiKey: geminiApiKey, model: modelName, temperature: 0 });
-        const userPayload = `USER PROMPT: "${rawUserInput}"\n\nTARGET FILES: ${targetFiles.join(', ') || 'None'}\n\nRETRIEVED CODEBASE CONTEXT:\n${extractedContext.slice(0, 10000)}`;
-        const res: any = await model.invoke([
-          { role: 'system', content: `Analyze prompt sufficiency. Return JSON with keys: sufficiency (SUFFICIENT_CONTEXT|PARTIAL_CONTEXT|INSUFFICIENT_CONTEXT), missingContextSummary, conversationalResponse, assumptionsStated.` },
-          { role: 'user', content: userPayload }
-        ]);
-        const text = typeof res.content === 'string' ? res.content : JSON.stringify(res.content);
-        const match = text.match(/\{[\s\S]*\}/);
-        if (match) {
-          const parsed = JSON.parse(match[0]);
-          if (parsed && parsed.sufficiency) {
-            return {
-              sufficiency: parsed.sufficiency,
-              missingContextSummary: parsed.missingContextSummary,
-              unsupportedSubject: parsed.unsupportedSubject,
-              conversationalResponse: parsed.conversationalResponse,
-              assumptionsStated: parsed.assumptionsStated,
-              suggestedQuestions: parsed.suggestedQuestions
-            };
-          }
-        }
-      } catch (err: any) {
-        console.warn(`Gemini context sufficiency model '${modelName}' failed:`, err?.message || err);
+  try {
+    const userPayload = `USER PROMPT: "${rawUserInput}"\n\nTARGET FILES: ${targetFiles.join(', ') || 'None'}\n\nRETRIEVED CODEBASE CONTEXT:\n${extractedContext.slice(0, 10000)}`;
+    const systemPrompt = `Analyze prompt sufficiency. Return JSON with keys: sufficiency (SUFFICIENT_CONTEXT|PARTIAL_CONTEXT|INSUFFICIENT_CONTEXT), missingContextSummary, conversationalResponse, assumptionsStated.`;
+    const text = await invokeModel(systemPrompt, userPayload, {
+      agent: 'ContextSufficiencyAgent',
+      temperature: 0
+    });
+
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      if (parsed && parsed.sufficiency) {
+        return {
+          sufficiency: parsed.sufficiency,
+          missingContextSummary: parsed.missingContextSummary,
+          unsupportedSubject: parsed.unsupportedSubject,
+          conversationalResponse: parsed.conversationalResponse,
+          assumptionsStated: parsed.assumptionsStated,
+          suggestedQuestions: parsed.suggestedQuestions
+        };
       }
     }
+  } catch (err: any) {
+    console.warn('[ContextSufficiencyAgent] Model invocation failed, using heuristic fallback:', err?.message || err);
   }
-
-  return fallbackResult;
 
   return fallbackResult;
 }

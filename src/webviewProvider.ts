@@ -67,9 +67,14 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
 
     // Subscribe to backend SSE events and forward to webview
     this._streamUnsubscribe = this._backendClient.onStreamEvent(async (event: BackendStreamEvent) => {
+      // If event is scoped to a sessionId, prevent other sessions from adopting/hijacking it
+      if (event.data?.sessionId && this._activeSessionId && event.data.sessionId !== this._activeSessionId) {
+        return;
+      }
+
       switch (event.event) {
         case 'pipeline_start':
-          this._activeSessionId = event.data?.sessionId || null;
+          this._activeSessionId = event.data?.sessionId || this._activeSessionId;
           this.postMessageToWebview('PIPELINE_START', event.data);
           break;
 
@@ -221,7 +226,16 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
     }
 
     try {
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      const workspaceRoot = workspaceFolders && workspaceFolders.length > 0 ? workspaceFolders[0].uri.fsPath : undefined;
+      const resolvedSessionId = clientSessionId || this._activeSessionId || `sess_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      this._activeSessionId = resolvedSessionId;
+
+      // Ensure stream is connected with this session ID
+      this._backendClient.connectStream(resolvedSessionId);
+
       this.postMessageToWebview('PIPELINE_START', {
+        sessionId: resolvedSessionId,
         userInput: rawUserInput,
         timestamp: new Date().toISOString()
       });
@@ -229,7 +243,8 @@ export class KaizenWebviewProvider implements vscode.WebviewViewProvider {
       const res = await this._backendClient.runPipeline({
         userInput,
         imagePayload,
-        sessionId: clientSessionId || this._activeSessionId || undefined
+        sessionId: resolvedSessionId,
+        workspaceRoot
       });
 
       console.log('[Kaizen Extension Host] Pipeline initiated on backend:', res.message);

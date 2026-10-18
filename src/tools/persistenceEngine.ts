@@ -164,13 +164,19 @@ export class PersistenceEngine {
         fs.mkdirSync(sessionCheckpointsDir, { recursive: true });
       }
 
+      // Sanitize heavy binary/image payloads to prevent bloating checkpoints on disk
+      const sanitizedSnapshot: Partial<KaizenStateType> = { ...stateSnapshot };
+      if (sanitizedSnapshot.imagePayload) {
+        sanitizedSnapshot.imagePayload = '[IMAGE_BASE64_ATTACHED]';
+      }
+
       const timestamp = new Date().toISOString();
       const filename = `${Date.now()}_${stepName}.json`;
       const record: StateCheckpointRecord = {
         sessionId,
         stepName,
         timestamp,
-        stateSnapshot
+        stateSnapshot: sanitizedSnapshot
       };
 
       fs.writeFileSync(path.join(sessionCheckpointsDir, filename), JSON.stringify(record, null, 2), 'utf-8');
@@ -180,7 +186,7 @@ export class PersistenceEngine {
         sessionId,
         stepName,
         status: stepName.includes('Approved') ? 'COMPLETED' : (stepName.includes('Pending') ? 'APPROVAL_REQUIRED' : 'PENDING'),
-        agentState: stateSnapshot
+        agentState: sanitizedSnapshot
       });
 
       return true;
@@ -273,6 +279,20 @@ export class PersistenceEngine {
       const filePath = path.join(this.memoryDir, fileName.endsWith('.jsonl') ? fileName : `${fileName}.jsonl`);
       const line = JSON.stringify(record) + '\n';
       fs.appendFileSync(filePath, line, 'utf-8');
+
+      // Periodic log rotation: Keep last 300 events if file exceeds 500KB or 500 lines
+      try {
+        const stats = fs.statSync(filePath);
+        if (stats.size > 500 * 1024) {
+          const content = fs.readFileSync(filePath, 'utf-8');
+          const lines = content.split('\n').filter(l => l.trim().length > 0);
+          if (lines.length > 500) {
+            const rotated = lines.slice(-300).join('\n') + '\n';
+            fs.writeFileSync(filePath, rotated, 'utf-8');
+          }
+        }
+      } catch { }
+
       return true;
     } catch (err) {
       console.error(`[PersistenceEngine] Error appending memory record to '${fileName}':`, err);

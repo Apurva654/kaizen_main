@@ -28,6 +28,8 @@ export interface ProjectContext {
 export class ContextManager {
   private memoryEngine: MemoryEngine;
   private memoryEnabled: boolean = true;
+  private cachedProjectContext: { data: ProjectContext; timestamp: number } | null = null;
+  private readonly CACHE_TTL_MS = 60000; // 60s TTL prevents blocking event loop on every prompt
 
   constructor(engine: MemoryEngine = memoryEngine) {
     this.memoryEngine = engine;
@@ -100,9 +102,14 @@ export class ContextManager {
   }
 
   /**
-   * Automatically load current project context metadata.
+   * Automatically load current project context metadata with caching.
    */
   public async loadProjectContext(): Promise<ProjectContext> {
+    const now = Date.now();
+    if (this.cachedProjectContext && (now - this.cachedProjectContext.timestamp < this.CACHE_TTL_MS)) {
+      return this.cachedProjectContext.data;
+    }
+
     const projectRoot = process.cwd();
     let packageJson: any = null;
     if (existsSync('package.json')) {
@@ -123,7 +130,7 @@ export class ContextManager {
       recentFiles = Array.from(new Set(gitOut.split('\n').map(f => f.trim()).filter(f => f.length > 0))).slice(0, 10);
     } catch { }
 
-    return {
+    const data: ProjectContext = {
       projectRoot,
       projectName: packageJson?.name || basename(projectRoot) || 'unknown-project',
       language: this.detectLanguage(),
@@ -133,6 +140,9 @@ export class ContextManager {
       gitLog,
       lastModified: new Date()
     };
+
+    this.cachedProjectContext = { data, timestamp: now };
+    return data;
   }
 
   /**

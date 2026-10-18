@@ -21,6 +21,7 @@ export interface PipelineRunParams {
   userInput: string;
   imagePayload?: string;
   sessionId?: string;
+  workspaceRoot?: string;
 }
 
 export interface PipelineRunResponse {
@@ -31,6 +32,7 @@ export interface PipelineRunResponse {
 
 export interface HitlResponseParams {
   sessionId: string;
+  hitlRequestId?: string;
   response: {
     action: 'approve' | 'reject' | 'feedback';
     message?: string;
@@ -270,10 +272,15 @@ export class KaizenBackendClient {
     return this.request('POST', '/api/memory/clear', {}, 5000);
   }
 
+  private activeStreamSessionId?: string;
+
   /**
    * Connects to Server-Sent Events stream (/api/stream) and auto-reconnects
    */
-  public connectStream(): void {
+  public connectStream(sessionId?: string): void {
+    if (sessionId) {
+      this.activeStreamSessionId = sessionId;
+    }
     if (this.isStreamingActive) return;
     this.isStreamingActive = true;
 
@@ -283,7 +290,10 @@ export class KaizenBackendClient {
   private startSseConnection(): void {
     if (!this.isStreamingActive) return;
 
-    const fullUrl = new URL('/api/stream', this.baseUrl);
+    const streamPath = this.activeStreamSessionId
+      ? `/api/stream?sessionId=${encodeURIComponent(this.activeStreamSessionId)}`
+      : '/api/stream';
+    const fullUrl = new URL(streamPath, this.baseUrl);
     const isHttps = fullUrl.protocol === 'https:';
     const requester = isHttps ? https.request : http.request;
 

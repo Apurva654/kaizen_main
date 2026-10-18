@@ -3,11 +3,13 @@ import * as dotenv from 'dotenv';
 import * as fs from 'fs';
 import * as path from 'path';
 import { KaizenState } from '../state';
-import { normalizeSandboxPath } from './plannerAgent';
+import { isProtectedFile, normalizeSandboxPath, PROTECTED_PATTERNS } from '../tools/sandboxPathUtils';
 import { validateCodeSyntax } from '../tools/languageResolver';
 import { runStructured } from '../tools/llmRunner';
 
 dotenv.config();
+
+export { isProtectedFile, normalizeSandboxPath, PROTECTED_PATTERNS };
 
 export function getLanguageFromPath(filePath: string): string {
   const ext = filePath.split('.').pop()?.toLowerCase();
@@ -46,34 +48,11 @@ export const CodeGenSchema = z.object({
   explanations: z.string().describe("Technical explanation of implementation choices")
 });
 
-const PROTECTED_PATTERNS = [
-  /\.env($|\.)/,
-  /package-lock\.json$/,
-  /\.git\//,
-  /\.vscode\//,
-  /node_modules\//,
-  /src\/index\.ts$/,
-  /src\/state\.ts$/,
-  /src\/agents\//,
-  /src\/graph\//,
-  /src\/tools\//
-];
-
-// FIX #4: files that are legitimately empty
 const EMPTY_ALLOWED_FILES = new Set(['__init__.py', '.gitkeep']);
 
 function isEmptyAllowed(filePath: string): boolean {
   const base = filePath.replace(/\\/g, '/').split('/').pop() || '';
   return EMPTY_ALLOWED_FILES.has(base);
-}
-
-export function isProtectedFile(filePath: string): boolean {
-  if (!filePath) return true;
-  const norm = filePath.replace(/\\/g, '/');
-  if (!norm.startsWith('src/sandbox/')) {
-    return true;
-  }
-  return PROTECTED_PATTERNS.some((pattern) => pattern.test(norm));
 }
 
 export interface GeneratedFilePatch {
@@ -120,9 +99,10 @@ export function sanitizeCodePatch(code: string, _filePath?: string): string {
 export function saveFilePatchesToServerDiskWithVerification(
   patches: GeneratedFilePatch[],
   emitSSE?: (eventType: string, data: any) => void
-): { successCount: number; failedFiles: string[]; verifiedPaths: string[] } {
+): { successCount: number; failedFiles: string[]; verifiedPaths: string[]; originalSnapshots: Array<{ filePath: string; originalCode: string }> } {
   const failedFiles: string[] = [];
   const verifiedPaths: string[] = [];
+  const originalSnapshots: Array<{ filePath: string; originalCode: string }> = [];
   let successCount = 0;
 
   for (const patch of patches) {
@@ -135,6 +115,14 @@ export function saveFilePatchesToServerDiskWithVerification(
     try {
       const fullPath = path.resolve(process.cwd(), patch.filePath);
       const dir = path.dirname(fullPath);
+
+      let originalCode = "";
+      if (fs.existsSync(fullPath)) {
+        try {
+          originalCode = fs.readFileSync(fullPath, 'utf-8');
+        } catch { }
+      }
+      originalSnapshots.push({ filePath: patch.filePath, originalCode });
 
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
@@ -157,7 +145,7 @@ export function saveFilePatchesToServerDiskWithVerification(
     }
   }
 
-  return { successCount, failedFiles, verifiedPaths };
+  return { successCount, failedFiles, verifiedPaths, originalSnapshots };
 }
 
 export async function codeGenAgentNode(
@@ -207,7 +195,7 @@ export async function codeGenAgentNode(
     const fullPath = path.resolve(process.cwd(), tf);
     if (fs.existsSync(fullPath)) {
       try {
-        const content = fs.readFileSync(fullPath, 'utf-8').slice(0, 12000);
+        const content = fs.readFileSync(fullPath, 'utf-8').slice(0, 100000);
         fileContexts.push(`EXISTING FILE: ${tf}\n${content}`);
       } catch {
         fileContexts.push(`EXISTING FILE: ${tf} (unreadable)`);
@@ -256,8 +244,16 @@ STRICT CODE GENERATION RULES:
 
   userPromptBaseParts.push(
     `TARGET FILES CURRENT CONTENT:\n${fileContexts.join('\n\n')}`,
-    `RETRIEVED CONTEXT:\n${(state.extractedContext || '').slice(-3000)}`
+    `RETRIEVED CONTEXT:\n${(state.extractedContext || '').length > 15000 ? (state.extractedContext || '').slice(0, 15000) + '\n...[Context truncated for brevity]' : (state.extractedContext || '')}`
   );
+
+  if (state.reviewerFeedback) {
+    userPromptBaseParts.push(`REVIEWER REVISION MANDATE:\n${state.reviewerFeedback}`);
+  }
+
+  if (state.testLogs) {
+    userPromptBaseParts.push(`AUTOMATED TEST FAILURE REPORT:\n${state.testLogs}`);
+  }
 
   if (state.retryCount && state.retryCount > 0) {
     userPromptBaseParts.push(`NOTE: This is retry attempt #${state.retryCount}. Fix any previous syntax or logic errors.`);
@@ -377,8 +373,9 @@ STRICT CODE GENERATION RULES:
   return {
     filePatches,
     generatedPatch,
+    originalSnapshots: writeResult.originalSnapshots,
     generationSource: 'llm',
-    extractedContext: `${state.extractedContext || ''}\n\nGenerated files:\n${filePatches.map(f => `[${f.filePath}]: ${f.code.slice(0, 150)}...`).join('\n')}`,
+    extractedContext: state.extractedContext || '',
     plan: updatedPlan,
     status: 'CODE_GENERATED'
   };

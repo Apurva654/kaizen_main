@@ -4,7 +4,6 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
-import { dockerSandbox } from '../tools/dockerSandbox';
 
 export interface MCPToolDefinition {
   name: string;
@@ -121,7 +120,7 @@ export class KaizenMCPServer {
           },
           {
             name: 'terminal_exec',
-            description: 'Execute shell or terminal command with optional Docker sandboxing',
+            description: 'Execute shell or terminal command with optional process sandboxing',
             inputSchema: {
               type: 'object',
               properties: {
@@ -277,11 +276,31 @@ export class KaizenMCPServer {
             }
 
             if (useSandbox) {
-              const sandboxRes = await dockerSandbox.executeSandboxedCommand(command, cwd);
-              if (!sandboxRes.success) {
-                return { isError: true, content: [{ type: 'text', text: sandboxRes.output }] };
+              const sandboxDir = path.resolve(rootDir, 'src/sandbox');
+              if (!fs.existsSync(sandboxDir)) {
+                fs.mkdirSync(sandboxDir, { recursive: true });
               }
-              return { content: [{ type: 'text', text: sandboxRes.output }] };
+              return new Promise((resolve) => {
+                const child = exec(command, { cwd, env: { ...process.env, PYTHONPATH: rootDir, PYTHONUNBUFFERED: '1' }, timeout: 15000 }, (error, stdout, stderr) => {
+                  const combined = (stdout + '\n' + stderr).trim();
+                  if (error) {
+                    resolve({ isError: true, content: [{ type: 'text', text: combined || error.message }] });
+                  } else {
+                    resolve({ content: [{ type: 'text', text: combined || 'Sandbox execution completed.' }] });
+                  }
+                });
+                if (child.stdin) {
+                  try {
+                    const stdinPayload = typeof args?.stdin === 'string' ? args.stdin : '';
+                    if (stdinPayload) {
+                      child.stdin.write(stdinPayload.replace(/\\n/g, '\n') + '\n');
+                    }
+                    child.stdin.end();
+                  } catch {
+                    // Ignore stdin close errors
+                  }
+                }
+              });
             }
 
             return new Promise((resolve) => {

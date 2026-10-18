@@ -1,4 +1,4 @@
-import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
+import { invokeModel } from '../tools/modelProvider';
 
 export interface ResponseFilterOptions {
   userQuery: string;
@@ -42,23 +42,13 @@ ${targetFiles.length > 0 ? targetFiles.join(', ') : 'None specified'}
 INTERNAL EVIDENCE / WORKSPACE CONTEXT:
 ${rawContext.slice(0, 12000)}`;
 
-  if (geminiApiKey && geminiApiKey !== 'your_gemini_api_key_here') {
-    const geminiCandidates = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-3.5-flash-lite'];
-    for (const modelName of geminiCandidates) {
-      try {
-        const model = new ChatGoogleGenerativeAI({ apiKey: geminiApiKey, model: modelName, temperature: 0.1 });
-        const res: any = await model.invoke([
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPayload }
-        ]);
-        const responseText = typeof res.content === 'string' ? res.content.trim() : String(res.content ?? '').trim();
-        if (responseText && responseText.length > 0) {
-          return responseText;
-        }
-      } catch (err: any) {
-        console.warn(`Gemini response filter model '${modelName}' failed:`, err?.message || err);
-      }
-    }
+  try {
+    return await invokeModel(systemPrompt, userPayload, {
+      agent: 'ResponseFilterAgent',
+      temperature: 0.1
+    });
+  } catch (err: any) {
+    console.warn('[ResponseFilterAgent] LLM invocation failed, using fallback filter:', err?.message || err);
   }
 
   // Grounded deterministic fallback relevance filter for offline execution

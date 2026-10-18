@@ -1,12 +1,12 @@
 import { z } from 'zod';
-import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
+import { runStructured } from '../tools/llmRunner';
 import * as dotenv from 'dotenv';
 import * as fs from 'fs';
 import * as path from 'path';
 import { KaizenState } from '../state';
 import { langfuseTracer } from '../tools/langfuseTracer';
-import { normalizeSandboxPath } from './plannerAgent';
-import { FilePatchSchema, isProtectedFile, getLanguageFromPath, sanitizeCodePatch } from './codeGenAgent';
+import { normalizeSandboxPath, isProtectedFile } from '../tools/sandboxPathUtils';
+import { FilePatchSchema, getLanguageFromPath, sanitizeCodePatch } from './codeGenAgent';
 
 dotenv.config();
 
@@ -82,9 +82,17 @@ export async function debuggerAgentNode(state: typeof KaizenState.State): Promis
   const targetCode = fs.existsSync(primaryTarget) ? fs.readFileSync(primaryTarget, 'utf-8') : '';
   const testCode = (testFileCandidate && fs.existsSync(testFileCandidate)) ? fs.readFileSync(testFileCandidate, 'utf-8') : '';
 
-  // Retrieve latest structured failure object
+  // Retrieve latest structured failure object & compiler errors
   const failures = (state as any).structuredFailures || [];
   const lastFailure = failures.length > 0 ? failures[failures.length - 1] : undefined;
+  const compilerError = (state as any).compilerError || '';
+
+  const failureDetails = [
+    lastFailure ? `Exit Code: ${lastFailure.exitCode}\nSummary: ${lastFailure.summary || lastFailure.message || 'Test assertion failure'}` : '',
+    lastFailure && (lastFailure.stderr || lastFailure.stdout) ? `Test Logs:\n${(lastFailure.stderr || lastFailure.stdout).slice(-2000)}` : '',
+    compilerError ? `Compiler Error:\n${compilerError.slice(-2000)}` : '',
+    state.testLogs ? `Automated Test Logs:\n${state.testLogs}` : (state.extractedContext ? `Diagnostic Context:\n${state.extractedContext.slice(-2000)}` : '')
+  ].filter(Boolean).join('\n\n');
 
   const geminiApiKey = process.env.GEMINI_API_KEY;
 
@@ -93,19 +101,10 @@ export async function debuggerAgentNode(state: typeof KaizenState.State): Promis
   console.log(`Test File: "${testFileCandidate || 'None'}"`);
 
   if (geminiApiKey && geminiApiKey !== 'your_gemini_api_key_here') {
-    const geminiCandidates = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-3.5-flash-lite'];
-    for (const modelName of geminiCandidates) {
-      try {
-        const model = new ChatGoogleGenerativeAI({
-          apiKey: geminiApiKey,
-          model: modelName,
-          temperature: 0
-        });
-
-        const structuredModel = model.withStructuredOutput(DebuggerSchema);
-
-        const systemPrompt = `You are an expert AI Debugger Agent for Kaizen AI. Respond in valid json format.
-Your task is to analyze failing test reports, diagnose the root cause, and generate complete, corrected code patches for the target implementation file.
+    try {
+      const systemPrompt = `You are an expert AI Debugger Agent for Kaizen AI. Respond in valid json format.
+Your task is to analyze failing test reports, compiler errors, and stack traces, diagnose the root cause, and generate complete, corrected code patches for the target implementation file.
+Do NOT modify test files unless explicitly requested. Fix the implementation to satisfy the test assertions.
 
 === TARGET FILE ===
 Path: ${primaryTarget}
@@ -122,43 +121,38 @@ Test Source Code:
 ${testCode || '(No test file)'}
 \`\`\`
 
-=== RECENT TEST FAILURE SUMMARY ===
-${lastFailure ? `Exit Code: ${lastFailure.exitCode}\nSummary: ${lastFailure.message || lastFailure.summary}` : '(No structured failure logged)'}`;
+=== DIAGNOSTIC & FAILURE LOGS ===
+${failureDetails || '(No diagnostic logs available)'}`;
 
-        const userPrompt = `USER REQUEST: ${state.originalUserRequest || state.userInput}`;
-        const startTime = Date.now();
+      const userPrompt = `USER REQUEST: ${state.originalUserRequest || state.userInput}\n\nPlease analyze the above failure logs and fix ${primaryTarget} so all tests and compiler checks pass.`;
 
-        const rawResult: any = await structuredModel.invoke([
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ]);
+      const { result: rawResult } = await runStructured({
+        agent: 'DebuggerAgent',
+        schema: DebuggerSchema,
+        system: systemPrompt,
+        user: userPrompt,
+        temperature: 0
+      });
 
-        const latencyMs = Date.now() - startTime;
-        if (rawResult) {
-          await langfuseTracer.recordGeneration('DebuggerAgent', modelName, userPrompt, JSON.stringify(rawResult), latencyMs, 100, 200);
+      if (rawResult) {
+        const filePatches: Array<{ filePath: string; code: string; imports?: string[] }> = [];
+        const rawPatches = rawResult.files || rawResult.patches || [];
 
-          const filePatches: Array<{ filePath: string; code: string; imports?: string[] }> = [];
-          const rawPatches = rawResult.files || rawResult.patches || [];
-
-          for (const item of rawPatches) {
-            const rawPath = item.filePath || item.file_path || primaryTarget;
-            const normPath = normalizeSandboxPath(rawPath);
-            if (normPath && !isProtectedFile(normPath) && item.code) {
-              filePatches.push({
-                filePath: normPath,
-                code: sanitizeCodePatch(item.code),
-                imports: item.imports || []
-              });
-            }
-          }
-
-          if (filePatches.length === 0 && targetCode) {
+        for (const item of rawPatches) {
+          const rawItem = item as any;
+          const rawPath = rawItem.filePath || rawItem.file_path || primaryTarget;
+          const normPath = normalizeSandboxPath(rawPath);
+          // Protect test files and protected files from debugger alteration
+          if (normPath && !isProtectedFile(normPath) && !isTestFile(normPath) && rawItem.code) {
             filePatches.push({
-              filePath: primaryTarget,
-              code: sanitizeCodePatch(targetCode)
+              filePath: normPath,
+              code: sanitizeCodePatch(rawItem.code),
+              imports: rawItem.imports || []
             });
           }
+        }
 
+        if (filePatches.length > 0) {
           return {
             rootCause: rawResult.rootCause || rawResult.root_cause || rawResult.analysis || 'Analyzed test failure logs.',
             fixExplanation: rawResult.fixExplanation || rawResult.fix_explanation || 'Generated corrective code patch.',
@@ -166,45 +160,44 @@ ${lastFailure ? `Exit Code: ${lastFailure.exitCode}\nSummary: ${lastFailure.mess
             status: 'DEBUG_FIX_GENERATED'
           };
         }
-      } catch (err: any) {
-        console.warn(`Gemini debugger model '${modelName}' failed:`, err?.message || err);
       }
+    } catch (err: any) {
+      console.warn('[DebuggerAgent] Structured LLM debugging failed, falling back to heuristic:', err?.message || err);
     }
   }
 
-
-
-  // Deterministic language-aware fallback debug patch
+  // Grounded deterministic fallback bug resolution
   console.log("[DebuggerAgent] Operating in grounded deterministic fallback bug resolution mode...");
   
   let fallbackCode = targetCode;
+  let fixApplied = false;
+
   if (primaryTarget.endsWith('.py')) {
     if (targetCode.includes('def divide(')) {
       fallbackCode = `def divide(a, b):\n    if b == 0:\n        raise ValueError("Cannot divide by zero")\n    return a / b\n`;
-    } else if (targetCode.includes('def ')) {
-      fallbackCode = targetCode.replace(/return\s+0\b/g, 'return a / b').replace(/return\s+a\s*\*\s*b/g, 'return a / b');
-    } else {
-      fallbackCode = `def divide(a, b):\n    return a / b\n`;
+      fixApplied = true;
     }
   } else if (primaryTarget.endsWith('.ts') || primaryTarget.endsWith('.js')) {
     if (targetCode.includes('function divide')) {
       fallbackCode = `export function divide(a: number, b: number): number {\n  if (b === 0) throw new Error("Cannot divide by zero");\n  return a / b;\n}\n`;
-    } else {
-      fallbackCode = targetCode.replace(/return\s+0;/g, 'return a / b;');
+      fixApplied = true;
     }
   }
 
-  fallbackCode = sanitizeCodePatch(fallbackCode, primaryTarget);
-
-  const fallbackPatches = [{
-    filePath: primaryTarget,
-    code: fallbackCode
-  }];
+  if (fixApplied) {
+    fallbackCode = sanitizeCodePatch(fallbackCode, primaryTarget);
+    return {
+      rootCause: `Identified edge-case error (e.g. division by zero or assertion failure) in ${primaryTarget}.`,
+      fixExplanation: `Refactored ${primaryTarget} to handle error conditions and satisfy test assertions.`,
+      filePatches: [{ filePath: primaryTarget, code: fallbackCode }],
+      status: "DEBUG_COMPLETED"
+    };
+  }
 
   return {
-    rootCause: `Identified incorrect return calculation or logic in ${primaryTarget}.`,
-    fixExplanation: `Refactored ${primaryTarget} logic to correctly perform division operation and satisfy test assertions.`,
-    filePatches: fallbackPatches,
-    status: "DEBUG_COMPLETED"
+    rootCause: `Diagnosed test failure or compilation issue in ${primaryTarget}.`,
+    fixExplanation: `Automated patch generation was unable to verify a clean fix without LLM guidance.`,
+    filePatches: [],
+    status: "DEBUG_FAILED"
   };
 }

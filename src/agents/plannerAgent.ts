@@ -4,30 +4,12 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { KaizenState, PlanStep } from '../state';
 import { ASTParserTool, ExtractedSymbol } from '../tools/astParser';
-import { isProtectedFile } from '../tools/sandboxPathUtils';
+import { isProtectedFile, normalizeSandboxPath } from '../tools/sandboxPathUtils';
 import { runStructured } from '../tools/llmRunner';
 
 dotenv.config();
 
-export function normalizeSandboxPath(pathStr: string): string {
-  if (!pathStr) return '';
-  let norm = pathStr.replace(/\\/g, '/').trim();
-  norm = norm.replace(/^(\.\/)+/, '');
-  norm = norm.replace(/^\/+/, '');
-  if (norm.split('/').includes('..')) return '';
-  norm = path.posix.normalize(norm);
-  if (!norm || norm === '.') return '';
-  if (!norm.startsWith('src/sandbox/')) {
-    if (norm.startsWith('sandbox/')) {
-      norm = `src/${norm}`;
-    } else if (norm.startsWith('src/')) {
-      norm = norm.replace(/^src\//, 'src/sandbox/');
-    } else {
-      norm = `src/sandbox/${norm}`;
-    }
-  }
-  return norm;
-}
+export { normalizeSandboxPath };
 
 export const PlannerStepSchema = z.object({
   description: z.string().min(10).describe("Specific, actionable step description naming specific functions, classes, or code sections"),
@@ -387,8 +369,9 @@ Use the following top-level structure:
   "approach": "A concise explanation of the chosen implementation strategy, relevant assumptions, and important constraints.",
   "steps": [
     {
-      "description": "A concrete, technically specific implementation step of at least 30 characters.",
-      "targetFile": "src/sandbox/relative/path/to/file.ext"
+      "description": "A concrete, technically specific implementation step of at least 10 characters.",
+      "targetFile": "src/sandbox/relative/path/to/file.ext",
+      "action": "create | modify | test"
     }
   ]
 }
@@ -397,7 +380,7 @@ Output requirements:
 
 - \`approach\` must be a non-empty string.
 - \`steps\` must be a non-empty array of actionable steps.
-- Every step must contain \`description\` and \`targetFile\`.
+- Every step must contain \`description\`, \`targetFile\`, and \`action\` ('create', 'modify', or 'test').
 - Every \`targetFile\` must start with \`src/sandbox/\`.
 - Use only fields supported by the existing planner output schema.
 - Do not add unrecognized fields such as \`priority\`, \`dependencies\`, \`language\`, or \`acceptanceCriteria\` unless the application schema explicitly supports them.
@@ -422,14 +405,14 @@ Return the final JSON plan only.`;
     const fullPath = path.resolve(process.cwd(), targetPath);
     if (fs.existsSync(fullPath)) {
       try {
-        const content = fs.readFileSync(fullPath, 'utf-8').slice(0, 4000);
+        const content = fs.readFileSync(fullPath, 'utf-8').slice(0, 50000);
         existingFilesContent.push(`--- FILE: ${targetPath} ---\n${content}`);
       } catch { }
     }
   }
 
   const symbolSummary = symbols.map(s => `${s.type} ${s.name} (${s.language})`).join(', ');
-  const recentContext = extractedCtx.slice(-3000);
+  const recentContext = extractedCtx.length > 12000 ? extractedCtx.slice(0, 12000) + '\n...[Context truncated for brevity]' : extractedCtx;
 
   const userPromptParts: string[] = [
     `USER REQUEST:\n${cleanUserQuery}`,

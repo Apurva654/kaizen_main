@@ -20,20 +20,45 @@ export interface LanguageResolutionResult {
 export function resolveLanguage(prompt: string, targetFiles: string[] = []): LanguageResolutionResult {
   const promptLower = (prompt || '').toLowerCase();
 
-  // Priority 1: Explicit user-requested language in prompt
+  // Priority 1: If explicit target file extension exists, prioritize it unless user explicitly requests converting language
+  if (targetFiles && targetFiles.length > 0) {
+    const ext = targetFiles[0].split('.').pop()?.toLowerCase();
+    const hasExplicitOverride = /\b(rewrite\s+in|convert\s+to|switch\s+to|in\s+python|in\s+typescript|in\s+javascript|in\s+go|in\s+rust|in\s+cpp|in\s+c|in\s+java)\b/i.test(promptLower);
+
+    if (!hasExplicitOverride) {
+      switch (ext) {
+        case 'py': return { requestedLanguage: 'python', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.py' };
+        case 'ts':
+        case 'tsx': return { requestedLanguage: 'typescript', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.ts' };
+        case 'js':
+        case 'jsx': return { requestedLanguage: 'javascript', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.js' };
+        case 'html': return { requestedLanguage: 'html', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.html' };
+        case 'css': return { requestedLanguage: 'css', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.css' };
+        case 'java': return { requestedLanguage: 'java', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.java' };
+        case 'cpp':
+        case 'cc': return { requestedLanguage: 'cpp', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.cpp' };
+        case 'c': return { requestedLanguage: 'c', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.c' };
+        case 'rs': return { requestedLanguage: 'rust', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.rs' };
+        case 'go': return { requestedLanguage: 'go', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.go' };
+        case 'json': return { requestedLanguage: 'json', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.json' };
+      }
+    }
+  }
+
+  // Priority 2: Explicit user-requested language in prompt (with strict word matching)
   if (/\b(python|py|pytest)\b/i.test(promptLower)) {
     return { requestedLanguage: 'python', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.py' };
   }
   if (/\b(typescript|ts|tsx)\b/i.test(promptLower)) {
     return { requestedLanguage: 'typescript', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.ts' };
   }
-  if (/\b(javascript|js|jsx|node)\b/i.test(promptLower)) {
+  if (/\b(javascript|js|jsx|nodejs|node\.js)\b/i.test(promptLower)) {
     return { requestedLanguage: 'javascript', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.js' };
   }
   if (/\b(html|webpage|landing\s+page|website|html5)\b/i.test(promptLower)) {
     return { requestedLanguage: 'html', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.html' };
   }
-  if (/\b(css|css3|styling|styles)\b/i.test(promptLower)) {
+  if (/\b(css|css3|stylesheet|in\s+css)\b/i.test(promptLower)) {
     return { requestedLanguage: 'css', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.css' };
   }
   if (/\b(java)\b/i.test(promptLower) && !/\bjavascript\b/i.test(promptLower)) {
@@ -48,32 +73,11 @@ export function resolveLanguage(prompt: string, targetFiles: string[] = []): Lan
   if (/\b(rust|rs)\b/i.test(promptLower)) {
     return { requestedLanguage: 'rust', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.rs' };
   }
-  if (/\b(golang|go)\b/i.test(promptLower)) {
+  if (/\b(golang|in\s+go|using\s+go|go\s+code|go\s+program|go\s+language)\b/i.test(promptLower)) {
     return { requestedLanguage: 'go', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.go' };
   }
-  if (/\b(json)\b/i.test(promptLower)) {
+  if (/\b(json\s+file|in\s+json|\.json)\b/i.test(promptLower)) {
     return { requestedLanguage: 'json', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.json' };
-  }
-
-  // Priority 2 & 3: Target File Extension / Existing File
-  if (targetFiles && targetFiles.length > 0) {
-    const ext = targetFiles[0].split('.').pop()?.toLowerCase();
-    switch (ext) {
-      case 'py': return { requestedLanguage: 'python', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.py' };
-      case 'ts':
-      case 'tsx': return { requestedLanguage: 'typescript', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.ts' };
-      case 'js':
-      case 'jsx': return { requestedLanguage: 'javascript', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.js' };
-      case 'html': return { requestedLanguage: 'html', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.html' };
-      case 'css': return { requestedLanguage: 'css', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.css' };
-      case 'java': return { requestedLanguage: 'java', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.java' };
-      case 'cpp':
-      case 'cc': return { requestedLanguage: 'cpp', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.cpp' };
-      case 'c': return { requestedLanguage: 'c', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.c' };
-      case 'rs': return { requestedLanguage: 'rust', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.rs' };
-      case 'go': return { requestedLanguage: 'go', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.go' };
-      case 'json': return { requestedLanguage: 'json', source: 'target_file_extension', confidence: 'high', recommendedExtension: '.json' };
-    }
   }
 
   // Priority 4 & 5: Project Default Fallback (TypeScript) when language is completely unspecified
@@ -144,32 +148,156 @@ export function validateCodeSyntax(code: string, language: string, filePath: str
     }
   }
 
-  // Bug 9 Fix: Basic structural checks for TypeScript / JavaScript
+  // Structural checks for TypeScript / JavaScript (handles comments, template literals, and strings cleanly)
   if (['typescript', 'javascript', 'ts', 'js', 'tsx', 'jsx'].includes(language) ||
       /\.(ts|tsx|js|jsx|mjs|cjs)$/.test(filePath)) {
-    // Unbalanced braces check
     let depth = 0;
-    let inStr = false;
-    let strChar = '';
+    type State = 'NORMAL' | 'LINE_COMMENT' | 'BLOCK_COMMENT' | 'STRING_SINGLE' | 'STRING_DOUBLE' | 'TEMPLATE';
+    let parserState: State = 'NORMAL';
+    const templateStack: number[] = [];
+
     for (let i = 0; i < code.length; i++) {
       const ch = code[i];
-      if (inStr) {
-        if (ch === strChar && code[i - 1] !== '\\') inStr = false;
-      } else if (ch === '"' || ch === "'" || ch === '`') {
-        inStr = true; strChar = ch;
-      } else if (ch === '{') {
-        depth++;
-      } else if (ch === '}') {
-        depth--;
-        if (depth < 0) return { isValid: false, error: 'Syntax Error: Unexpected closing brace "}" — unmatched.' };
+      const next = i + 1 < code.length ? code[i + 1] : '';
+
+      switch (parserState) {
+        case 'NORMAL':
+          if (ch === '/' && next === '/') {
+            parserState = 'LINE_COMMENT';
+            i++;
+          } else if (ch === '/' && next === '*') {
+            parserState = 'BLOCK_COMMENT';
+            i++;
+          } else if (ch === "'") {
+            parserState = 'STRING_SINGLE';
+          } else if (ch === '"') {
+            parserState = 'STRING_DOUBLE';
+          } else if (ch === '`') {
+            parserState = 'TEMPLATE';
+          } else if (ch === '{') {
+            depth++;
+          } else if (ch === '}') {
+            depth--;
+            if (depth < 0) {
+              return { isValid: false, error: 'Syntax Error: Unexpected closing brace "}" — unmatched.' };
+            }
+            if (templateStack.length > 0 && depth === templateStack[templateStack.length - 1]) {
+              templateStack.pop();
+              parserState = 'TEMPLATE';
+            }
+          }
+          break;
+
+        case 'LINE_COMMENT':
+          if (ch === '\n') {
+            parserState = 'NORMAL';
+          }
+          break;
+
+        case 'BLOCK_COMMENT':
+          if (ch === '*' && next === '/') {
+            parserState = 'NORMAL';
+            i++;
+          }
+          break;
+
+        case 'STRING_SINGLE':
+          if (ch === '\\') {
+            i++;
+          } else if (ch === "'") {
+            parserState = 'NORMAL';
+          }
+          break;
+
+        case 'STRING_DOUBLE':
+          if (ch === '\\') {
+            i++;
+          } else if (ch === '"') {
+            parserState = 'NORMAL';
+          }
+          break;
+
+        case 'TEMPLATE':
+          if (ch === '\\') {
+            i++;
+          } else if (ch === '`') {
+            parserState = 'NORMAL';
+          } else if (ch === '$' && next === '{') {
+            i++;
+            templateStack.push(depth);
+            depth++;
+            parserState = 'NORMAL';
+          }
+          break;
       }
     }
+
     if (depth !== 0) {
       return { isValid: false, error: `Syntax Error: ${depth} unclosed brace(s) "{" detected.` };
+    }
+    if (parserState === 'BLOCK_COMMENT') {
+      return { isValid: false, error: 'Syntax Error: Unclosed multi-line comment /* detected.' };
     }
     // Detect common placeholder / stub code that should not be committed
     if (/\/\/\s*(TODO|FIXME|PLACEHOLDER|NOT IMPLEMENTED)/i.test(code) && code.trim().split('\n').length < 5) {
       return { isValid: false, error: 'Stub Violation: File appears to be an unimplemented placeholder.' };
+    }
+  }
+
+  // Structural check for Python
+  if (language === 'python' || language === 'py' || /\.py$/.test(filePath)) {
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let braceDepth = 0;
+    let inString: string | null = null;
+    let inLineComment = false;
+
+    for (let i = 0; i < code.length; i++) {
+      const ch = code[i];
+      const triple = code.slice(i, i + 3);
+
+      if (inLineComment) {
+        if (ch === '\n') inLineComment = false;
+        continue;
+      }
+
+      if (inString) {
+        if (ch === '\\') {
+          i++;
+        } else if (inString.length === 3 && triple === inString) {
+          inString = null;
+          i += 2;
+        } else if (inString.length === 1 && ch === inString) {
+          inString = null;
+        }
+        continue;
+      }
+
+      if (ch === '#') {
+        inLineComment = true;
+        continue;
+      }
+
+      if (triple === '"""' || triple === "'''") {
+        inString = triple;
+        i += 2;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        inString = ch;
+        continue;
+      }
+
+      if (ch === '(') parenDepth++;
+      else if (ch === ')') { parenDepth--; if (parenDepth < 0) return { isValid: false, error: 'Syntax Error: Unmatched ")"' }; }
+      else if (ch === '[') bracketDepth++;
+      else if (ch === ']') { bracketDepth--; if (bracketDepth < 0) return { isValid: false, error: 'Syntax Error: Unmatched "]"' }; }
+      else if (ch === '{') braceDepth++;
+      else if (ch === '}') { braceDepth--; if (braceDepth < 0) return { isValid: false, error: 'Syntax Error: Unmatched "}"' }; }
+    }
+
+    if (parenDepth !== 0 || bracketDepth !== 0 || braceDepth !== 0) {
+      return { isValid: false, error: 'Syntax Error: Unclosed bracket/brace/parenthesis detected in Python source.' };
     }
   }
 

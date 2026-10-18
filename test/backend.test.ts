@@ -75,48 +75,11 @@ async function runTestSuite() {
   const testPort = 3099;
 
   try {
-    // Import express app from server module
-    // We can test express routing directly
-    const express = require('express');
-    const { dockerSandbox } = require('../src/tools/dockerSandbox');
+    // Import and test the real Express app from server.ts
+    process.env.KAIZEN_TEST_MODE = 'true';
+    const { app } = await import('../src/server');
 
-    const app = express();
-    app.use(express.json());
-
-    // Register the identical health route from server.ts
-    app.get('/api/health', async (req: any, res: any) => {
-      const isDockerActive = await dockerSandbox.checkDockerAvailable();
-      res.json({
-        status: 'ok',
-        version: '1.0.0',
-        uptime: process.uptime(),
-        timestamp: new Date().toISOString(),
-        port: testPort,
-        modelProvider: getActiveModelProvider(),
-        defaultModels: DEFAULT_GEMINI_MODELS,
-        permissionMode: permissionGate.getMode(),
-        isDryRunMode: permissionGate.isDryRunMode(),
-        isDockerActive
-      });
-    });
-
-    // Register a mock pipeline/run route that echoes back the contract
-    app.post('/api/pipeline/run', (req: any, res: any) => {
-      const { userInput, imagePayload, sessionId } = req.body;
-      if (!userInput && !imagePayload) {
-        res.status(400).json({ error: 'userInput or imagePayload is required.' });
-        return;
-      }
-      res.json({ status: 'started', message: 'Pipeline execution initiated.', runId: 'run_test_123' });
-    });
-
-    // Register hitl/respond route
-    app.post('/api/hitl/respond', (req: any, res: any) => {
-      const { sessionId, response } = req.body;
-      res.json({ status: 'acknowledged', sessionId, action: response?.action });
-    });
-
-    // Start ephemeral server
+    // Start ephemeral server with real application router
     await new Promise<void>((resolve) => {
       serverInstance = app.listen(testPort, () => resolve());
     });
@@ -136,7 +99,7 @@ async function runTestSuite() {
     assert(health.defaultModels?.includes('gemini-2.5-pro') === true, 'Health check confirms gemini-2.5-pro availability');
     assert(liveClient.getConnectionState() === 'connected', 'Client state transitioned to "connected"');
 
-    // TEST 5: Pipeline Run Contract
+    // TEST 5: Pipeline Run Contract on Real Server
     console.log('\n--- 5. Extension-to-Backend Prompt Submission Contract ---');
     const runRes = await liveClient.runPipeline({
       userInput: 'Implement a travel planner helper',
@@ -145,10 +108,24 @@ async function runTestSuite() {
     assert(runRes.status === 'started', 'runPipeline receives status: "started"');
     assert(runRes.message === 'Pipeline execution initiated.', 'runPipeline acknowledges execution');
 
-    // TEST 6: HITL Approval Dispatch Contract
+    // TEST 6: HITL Approval Dispatch Contract on Real Server
     console.log('\n--- 6. Human-In-The-Loop Approval Dispatch Contract ---');
     const hitlRes = await liveClient.respondHitl('sess_test_1', 'approve', 'Looks good');
     assert(hitlRes.status === 'acknowledged', 'HITL approval response acknowledged by backend');
+
+    // TEST 7: Real Comprehensive Verification Suite (/api/test/comprehensive)
+    console.log('\n--- 7. Real Comprehensive Verification Suite Contract ---');
+    const compRes = await new Promise<{ success: boolean; results: any[]; passCount: number }>((resolve, reject) => {
+      http.get(`http://127.0.0.1:${testPort}/api/test/comprehensive`, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => resolve(JSON.parse(data)));
+      }).on('error', reject);
+    });
+    assert(compRes.success === true, 'Comprehensive verification returns success: true');
+    assert(Array.isArray(compRes.results), 'Comprehensive verification returns results array');
+    assert(compRes.results.length >= 5, 'Comprehensive verification covers all core systems');
+    assert(compRes.results.some((r: any) => r.feature.includes('PermissionGate')), 'Comprehensive verification checks PermissionGate');
 
   } finally {
     if (serverInstance) {
@@ -162,6 +139,7 @@ async function runTestSuite() {
   console.log('\n========================================================');
   console.log(`🎉 ALL TESTS PASSED: ${passedTests}/${totalTests} checks verified`);
   console.log('========================================================\n');
+  process.exit(0);
 }
 
 runTestSuite().catch((err) => {

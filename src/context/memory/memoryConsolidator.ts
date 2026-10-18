@@ -22,15 +22,32 @@ export class MemoryConsolidator {
    * Consolidate user conversation turn: extract explicit preferences/facts into Long-Term memory.
    */
   public consolidateTurn(userPrompt: string, assistantResponse: string, workspaceId: string = 'default'): void {
-    // 1. Check for explicit name/user preference statements
-    const nameMatch = userPrompt.match(/(?:my name is|my name|i am|i'm|call me|name:)\s+([a-zA-Z0-9_-]+)/i);
-    if (nameMatch && nameMatch[1]) {
-      const rawName = nameMatch[1].trim();
-      const stopWords = ['is', 'a', 'the', 'an', 'not', 'here', 'testing', 'going', 'building'];
-      if (!stopWords.includes(rawName.toLowerCase())) {
-        const nameVal = rawName.charAt(0).toUpperCase() + rawName.slice(1);
-        this.longTermMgr.addFact('user_preference', 'User Name', nameVal, 'explicit_user_input', 0.95, workspaceId, ['user', 'name']);
-      }
+    // 1. Check for explicit name/user preference statements (guard against "I am tired", "name: string", etc.)
+    const excludedWords = new Set([
+      'tired', 'happy', 'sad', 'ready', 'busy', 'sure', 'fine', 'good', 'okay', 'ok',
+      'working', 'debugging', 'testing', 'trying', 'using', 'writing', 'building', 'looking',
+      'here', 'there', 'back', 'done', 'sorry', 'confused', 'new', 'going',
+      'string', 'number', 'boolean', 'any', 'void', 'null', 'undefined', 'object', 'function',
+      'unknown', 'never', 'symbol', 'bigint', 'int', 'float', 'str', 'bool', 'list', 'dict',
+      'is', 'a', 'an', 'the', 'not', 'in', 'on', 'at', 'to', 'for', 'with', 'from'
+    ]);
+
+    let detectedName: string | null = null;
+    const explicitNameMatch = userPrompt.match(/(?:my name is|call me)\s+([A-Za-z][A-Za-z'-]{1,30})/i);
+    const selfIntroMatch = userPrompt.trim().match(/^(?:i am|i'm)\s+([A-Za-z][A-Za-z'-]{1,30})[.!]?$/i);
+    const explicitFieldMatch = userPrompt.match(/^(?:user\s+name|my\s+name):\s*([A-Za-z][A-Za-z'-]{1,30})$/im);
+
+    if (explicitNameMatch && explicitNameMatch[1]) {
+      detectedName = explicitNameMatch[1].trim();
+    } else if (selfIntroMatch && selfIntroMatch[1]) {
+      detectedName = selfIntroMatch[1].trim();
+    } else if (explicitFieldMatch && explicitFieldMatch[1]) {
+      detectedName = explicitFieldMatch[1].trim();
+    }
+
+    if (detectedName && !excludedWords.has(detectedName.toLowerCase()) && detectedName.length >= 2) {
+      const nameVal = detectedName.charAt(0).toUpperCase() + detectedName.slice(1);
+      this.longTermMgr.addFact('user_preference', 'User Name', nameVal, 'explicit_user_input', 0.95, workspaceId, ['user', 'name']);
     }
 
     // 2. Check for explicit framework / language preferences

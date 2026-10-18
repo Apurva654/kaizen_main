@@ -215,6 +215,8 @@ export class GraphifyEngine {
       return;
     }
 
+    await this.astParser.init();
+
     const files = this.getAllFiles(dirPath);
 
     let pyCount = 0;
@@ -740,10 +742,12 @@ export class GraphifyEngine {
       }
     }
 
+    factsList.push("\n=== OTHER WORKSPACE MODULE SUMMARIES ===");
     for (const [filePath, node] of this.fileFactsMap.entries()) {
       if (!processedFiles.has(filePath)) {
-        factsList.push(`\n--- AVAILABLE WORKSPACE MODULE: ${filePath} ---`);
-        factsList.push(node.content);
+        const exports = node.symbols.filter(s => s.isExported).map(s => `${s.type} ${s.name}(${(s.parameters || []).map(p => `${p.name}: ${p.type || 'any'}`).join(', ')}): ${s.returnType || 'void'}`);
+        const exportSummary = exports.length > 0 ? exports.join('; ') : 'No exported top-level symbols';
+        factsList.push(`- Module '${filePath}' [Lang: ${node.language}]: ${exportSummary}`);
         processedFiles.add(filePath);
       }
     }
@@ -1074,6 +1078,17 @@ export class GraphifyEngine {
         if (symAId === symBId) continue;
         const bName = symBData.fact.name;
         if (!bName || bName.length < 2) continue;
+
+        // Check if symB is in the same file or imported by symA's file
+        const isSameFile = symAData.file === symBData.file;
+        const fileA = this.fileFactsMap.get(symAData.file);
+        const isImported = isSameFile || (fileA?.imports.some(imp =>
+          imp.resolvedPath === symBData.file ||
+          imp.importedSymbols.includes(bName) ||
+          (imp.type === 'internal' && imp.moduleSpecifier.includes(path.basename(symBData.file, path.extname(symBData.file))))
+        ) ?? false);
+
+        if (!isImported) continue; // Prevent false cross-file CALLS edges
 
         // Check if symA body contains call to symB
         const callRegex = new RegExp(`\\b${bName}\\s*\\(`, 'g');

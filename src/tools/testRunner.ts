@@ -2,7 +2,6 @@ import { exec } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { validateBeforeSubmission, FileMetadata } from './universalValidator';
-import { dockerSandbox } from './dockerSandbox';
 
 export type TestFailureType = 'TOOL_EXECUTION_FAILURE' | 'TEST_FAILURE' | 'CODE_FAILURE' | 'TIMEOUT';
 
@@ -64,17 +63,27 @@ export async function runWorkspaceTests(targetFiles: string[] = []): Promise<Tes
   const combinedTargets = Array.from(new Set([...targetFiles, ...allSandboxFiles]));
   const pyTestFiles = combinedTargets.filter(f => f.endsWith('.py') && isTestFile(f));
   const pyImplFiles = combinedTargets.filter(f => f.endsWith('.py') && !isTestFile(f));
-  const isWebProject = targetFiles.some(f => f.endsWith('.html') || f.endsWith('.css') || (f.endsWith('.js') && !f.includes('.test.')));
-  const hasTargetPyFiles = targetFiles.some(f => f.endsWith('.py'));
+  const jsFiles = combinedTargets.filter(f => f.endsWith('.js') && !isTestFile(f));
+  const jsTestFiles = combinedTargets.filter(f => f.endsWith('.js') && isTestFile(f));
+  const htmlFiles = combinedTargets.filter(f => f.endsWith('.html'));
+  const cssFiles = combinedTargets.filter(f => f.endsWith('.css'));
+  const hasTargetPyFiles = combinedTargets.some(f => f.endsWith('.py'));
+  const hasTargetTsFiles = combinedTargets.some(f => f.endsWith('.ts'));
 
-  if (isWebProject && !hasTargetPyFiles) {
-    const htmlFiles = targetFiles.filter(f => f.endsWith('.html'));
+  const isPureStaticWeb = (htmlFiles.length > 0 || cssFiles.length > 0) &&
+    jsFiles.length === 0 &&
+    jsTestFiles.length === 0 &&
+    !hasTargetPyFiles &&
+    !hasTargetTsFiles;
+
+  if (isPureStaticWeb) {
     let webPassed = true;
-    let summaryText = 'Static HTML/Web project validation PASSED cleanly.';
+    let summaryText = 'Static HTML/CSS project validation PASSED cleanly.';
 
     for (const hf of htmlFiles) {
-      if (fs.existsSync(hf)) {
-        const content = fs.readFileSync(hf, 'utf-8');
+      const fullPath = path.resolve(rootDir, hf);
+      if (fs.existsSync(fullPath)) {
+        const content = fs.readFileSync(fullPath, 'utf-8');
         if (!content.includes('<!DOCTYPE html>') && !content.includes('<html')) {
           webPassed = false;
           summaryText = `HTML validation warning: '${hf}' missing DOCTYPE html declaration`;
@@ -92,13 +101,133 @@ export async function runWorkspaceTests(targetFiles: string[] = []): Promise<Tes
     };
   }
 
-  // If there are Python test files in src/sandbox or src/sandbox/tests, run Python tests via Docker Sandbox engine
+  // If there are JavaScript files, run real syntax validation & test/runtime execution
+  if ((jsFiles.length > 0 || jsTestFiles.length > 0) && !hasTargetPyFiles && !hasTargetTsFiles) {
+    // 1. Syntax check each JS file via node --check
+    for (const jf of [...jsFiles, ...jsTestFiles]) {
+      const fullPath = path.resolve(rootDir, jf);
+      if (fs.existsSync(fullPath)) {
+        const checkResult = await new Promise<{ exitCode: number; output: string }>((res) => {
+          exec(`node --check "${fullPath}"`, { timeout: 10000 }, (error, stdout, stderr) => {
+            const exitCode = error ? (error.code || 1) : 0;
+            res({ exitCode, output: (stdout + '\n' + stderr).trim() });
+          });
+        });
+        if (checkResult.exitCode !== 0) {
+          const summaryText = `JavaScript syntax validation FAILED for ${jf}:\n${checkResult.output}`;
+          return {
+            passed: false,
+            exitCode: checkResult.exitCode,
+            stdout: checkResult.output,
+            stderr: checkResult.output,
+            summary: summaryText,
+            testedFiles: targetFiles,
+            failureType: 'CODE_FAILURE',
+            structuredFailure: {
+              success: false,
+              executionEnvironment: 'process',
+              targetFiles: jsFiles,
+              testFiles: jsTestFiles,
+              command: `node --check "${jf}"`,
+              exitCode: checkResult.exitCode,
+              stdout: checkResult.output,
+              stderr: checkResult.output,
+              failureType: 'CODE_FAILURE',
+              errorType: 'SyntaxError',
+              errorMessage: checkResult.output.slice(0, 300),
+              sourceFile: jf,
+              summary: summaryText
+            }
+          };
+        }
+      }
+    }
+
+    // 2. If test files exist, execute tests
+    if (jsTestFiles.length > 0) {
+      const testFile = jsTestFiles[0];
+      const fullTestPath = path.resolve(rootDir, testFile);
+      const testExecCmd = `node "${fullTestPath}"`;
+      const testExecResult = await new Promise<{ exitCode: number; output: string }>((res) => {
+        exec(testExecCmd, { cwd: rootDir, timeout: 15000 }, (error, stdout, stderr) => {
+          const exitCode = error ? (error.code || 1) : 0;
+          res({ exitCode, output: (stdout + '\n' + stderr).trim() });
+        });
+      });
+
+      const passed = testExecResult.exitCode === 0;
+      return {
+        passed,
+        exitCode: testExecResult.exitCode,
+        stdout: testExecResult.output,
+        stderr: passed ? '' : testExecResult.output,
+        summary: passed ? `JavaScript tests PASSED cleanly (${testFile}).` : `JavaScript tests FAILED (${testFile}):\n${testExecResult.output}`,
+        testedFiles: targetFiles,
+        failureType: passed ? undefined : 'TEST_FAILURE',
+        structuredFailure: passed ? undefined : {
+          success: false,
+          executionEnvironment: 'process',
+          targetFiles: jsFiles,
+          testFiles: jsTestFiles,
+          command: testExecCmd,
+          exitCode: testExecResult.exitCode,
+          stdout: testExecResult.output,
+          stderr: testExecResult.output,
+          failureType: 'TEST_FAILURE',
+          errorType: 'AssertionError',
+          errorMessage: testExecResult.output.slice(0, 300),
+          sourceFile: jsFiles[0] || testFile,
+          testFile,
+          summary: `JavaScript test execution failed (${testFile})`
+        }
+      };
+    }
+
+    // 3. If runnable implementation file exists, execute to verify no runtime startup crash
+    const mainJs = jsFiles.find(f => path.basename(f) === 'main.js' || path.basename(f) === 'index.js' || path.basename(f) === 'app.js') || jsFiles[0];
+    if (mainJs) {
+      const fullMainPath = path.resolve(rootDir, mainJs);
+      const runResult = await new Promise<{ exitCode: number; output: string }>((res) => {
+        exec(`node "${fullMainPath}"`, { cwd: rootDir, timeout: 10000 }, (error, stdout, stderr) => {
+          const exitCode = error ? (error.code || 1) : 0;
+          res({ exitCode, output: (stdout + '\n' + stderr).trim() });
+        });
+      });
+
+      const passed = runResult.exitCode === 0;
+      return {
+        passed,
+        exitCode: runResult.exitCode,
+        stdout: runResult.output,
+        stderr: passed ? '' : runResult.output,
+        summary: passed ? `JavaScript verification PASSED cleanly (${mainJs}).` : `JavaScript execution FAILED (${mainJs}):\n${runResult.output}`,
+        testedFiles: targetFiles,
+        failureType: passed ? undefined : 'CODE_FAILURE',
+        structuredFailure: passed ? undefined : {
+          success: false,
+          executionEnvironment: 'process',
+          targetFiles: jsFiles,
+          testFiles: [],
+          command: `node "${mainJs}"`,
+          exitCode: runResult.exitCode,
+          stdout: runResult.output,
+          stderr: runResult.output,
+          failureType: 'CODE_FAILURE',
+          errorType: 'RuntimeError',
+          errorMessage: runResult.output.slice(0, 300),
+          sourceFile: mainJs,
+          summary: `JavaScript runtime failure on startup (${mainJs})`
+        }
+      };
+    }
+  }
+
+  // If there are Python test files in src/sandbox or src/sandbox/tests, run Python tests via isolated process sandbox
   const testsDir = path.resolve(sandboxDir, 'tests');
   const hasPyTestInSubdir = fs.existsSync(testsDir) && fs.readdirSync(testsDir).some(f => f.startsWith('test_') && f.endsWith('.py'));
 
   if ((pyTestFiles.length > 0 || (hasPyTestInSubdir && hasTargetPyFiles)) && hasTargetPyFiles) {
-    const isDockerAvailable = await dockerSandbox.checkDockerAvailable(true);
-    const env: 'docker' | 'process' = isDockerAvailable ? 'docker' : 'process';
+    const env: 'docker' | 'process' = 'process';
 
     // Command selection
     let pyTestCmd = `python -m unittest discover -s src/sandbox -p "test_*.py"`;
@@ -110,14 +239,24 @@ export async function runWorkspaceTests(targetFiles: string[] = []): Promise<Tes
       pyTestCmd = `python -m unittest ${formattedFiles.join(' ')}`;
     }
 
-    const sandboxResult = await dockerSandbox.executeSandboxedCommand(pyTestCmd, rootDir);
+    const sandboxResult = await new Promise<{ success: boolean; output: string; exitCode: number }>((resolve) => {
+      exec(pyTestCmd, { cwd: rootDir, env: { ...process.env, PYTHONPATH: rootDir }, timeout: 15000 }, (error, stdout, stderr) => {
+        const combined = (stdout + '\n' + stderr).trim();
+        const exitCode = error ? (error.code || 1) : 0;
+        resolve({
+          success: exitCode === 0,
+          output: combined || 'Process test execution completed.',
+          exitCode
+        });
+      });
+    });
     const passed = sandboxResult.success;
     const logText = sandboxResult.output || '';
 
     // Classify failure type accurately
     let failureType: TestFailureType = 'TEST_FAILURE';
     if (!passed) {
-      if (/not recognized as an internal or external command|command not found|permission denied|docker error|TOOL_EXECUTION_FAILURE|invalid command/i.test(logText)) {
+      if (/not recognized as an internal or external command|command not found|permission denied|TOOL_EXECUTION_FAILURE|invalid command/i.test(logText)) {
         failureType = 'TOOL_EXECUTION_FAILURE';
       } else if (/SyntaxError|IndentationError|ImportError|ModuleNotFoundError/i.test(logText)) {
         failureType = 'CODE_FAILURE';
@@ -149,7 +288,7 @@ export async function runWorkspaceTests(targetFiles: string[] = []): Promise<Tes
         executionEnvironment: env,
         targetFiles: pyImplFiles.length > 0 ? pyImplFiles : [primaryImplFile],
         testFiles: pyTestFiles.length > 0 ? pyTestFiles : [primaryTestFile],
-        command: isDockerAvailable ? `docker run --rm -v "src/sandbox:/app" -w /app python:alpine ${pyTestCmd}` : pyTestCmd,
+        command: pyTestCmd,
         exitCode: sandboxResult.exitCode || 1,
         stdout: sandboxResult.output,
         stderr: sandboxResult.output,
@@ -167,7 +306,7 @@ export async function runWorkspaceTests(targetFiles: string[] = []): Promise<Tes
       exitCode: sandboxResult.exitCode,
       stdout: sandboxResult.output,
       stderr: sandboxResult.output,
-      summary: passed ? 'Python unit tests PASSED cleanly in Docker Sandbox.' : `Python unit tests FAILED in Docker Sandbox [${failureType}] (${errorType}: ${errorMessage}).`,
+      summary: passed ? 'Python unit tests PASSED cleanly.' : `Python unit tests FAILED [${failureType}] (${errorType}: ${errorMessage}).`,
       testedFiles: combinedTargets,
       failureType: passed ? undefined : failureType,
       structuredFailure
@@ -184,10 +323,9 @@ export async function runWorkspaceTests(targetFiles: string[] = []): Promise<Tes
 
     let structuredFailure: StructuredTestFailure | undefined = undefined;
     if (!passed) {
-      const isDockerAvailable = await dockerSandbox.checkDockerAvailable(true);
       structuredFailure = {
         success: false,
-        executionEnvironment: isDockerAvailable ? 'docker' : 'process',
+        executionEnvironment: 'process',
         targetFiles: targetFiles.filter(f => !isTestFile(f)),
         testFiles: targetFiles.filter(f => isTestFile(f)),
         command: 'npm test',

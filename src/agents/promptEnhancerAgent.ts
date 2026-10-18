@@ -1,4 +1,4 @@
-import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
+import { invokeModel } from '../tools/modelProvider';
 import * as dotenv from 'dotenv';
 import { langfuseTracer } from '../tools/langfuseTracer';
 
@@ -72,19 +72,8 @@ export async function enhanceUserPrompt(rawPrompt: string): Promise<EnhancedProm
     };
   }
 
-  const geminiApiKey = process.env.GEMINI_API_KEY;
-  if (geminiApiKey && geminiApiKey !== 'your_gemini_api_key_here') {
-    const geminiCandidates = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.0-flash'];
-
-    for (const modelName of geminiCandidates) {
-      try {
-        const model = new ChatGoogleGenerativeAI({
-          apiKey: geminiApiKey,
-          model: modelName,
-          temperature: 0.2
-        });
-
-        const systemPrompt = `You are an expert software engineering prompt enhancer.
+  try {
+    const systemPrompt = `You are an expert software engineering prompt enhancer.
 Your task is to take a vague user prompt and expand it into a clear, structured specification.
 
 CRITICAL RULES:
@@ -93,30 +82,23 @@ CRITICAL RULES:
 3. Do NOT invent unrelated features outside the scope of the user's intent.
 4. Output ONLY the enhanced prompt specification.`;
 
-        const startTime = Date.now();
-        const response = await model.invoke([
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `Original User Request:\n"${prompt}"` }
-        ]);
+    const userPrompt = `Original User Request:\n"${prompt}"`;
+    const resultText = await invokeModel(systemPrompt, userPrompt, {
+      agent: 'PromptEnhancerAgent',
+      temperature: 0.2
+    });
 
-        const latencyMs = Date.now() - startTime;
-        const resultText = (typeof response.content === 'string' ? response.content : JSON.stringify(response.content)).trim();
-
-        if (resultText && resultText.length > prompt.length) {
-          await langfuseTracer.recordGeneration('PromptEnhancerAgent', modelName, prompt, resultText, latencyMs, 40, 60);
-
-          const enhanced = `${prompt}\n\n[PROMPT ENHANCER DIRECTIVES]:\n${resultText}`;
-          return {
-            originalPrompt: rawPrompt,
-            enhancedPrompt: enhanced,
-            isEnhanced: true,
-            enhancementReason: `Enhanced using LLM model '${modelName}'.`
-          };
-        }
-      } catch (err: any) {
-        console.warn(`PromptEnhancer model '${modelName}' failed:`, err?.message || err);
-      }
+    if (resultText && resultText.length > prompt.length) {
+      const enhanced = `${prompt}\n\n[PROMPT ENHANCER DIRECTIVES]:\n${resultText}`;
+      return {
+        originalPrompt: rawPrompt,
+        enhancedPrompt: enhanced,
+        isEnhanced: true,
+        enhancementReason: 'Enhanced using consolidated Gemini model provider.'
+      };
     }
+  } catch (err: any) {
+    console.warn('[PromptEnhancer] Model invocation failed, using original prompt:', err?.message || err);
   }
 
   return { originalPrompt: rawPrompt, enhancedPrompt: rawPrompt, isEnhanced: false };
