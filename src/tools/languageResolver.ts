@@ -55,7 +55,7 @@ export function resolveLanguage(prompt: string, targetFiles: string[] = []): Lan
   if (/\b(javascript|js|jsx|nodejs|node\.js)\b/i.test(promptLower)) {
     return { requestedLanguage: 'javascript', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.js' };
   }
-  if (/\b(html|webpage|landing\s+page|website|html5)\b/i.test(promptLower)) {
+  if (/\b(html|webpage|landing\s+page|website|html5|frontend|ui|web\s+app|converter\s+app)\b/i.test(promptLower)) {
     return { requestedLanguage: 'html', source: 'explicit_user_request', confidence: 'high', recommendedExtension: '.html' };
   }
   if (/\b(css|css3|stylesheet|in\s+css)\b/i.test(promptLower)) {
@@ -90,30 +90,46 @@ export function resolveLanguage(prompt: string, targetFiles: string[] = []): Lan
  */
 export function deriveTargetFile(prompt: string, resolvedLang: LanguageResolutionResult): string {
   const ext = resolvedLang.recommendedExtension || '.ts';
+  const sandboxDir = path.resolve(process.cwd(), 'src/sandbox');
 
   if (resolvedLang.requestedLanguage === 'html') return 'src/sandbox/index.html';
   if (resolvedLang.requestedLanguage === 'css') return 'src/sandbox/style.css';
 
-  const canonicalPath = `src/sandbox/main${ext}`;
-  const sandboxDir = path.resolve(process.cwd(), 'src/sandbox');
-
   if (fs.existsSync(sandboxDir)) {
-    // 1. If main.<ext> already exists in src/sandbox/, reuse it!
+    const canonicalPath = `src/sandbox/main${ext}`;
     const canonicalAbs = path.resolve(process.cwd(), canonicalPath);
     if (fs.existsSync(canonicalAbs)) {
       return canonicalPath;
     }
-    // 2. If any existing implementation file matching <ext> exists in src/sandbox/, reuse it!
+
     try {
-      const existingFiles = fs.readdirSync(sandboxDir).filter(f => f.endsWith(ext) && !f.startsWith('test_') && !f.includes('_test.') && !f.includes('.test.'));
-      if (existingFiles.length > 0) {
-        return `src/sandbox/${existingFiles[0]}`;
+      const files = fs.readdirSync(sandboxDir).filter(f => !f.startsWith('test_') && !f.includes('_test.') && !f.includes('.test.') && !f.endsWith('.d.ts') && !f.endsWith('.json'));
+      // 1. If any file matching ext exists, reuse it
+      const matchingExt = files.filter(f => f.endsWith(ext));
+      if (matchingExt.length > 0) {
+        return `src/sandbox/${matchingExt[0]}`;
+      }
+
+      // 2. If confidence is low / project default, check existing user files in sandbox
+      if (resolvedLang.confidence === 'low' && files.length > 0) {
+        const promptLower = (prompt || '').toLowerCase();
+        for (const file of files) {
+          const baseNoExt = file.replace(/\.[^/.]+$/, '').toLowerCase();
+          if (promptLower.includes(baseNoExt)) {
+            return `src/sandbox/${file}`;
+          }
+        }
+        if (files.includes('index.html') && /\b(app|ui|page|screen|view|converter|image|photo|artwork|button|handler)\b/i.test(promptLower)) {
+          return 'src/sandbox/index.html';
+        }
+        if (files.length === 1) {
+          return `src/sandbox/${files[0]}`;
+        }
       }
     } catch { }
   }
 
-  // 3. Fall back to canonical main.<ext>
-  return canonicalPath;
+  return `src/sandbox/main${ext}`;
 }
 
 /**

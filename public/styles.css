@@ -311,6 +311,12 @@ body {
   border-color: var(--primary);
 }
 
+.icon-btn-secondary.active {
+  background: rgba(99, 102, 241, 0.2);
+  border-color: #818cf8;
+  color: #c7d2fe;
+}
+
 /* Main Body Split Panes */
 .main-body {
   display: grid;

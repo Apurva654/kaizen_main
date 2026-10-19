@@ -2169,6 +2169,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const graphifySearchInput = document.getElementById('graphify-search-input');
   const graphifyBtnFit = document.getElementById('graphify-btn-fit');
+  const graphifyBtnFreeze = document.getElementById('graphify-btn-freeze');
   const graphifyBtnRefresh = document.getElementById('graphify-btn-refresh');
   const graphifyBtnLegend = document.getElementById('graphify-btn-legend');
   const graphifyLegendPanel = document.getElementById('graphify-legend-panel');
@@ -2179,6 +2180,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let visNetworkInstance = null;
   let currentGraphData = null;
   let activeSelectedNode = null;
+  let isPhysicsFrozen = true;
 
   function switchCenterView(viewName) {
     if (viewName === 'graphify') {
@@ -2224,6 +2226,26 @@ document.addEventListener('DOMContentLoaded', () => {
   if (graphifyBtnFit) {
     graphifyBtnFit.addEventListener('click', () => {
       if (visNetworkInstance) visNetworkInstance.fit({ animation: true });
+    });
+  }
+
+  if (graphifyBtnFreeze) {
+    graphifyBtnFreeze.addEventListener('click', () => {
+      if (!visNetworkInstance) return;
+      isPhysicsFrozen = !isPhysicsFrozen;
+      if (isPhysicsFrozen) {
+        visNetworkInstance.setOptions({ physics: { enabled: false } });
+        graphifyBtnFreeze.innerHTML = '🔒 Static';
+        graphifyBtnFreeze.title = 'Graph physics locked. Click to enable floating simulation.';
+        graphifyBtnFreeze.classList.add('active');
+        showToast('Graph physics locked (stationary layout)', 'info');
+      } else {
+        visNetworkInstance.setOptions({ physics: { enabled: true } });
+        graphifyBtnFreeze.innerHTML = '⚡ Float';
+        graphifyBtnFreeze.title = 'Graph physics floating. Click to lock layout.';
+        graphifyBtnFreeze.classList.remove('active');
+        showToast('Graph physics enabled', 'info');
+      }
     });
   }
 
@@ -2414,26 +2436,29 @@ document.addEventListener('DOMContentLoaded', () => {
       physics: {
         solver: isLargeGraph ? 'forceAtlas2Based' : 'barnesHut',
         barnesHut: {
-          gravitationalConstant: -2500,
-          centralGravity: 0.12,
-          springLength: 160,
-          springConstant: 0.04,
-          damping: 0.09,
-          avoidOverlap: 0.8
+          gravitationalConstant: -1200,
+          centralGravity: 0.35,
+          springLength: 110,
+          springConstant: 0.05,
+          damping: 0.58,
+          avoidOverlap: 0.6
         },
         forceAtlas2Based: {
-          gravitationalConstant: -40,
-          centralGravity: 0.01,
-          springLength: 120,
-          springConstant: 0.08
+          gravitationalConstant: -30,
+          centralGravity: 0.15,
+          springLength: 90,
+          springConstant: 0.08,
+          damping: 0.65,
+          avoidOverlap: 0.7
         },
-        maxVelocity: 50,
-        minVelocity: 0.75,
-        timestep: 0.35,
+        maxVelocity: 25,
+        minVelocity: 0.1,
+        timestep: 0.4,
         stabilization: {
           enabled: true,
-          iterations: isLargeGraph ? 60 : 180,
-          updateInterval: 25
+          iterations: isLargeGraph ? 100 : 220,
+          updateInterval: 25,
+          fit: true
         }
       },
       nodes: { borderWidth: 2 },
@@ -2451,6 +2476,34 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (visNetworkInstance) visNetworkInstance.destroy();
     visNetworkInstance = new vis.Network(container, networkData, options);
+
+    // Freeze physics once stabilization completes so the graph NEVER flies away or bounces perpetually
+    function freezeGraphPhysics() {
+      if (!visNetworkInstance) return;
+      visNetworkInstance.setOptions({ physics: { enabled: false } });
+      isPhysicsFrozen = true;
+      if (graphifyBtnFreeze) {
+        graphifyBtnFreeze.innerHTML = '🔒 Static';
+        graphifyBtnFreeze.title = 'Graph physics locked. Click to enable floating simulation.';
+        graphifyBtnFreeze.classList.add('active');
+      }
+      visNetworkInstance.fit({ animation: { duration: 500, easingFunction: 'easeInOutQuad' } });
+    }
+
+    visNetworkInstance.once('stabilizationIterationsDone', () => {
+      freezeGraphPhysics();
+    });
+
+    visNetworkInstance.once('stabilized', () => {
+      freezeGraphPhysics();
+    });
+
+    // Safety timeout: Ensure simulation is frozen within 1.5 seconds even if events trigger out of order
+    setTimeout(() => {
+      if (visNetworkInstance && isPhysicsFrozen !== true) {
+        freezeGraphPhysics();
+      }
+    }, 1500);
 
     visNetworkInstance.on('selectNode', (params) => {
       if (params.nodes.length > 0) {

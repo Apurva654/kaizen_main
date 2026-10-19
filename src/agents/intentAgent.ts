@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { KaizenState } from '../state';
 import { langfuseTracer } from '../tools/langfuseTracer';
+import { normalizeSandboxPath } from '../tools/sandboxPathUtils';
 
 dotenv.config();
 
@@ -42,6 +43,75 @@ export function extractRawUserPrompt(input: string): string {
 
 export function escapeRegExp(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Detects whether the input prompt contains concrete error evidence:
+ * - JS/Python error class names (TypeError, ReferenceError, SyntaxError, RangeError, Traceback, Exception, AssertionError, NullPointerException)
+ * - Stack-frame patterns (`at fn (file:line:col)`, `at file:line:col`, `file.ext:line`)
+ * - TS\d{4} (TypeScript compiler error codes)
+ * - ENOENT / MODULE_NOT_FOUND system error codes
+ * - "failing test", "assertion", "exit code"
+ */
+export function hasErrorEvidence(prompt: string): boolean {
+  if (!prompt || typeof prompt !== 'string') return false;
+  const p = prompt;
+  const hasErrorClass = /\b(TypeError|ReferenceError|SyntaxError|RangeError|URIError|AssertionError|Traceback|Exception|NullPointerException)\b/i.test(p);
+  const hasStackFrame = /\bat\s+(?:[a-zA-Z0-9_$<>.]+\s+\()?[a-zA-Z0-9_\-\.\/\\:]+:\d+(?::\d+)?\)?/i.test(p) ||
+                        /\b[a-zA-Z0-9_\-]+\.(?:ts|js|py|html|css|json|cpp|c|java):\d+\b/i.test(p);
+  const hasTsCode = /\bTS\d{4}\b/i.test(p);
+  const hasSysError = /\b(ENOENT|MODULE_NOT_FOUND|EACCES|ECONNREFUSED)\b/i.test(p);
+  const hasTestFailure = /\b(failing\s+test|test\s+fail(ed|ures?)|assertions?|exit\s+code\s+\d+)\b/i.test(p);
+
+  return hasErrorClass || hasStackFrame || hasTsCode || hasSysError || hasTestFailure;
+}
+
+/**
+ * Detects whether the input prompt contains enhancement / upgrade / feature addition intent:
+ * upgrade|enhance|improve|extend|overhaul|revamp|redesign|polish|rewrite|add (feature|support)|implement|build|make it better.
+ */
+export function hasEnhancementIntent(prompt: string): boolean {
+  if (!prompt || typeof prompt !== 'string') return false;
+  return /\b(upgrade|enhance|improve|extend|overhaul|revamp|redesign|polish|rewrite|add\s+(feature|support)|implement|build|make\s+it\s+better)\b/i.test(prompt);
+}
+
+function logReconciledIntent(from: string, to: string, reason: string) {
+  console.log('[KAIZEN][INTENT] RECONCILED', JSON.stringify({ from, to, reason }));
+}
+
+/**
+ * Reconciles the classified intent against concrete evidence and enhancement wording:
+ * - DEBUG_ERROR or RUN_EXISTING_TESTS with !hasErrorEvidence && hasEnhancementIntent
+ *   -> GENERATE_CODE (or REFACTOR if prompt says refactor/clean up/restructure and does not ask for new behaviour)
+ * - DEBUG_ERROR with !hasErrorEvidence && no "fix|bug|broken|not working|crash" wording
+ *   -> GENERATE_CODE
+ */
+export function reconcileIntent(intent: string, prompt: string): string {
+  const p = prompt || '';
+  const hasEvidence = hasErrorEvidence(p);
+  const hasEnhance = hasEnhancementIntent(p);
+  const isRefactorPrompt = /\b(refactor|clean\s+up|restructure|optimize|simplify|into\s+modules|reorganize)\b/i.test(p);
+  const asksNewBehavior = /\b(add\s+(feature|support)|new\s+feature|build|implement|upgrade|extend)\b/i.test(p);
+
+  if ((intent === 'DEBUG_ERROR' || intent === 'RUN_EXISTING_TESTS') && !hasEvidence && (hasEnhance || isRefactorPrompt)) {
+    if (isRefactorPrompt && !asksNewBehavior) {
+      logReconciledIntent(intent, 'REFACTOR', 'Refactor request without error evidence');
+      return 'REFACTOR';
+    }
+    logReconciledIntent(intent, 'GENERATE_CODE', 'Enhancement wording present without error evidence');
+    return 'GENERATE_CODE';
+  }
+
+  if (intent === 'DEBUG_ERROR' && !hasEvidence && !/\b(fix|bug|broken|not\s+working|crash)\b/i.test(p)) {
+    if (isRefactorPrompt && !asksNewBehavior) {
+      logReconciledIntent(intent, 'REFACTOR', 'Refactor request without error evidence');
+      return 'REFACTOR';
+    }
+    logReconciledIntent(intent, 'GENERATE_CODE', 'DEBUG_ERROR without error evidence or fix/bug keywords');
+    return 'GENERATE_CODE';
+  }
+
+  return intent;
 }
 
 export function isCommandInquiryOrExplanation(rawPrompt: string): boolean {
@@ -317,13 +387,21 @@ export function isBrowserQuery(input: string): boolean {
   if (!rawPrompt) return false;
 
   // Do NOT classify as code mutation if prompt contains explicit read-only / execution / non-mutation directives
-  const isExplicitReadOnly = /\b(do\s+not\s+modify|don't\s+modify|read[\s-]*only|existing|without\s+modifying|just\s+inspect|only\s+inspect|inspect\s+only)\b/i.test(rawPrompt);
+  const isExplicitReadOnly = /\b(do\s+not\s+modify|don't\s+modify|read[\s-]*only|without\s+modifying|just\s+inspect|only\s+inspect|inspect\s+only)\b/i.test(rawPrompt);
+
+  const buildVerbsRegex = /\b(build|create|implement|modify|edit|add|write|make|refactor|fix|update|upgrade|improve|extend|enhance|overhaul|revamp|polish|develop)\b/i;
+
+  // A prompt containing the word "existing" together with a build verb is ALWAYS a code mutation, NEVER a read-only browser query
+  const hasExistingWithBuildVerb = /\bexisting\b/i.test(rawPrompt) && buildVerbsRegex.test(rawPrompt);
+  if (hasExistingWithBuildVerb) {
+    return false;
+  }
 
   // Check for explicit code creation, editing, debugging, or testing requests
   const hasCodeMutationOrFix = !isExplicitReadOnly && (
-    /\b(fix|repair|resolve|patch|modify|edit|update|implement|add|write|create|build|refactor|change)\b.*?\b(code|button|bug|error|issue|feature|component|file|page|script|style|css|html|function|app|ui)\b/i.test(rawPrompt) ||
+    /\b(fix|repair|resolve|patch|modify|edit|update|upgrade|improve|extend|enhance|overhaul|revamp|polish|implement|add|write|create|build|refactor|change)\b.*?\b(code|button|bug|error|issue|feature|component|file|page|script|style|css|html|function|app|ui|game|project)\b/i.test(rawPrompt) ||
     /\b(fix|repair|resolve|patch)\s+(the\s+)?(broken|failing|error|bug|issue|button)\b/i.test(rawPrompt) ||
-    /^\s*(build|create|implement|modify|edit|add|write|make|refactor|fix|update)\b/i.test(rawPrompt)
+    /^\s*(build|create|implement|modify|edit|add|write|make|refactor|fix|update|upgrade|improve|extend|enhance|overhaul|revamp|polish)\b/i.test(rawPrompt)
   );
 
   const hasTestRequest = !isExplicitReadOnly && /\b(run\s+test|run\s+tests|test\s+suite|run\s+npm\s+test|run\s+pytest)\b/i.test(rawPrompt);
@@ -537,20 +615,6 @@ export function extractTargetFilesFromPrompt(prompt: string): string[] {
   const rawPrompt = extractRawUserPrompt(prompt);
   const foundFiles: string[] = [];
 
-  const normalizePath = (f: string): string => {
-    if (!f) return 'src/sandbox/main.ts';
-    let norm = f.replace(/\\/g, '/').trim();
-    norm = norm.replace(/^\.\//, '');
-    if (!norm.startsWith('src/sandbox/')) {
-      if (norm.startsWith('src/')) {
-        norm = norm.replace(/^src\//, 'src/sandbox/');
-      } else {
-        norm = `src/sandbox/${norm}`;
-      }
-    }
-    return norm;
-  };
-
   const FRAMEWORK_AND_LIB_NAMES = new Set([
     'three.js', 'express.js', 'node.js', 'vue.js', 'react.js', 'next.js',
     'chart.js', 'anime.js', 'd3.js', 'day.js', 'moment.js', 'socket.io',
@@ -565,8 +629,8 @@ export function extractTargetFilesFromPrompt(prompt: string): string[] {
     if (FRAMEWORK_AND_LIB_NAMES.has(baseName)) {
       continue;
     }
-    const norm = normalizePath(rawMatch);
-    if (!foundFiles.includes(norm)) {
+    const norm = normalizeSandboxPath(rawMatch);
+    if (norm && !foundFiles.includes(norm)) {
       foundFiles.push(norm);
     }
   }
@@ -584,8 +648,8 @@ export function extractTargetFilesFromPrompt(prompt: string): string[] {
       const fileName = parts.pop()!;
       const dirName = parts.join('/');
       const baseName = fileName.replace(/\.py$/, '');
-      const testFile = `${dirName}/test_${baseName}.py`;
-      if (!foundFiles.includes(testFile)) {
+      const testFile = normalizeSandboxPath(`${dirName}/test_${baseName}.py`);
+      if (testFile && !foundFiles.includes(testFile)) {
         foundFiles.push(testFile);
       }
     } else if (isTs && !foundFiles.some(f => f.includes('test'))) {
@@ -593,14 +657,14 @@ export function extractTargetFilesFromPrompt(prompt: string): string[] {
       const fileName = parts.pop()!;
       const dirName = parts.join('/');
       const baseName = fileName.replace(/\.(ts|js)$/, '');
-      const testFile = `${dirName}/tests/${baseName}.test.ts`;
-      if (!foundFiles.includes(testFile)) {
+      const testFile = normalizeSandboxPath(`${dirName}/tests/${baseName}.test.ts`);
+      if (testFile && !foundFiles.includes(testFile)) {
         foundFiles.push(testFile);
       }
     }
   }
 
-  return foundFiles;
+  return Array.from(new Set(foundFiles.map(normalizeSandboxPath).filter(Boolean)));
 }
 
 export async function intentAgentNode(state: typeof KaizenState.State): Promise<{ status: string; targetFiles: string[]; requestedLanguage: string; languageInfo: any }> {
@@ -714,8 +778,8 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
         const systemPrompt = `You are an intent classification and target file selector agent. Respond in valid json format.
 Analyze the user's prompt and classify their primary intent into one of:
 - GENERAL_QUERY: General knowledge, greetings, questions about programming concepts (e.g. "what is a binary search tree"), or questions unrelated to modifying codebase files.
-- GENERATE_CODE: Creating new features, boilerplate, writing new files, implementing requested functionality.
-- DEBUG_ERROR: Fixing bugs, addressing runtime errors, broken builds, or troubleshooting code in workspace files.
+- GENERATE_CODE: Creating new features, boilerplate, writing new files, implementing requested functionality, or requests to upgrade, enhance, improve, extend, overhaul, revamp, or polish existing code, even if the project already exists.
+- DEBUG_ERROR: DEBUG_ERROR only when the user reports a concrete failure (error message, stack trace, failing test, or specific broken behaviour). Requests to upgrade, enhance, improve or extend existing code are GENERATE_CODE, even if the project already exists.
 - EXPLAIN_CODE: Explaining how codebase code works, answering architecture/codebase questions, explaining commands.
 - REFACTOR: Cleaning up code, optimizing performance, renaming, removing unused imports, or restructuring existing code without changing behavior.
 - RUN_EXISTING_TESTS: Executing existing test suite, verifying test pass/fail status.
@@ -729,7 +793,7 @@ Rules:
 1. For GENERAL_QUERY, MCP_GIT, MCP_TERMINAL, DELETE_FILES, MEMORY_WRITE, and MEMORY_READ, targetFiles must be an empty array [].
 2. If the user asks to explain a command (e.g. "what does git status do?"), classify as EXPLAIN_CODE or GENERAL_QUERY, NOT MCP_GIT.
 3. If the user asks to delete code within a file (e.g. "delete unused imports"), classify as REFACTOR, NOT DELETE_FILES.
-4. If the prompt contains a sequence of actions where code must be fixed or modified (e.g. "Open index.html and fix the broken button"), prioritize the primary code modification intent (DEBUG_ERROR or GENERATE_CODE).
+4. DEBUG_ERROR only when the user reports a concrete failure (error message, stack trace, failing test, or specific broken behaviour). Requests to upgrade, enhance, improve or extend existing code are GENERATE_CODE, even if the project already exists.
 5. Only identify real target source files mentioned or implied; do not hallucinate arbitrary filenames.`;
 
         const startTime = Date.now();
@@ -781,7 +845,7 @@ Rules:
           return { status: 'ROUTED_MCP_TERMINAL', targetFiles: [], requestedLanguage, languageInfo };
         }
         if (intent === 'DELETE_FILES') {
-          return { status: 'ROUTED_DELETE_FILES', targetFiles: promptExtracted, requestedLanguage, languageInfo };
+          return { status: 'ROUTED_DELETE_FILES', targetFiles: promptExtracted.map(normalizeSandboxPath).filter(Boolean), requestedLanguage, languageInfo };
         }
 
         const rawFiles = result.targetFiles || result.target_files;
@@ -801,20 +865,14 @@ Rules:
           extractedFiles = [deriveTargetFile(state.userInput, langRes)];
         }
 
-        extractedFiles = extractedFiles.map((f: string) => {
-          if (!f.includes('/') && !f.includes('\\')) {
-            return `src/sandbox/${f}`;
-          }
-          return f.replace(/\\/g, '/');
-        });
+        const normalizedFiles = Array.from(new Set<string>(
+          extractedFiles.map(normalizeSandboxPath).filter(Boolean)
+        ));
 
-        for (const pe of promptExtracted) {
-          if (!extractedFiles.includes(pe)) extractedFiles.push(pe);
-        }
-
+        const reconciled = reconcileIntent(intent, state.userInput);
         return {
-          status: `ROUTED_${intent}`,
-          targetFiles: Array.from(new Set<string>(extractedFiles)),
+          status: `ROUTED_${reconciled}`,
+          targetFiles: normalizedFiles,
           requestedLanguage,
           languageInfo
         };
@@ -851,23 +909,33 @@ Rules:
   const isTestRequest = /\b(run|execute)\s+(the\s+)?(existing\s+)?(tests?|test\s+suite|unit\s+tests?|pytest|specs?)\b/i.test(input) ||
     /\b(run\s+tests?|run\s+npm\s+test|run\s+pytest)\b/i.test(input);
 
-  // 4. Debug / Bug fix requests (with negation guard)
+  // Feature upgrade / enhancement requests (must take precedence over partial "fix" words inside feature descriptions)
+  const isFeatureUpgrade = /^\s*(upgrade|improve|extend|enhance|overhaul|revamp|polish|build|create|add|implement)\b/i.test(input) ||
+    /\b(upgrade|improve|extend|enhance|overhaul|revamp|polish)\s+(the\s+)?(existing\s+)?/i.test(input) ||
+    hasEnhancementIntent(input);
+
+  // 4. Debug / Bug fix requests (with negation guard and explicit error diagnostics)
   const isNegatedFix = /\b(do\s+not|don't|without)\s+(fix|debug|repair)\b/i.test(input);
-  const isBugFix = !isNegatedFix && (
-    /\b(fix|debug|repair|solve|resolve|patch)\s+(the\s+)?(bug|error|issue|problem|failure|crash|exception|failing)\b/i.test(input) ||
-    /\b(fix|resolve)\s+.*?\b(broken|button|code|error|issue)\b/i.test(input) ||
-    /\b(typeerror|syntaxerror|referenceerror|runtime\s+error|build\s+error)\b/i.test(input)
+  const isExplicitErrorDiagnostic = hasErrorEvidence(input);
+  const isBugFix = !isNegatedFix && !isFeatureUpgrade && (
+    isExplicitErrorDiagnostic ||
+    (/\b(fix|debug|repair|solve|resolve|patch)\b.*?\b(bug|error|crash|exception|failing|broken)\b.*?\b([a-zA-Z0-9_\-\/]+\.(ts|js|py|html|css|json|cpp|c|java))\b/i.test(input)) ||
+    (/\b(fix|debug|repair|solve|resolve|patch)\s+(the\s+)?(bug|error|crash|exception|failing)\b/i.test(input) &&
+      (/\b([a-zA-Z0-9_\-\/]+\.(ts|js|py|html|css|json|cpp|c|java))\b/i.test(input) || isExplicitErrorDiagnostic)
+    )
   );
 
   // 5. Code explanation requests
   const isExplain = /\b(explain|how\s+does|walk\s+through|overview\s+of|describe|what\s+does)\b/i.test(input);
 
   // 6. Refactor requests
-  const isRefactor = /\b(refactor|clean\s+up|optimize|restructure|reorganize|simplify|rename|remove\s+unused)\b/i.test(input);
+  const isRefactor = /\b(refactor|clean\s+up|optimize|restructure|reorganize|into\s+modules|simplify|rename|remove\s+unused)\b/i.test(input);
 
   // 7. Explicit code creation/generation requests
-  const isCodeGen = /\b(create|make|write|implement|build|add|generate|develop|scaffold|code)\b.*?\b(file|function|class|script|module|component|code|calculator|app|service|endpoint)\b/i.test(input) ||
-    /^\s*(create|make|write|implement|build|add|generate)\b/i.test(input) ||
+  const isCodeGen = isFeatureUpgrade ||
+    hasEnhancementIntent(input) ||
+    /\b(create|make|write|implement|build|add|generate|develop|scaffold|code|upgrade|improve|extend|enhance|overhaul|revamp|redesign|polish|rewrite)\b.*?\b(file|function|class|script|module|component|code|calculator|app|service|endpoint|api|game|project|ui|page|feature|form|minimap|physics|system|backend|frontend)\b/i.test(input) ||
+    /^\s*(create|make|write|implement|build|add|generate|develop|scaffold|upgrade|improve|extend|enhance|overhaul|revamp|redesign|polish|rewrite|update)\b/i.test(input) ||
     promptExtracted.length > 0;
 
   let fallbackIntent: z.infer<typeof IntentSchema>['intent'] = 'GENERATE_CODE';
@@ -893,6 +961,8 @@ Rules:
     };
   }
 
+  const finalReconciled = reconcileIntent(fallbackIntent, state.userInput);
+
   let finalTargets: string[];
   if (promptExtracted.length > 0) {
     finalTargets = promptExtracted;
@@ -902,9 +972,13 @@ Rules:
     finalTargets = [deriveTargetFile(state.userInput, langRes)];
   }
 
+  const normalizedFinalTargets = Array.from(new Set<string>(
+    finalTargets.map(normalizeSandboxPath).filter(Boolean)
+  ));
+
   return {
-    status: `ROUTED_${fallbackIntent}`,
-    targetFiles: Array.from(new Set<string>(finalTargets)),
+    status: `ROUTED_${finalReconciled}`,
+    targetFiles: normalizedFinalTargets,
     requestedLanguage,
     languageInfo
   };

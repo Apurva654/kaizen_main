@@ -146,6 +146,19 @@ export class LangfuseTracerManager {
     return metrics;
   }
 
+  public recordSpan(name: string, metadata: Record<string, any>) {
+    if (this.isEnabled && this.langfuseClient) {
+      try {
+        this.langfuseClient.trace({
+          name: `Kaizen_${name}`,
+          metadata
+        });
+      } catch (err) {
+        console.warn("[Langfuse Tracer] Warning sending trace span:", err);
+      }
+    }
+  }
+
   public getRecordedTraces(): LLMMetrics[] {
     return this.recordedTraces;
   }

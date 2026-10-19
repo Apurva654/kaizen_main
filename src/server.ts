@@ -8,7 +8,7 @@ import { promisify } from 'util';
 const execAsync = promisify(exec);
 import * as universalValidator from './tools/universalValidator';
 import { KaizenStateType, applyStateReducers } from './state';
-import { intentAgentNode, extractTerminalCommand, extractGitActions, extractBrowserUrl } from './agents/intentAgent';
+import { intentAgentNode, extractTerminalCommand, extractGitActions, extractBrowserUrl, hasErrorEvidence } from './agents/intentAgent';
 import { contextRetrievalAgentNode } from './agents/contextRetrievalAgent';
 import { evaluateContextSufficiency } from './agents/contextSufficiencyAgent';
 import { plannerAgentNode } from './agents/plannerAgent';
@@ -17,7 +17,7 @@ import { reviewerAgentNode } from './agents/reviewerAgent';
 import { debuggerAgentNode } from './agents/debuggerAgent';
 import { langfuseTracer } from './tools/langfuseTracer';
 import { persistenceEngine } from './tools/persistenceEngine';
-import { runWorkspaceTests, extractFailingFilesFromLogs } from './tools/testRunner';
+import { runWorkspaceTests, extractFailingFilesFromLogs, TestExecutionResult } from './tools/testRunner';
 import { preprocessUserRequest, saveAgentState, loadAgentState, recordConversationTurn } from './context/contextManager';
 import { memoryEngine } from './context/memory/memoryEngine';
 import { ocrService } from './tools/ocrService';
@@ -29,6 +29,8 @@ import { GraphifyEngine } from './tools/graphifyEngine';
 import { githubAuthManager } from './tools/githubAuthManager';
 import { getActiveModelProvider, DEFAULT_GEMINI_MODELS } from './tools/modelProvider';
 import { workspaceManager } from './tools/workspaceManager';
+import { isTestFile } from './tools/sandboxPathUtils';
+import { failureSignature, patchHash, createHealGuardTracker } from './tools/healGuard';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -516,6 +518,27 @@ app.post('/api/hitl/respond', (req: Request, res: Response) => {
   return res.json({ status: 'acknowledged', success: true, message: 'HITL response acknowledged.' });
 });
 
+export function resolvePendingHitl(
+  sessionId?: string,
+  action: 'approve' | 'reject' | 'feedback' = 'approve',
+  message?: string
+): boolean {
+  let entryIndex = -1;
+  if (sessionId) {
+    entryIndex = hitlPendingQueue.findIndex(e => e.sessionId === sessionId);
+  }
+  if (entryIndex === -1 && hitlPendingQueue.length > 0) {
+    entryIndex = 0;
+  }
+  if (entryIndex !== -1) {
+    const [entry] = hitlPendingQueue.splice(entryIndex, 1);
+    clearTimeout(entry.timer);
+    entry.resolve({ action, message });
+    return true;
+  }
+  return false;
+}
+
 // Graphify Explorer REST API Endpoints
 app.get('/api/graphify/current', async (req: Request, res: Response) => {
   try {
@@ -844,7 +867,8 @@ export async function runPipeline(
   rawUserInput: string,
   imagePayload?: string,
   clientSessionId?: string,
-  cliCallback?: (eventType: string, data: any) => void
+  cliCallback?: (eventType: string, data: any) => void,
+  pipelineOptions?: { initialStatus?: string }
 ): Promise<KaizenStateType> {
   const sessionId = clientSessionId || persistenceEngine.generateSessionId();
   const runId = `run_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -975,6 +999,13 @@ export async function runPipeline(
       recordConversationTurn(rawUserInput, extraData.explanation || 'Task executed successfully.');
     }
 
+    const vLevel = extraData.verificationLevel ||
+      (extraData.testResult as any)?.verificationLevel ||
+      ((state as any).testResult as any)?.verificationLevel;
+    const vNote = extraData.verificationNote ||
+      (extraData.testResult as any)?.verificationNote ||
+      ((state as any).testResult as any)?.verificationNote;
+
     emitSSE('pipeline_complete', {
       sessionId,
       status: finalStatus,
@@ -983,6 +1014,8 @@ export async function runPipeline(
       completedStages,
       skippedStages,
       retryCount: state.retryCount,
+      verificationLevel: vLevel,
+      verificationNote: vNote,
       ...extraData
     });
   };
@@ -1032,8 +1065,9 @@ export async function runPipeline(
     logDiagnostic('GRAPH', 'ENTER IntentAgent', { userInput });
     emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: 'Classifying user intent...' });
     const intentOutput = await intentAgentNode(state);
+    const effectiveStatus = pipelineOptions?.initialStatus || intentOutput.status;
     updateState({
-      status: intentOutput.status,
+      status: effectiveStatus,
       targetFiles: intentOutput.targetFiles,
       requestedLanguage: intentOutput.requestedLanguage,
       languageInfo: intentOutput.languageInfo,
@@ -1523,7 +1557,9 @@ export async function runPipeline(
     emitSSE('agent_step', { agent: 'ContextSufficiencyCheck', status: 'running', message: 'Evaluating prompt & codebase context sufficiency...' });
     const sufficiencyResult = await evaluateContextSufficiency(state);
 
-    if (sufficiencyResult.sufficiency === 'INSUFFICIENT_CONTEXT') {
+    if (sufficiencyResult.sufficiency === 'INSUFFICIENT_CONTEXT' &&
+        state.status !== "ROUTED_RUN_EXISTING_TESTS" &&
+        state.status !== "ROUTED_DEBUG_ERROR") {
       skippedStages.push('planner', 'coder', 'testrunner', 'debugger', 'reviewer');
       completedStages.push('context_check', 'response');
 
@@ -1582,76 +1618,21 @@ export async function runPipeline(
         result: { summary: testResult.summary, passed: testResult.passed }
       });
 
-      const MAX_SELF_HEAL_RETRIES = 3;
+      let healResult: SelfHealLoopResult | undefined;
       if (!testResult.passed) {
-        logDiagnostic('SELF_HEAL', 'INITIATING_LOOP', { maxRetries: MAX_SELF_HEAL_RETRIES });
-        state.errorsEncountered = (state.errorsEncountered || 0) + 1;
-        if (testResult.structuredFailure) {
-          state.structuredFailures = [...(state.structuredFailures || []), testResult.structuredFailure];
-        }
-
-        while (!testResult.passed && state.retryCount < MAX_SELF_HEAL_RETRIES) {
-          state.retryCount += 1;
-
-          const discoveredFiles = extractFailingFilesFromLogs(`${testResult.summary}\n${testResult.stdout}\n${testResult.stderr}`);
-          if (discoveredFiles.length > 0) {
-            state.targetFiles = Array.from(new Set([...state.targetFiles, ...discoveredFiles]));
-          }
-
-          logDiagnostic('GRAPH', 'ENTER DebuggerAgent', { attempt: state.retryCount, targetFiles: state.targetFiles });
-          emitSSE('agent_step', {
-            agent: 'DebuggerAgent',
-            status: 'running',
-            message: `Self-Healing Test Failure Diagnosis (Attempt #${state.retryCount}/${MAX_SELF_HEAL_RETRIES})...`
-          });
-
-          state.failureDetails = {
-            summary: testResult.summary,
-            stdout: testResult.stdout,
-            stderr: testResult.stderr,
-            structuredFailure: testResult.structuredFailure
-          };
-
-          state.testLogs = `[AUTOMATED TEST FAILURE REPORT - ATTEMPT #${state.retryCount}]:\n${testResult.summary}\nSTDOUT:\n${testResult.stdout}\nSTDERR:\n${testResult.stderr}\nPlease diagnose the root cause and generate fixed patches to make tests pass.`;
-
-          const debugResult = await debuggerAgentNode(state);
-          completedStages.push('debugger');
-          logDiagnostic('GRAPH', 'EXIT DebuggerAgent', { rootCause: debugResult.rootCause, patches: debugResult.filePatches.length });
-
-          const validPatches = (debugResult.filePatches || []).filter(p => !isTestFile(p.filePath) && !isProtectedFile(p.filePath));
-
-          if (validPatches.length > 0) {
-            saveFilePatchesToServerDisk(validPatches);
-            appliedDebuggerPatches.push(...validPatches);
-            completedStages.push('coder');
-            emitSSE('agent_step', {
-              agent: 'CoderAgent',
-              status: 'completed',
-              result: { filePatches: validPatches, diffCards: await prepareDiffCards(validPatches, state.originalSnapshots) }
-            });
-          }
-          persistenceEngine.saveCheckpoint(sessionId, `DebuggerAgent_Retry_${state.retryCount}`, state);
-
-          emitSSE('agent_step', {
-            agent: 'DebuggerAgent',
-            status: 'completed',
-            result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation }
-          });
-
-          logDiagnostic('GRAPH', 'RE-ENTER TestRunnerAgent', { attempt: state.retryCount });
-          emitSSE('agent_step', { agent: 'TestRunnerAgent', status: 'running', message: `Re-running unit tests after self-healing bug fix (Attempt #${state.retryCount})...` });
-          testResult = await runWorkspaceTests(state.targetFiles);
-          logDiagnostic('TEST', 'RE_RUN_RESULT', { passed: testResult.passed, attempt: state.retryCount });
-
-          if (!testResult.passed) {
-            state.errorsEncountered = (state.errorsEncountered || 0) + 1;
-            if (testResult.structuredFailure) {
-              state.structuredFailures = [...(state.structuredFailures || []), testResult.structuredFailure];
-            }
-          }
-
-          emitSSE('agent_step', { agent: 'TestRunnerAgent', status: 'completed', result: { summary: testResult.summary, passed: testResult.passed } });
-        }
+        healResult = await runSelfHealLoop({
+          state,
+          testResult,
+          emitSSE,
+          sessionId,
+          mode: 'A',
+          appliedDebuggerPatches,
+          completedStages,
+          sessionSnapshots,
+          saveFilePatchesToServerDisk,
+          prepareDiffCards
+        });
+        testResult = healResult.testResult;
       } else {
         if (state.status === "ROUTED_DEBUG_ERROR") {
           // User requested debugging an error (e.g. stack trace or code issue in prompt), but unit tests passed or were missing on disk
@@ -1670,6 +1651,30 @@ export async function runPipeline(
               completedStages.push('coder');
               testResult = await runWorkspaceTests(state.targetFiles);
             }
+          } else {
+            // Safety Net: If zero patches returned and prompt lacks concrete error evidence, reroute to Code Generation workflow
+            if (!hasErrorEvidence(rawUserInput)) {
+              logDiagnostic('SAFETY_NET', 'REROUTING_DEBUG_TO_GENERATE', { prompt: rawUserInput, rootCause: debugResult.rootCause });
+              emitSSE('agent_step', {
+                agent: 'DebuggerAgent',
+                status: 'completed',
+                message: 'No active runtime error diagnosed and no error evidence in prompt. Rerouting to Planner & Code Generation workflow...'
+              });
+              state.status = 'ROUTED_GENERATE_CODE';
+              const pIdx = skippedStages.indexOf('planner');
+              if (pIdx >= 0) skippedStages.splice(pIdx, 1);
+              const cIdx = skippedStages.indexOf('coder');
+              if (cIdx >= 0) skippedStages.splice(cIdx, 1);
+            } else {
+              // Finalize with debugger's rootCause, not a generic message
+              await finalizeExecution('FAILED', {
+                error: debugResult.rootCause || 'Debugger could not identify a safe patch for the reported error.',
+                rootCause: debugResult.rootCause,
+                failureReason: debugResult.failureReason,
+                testResult
+              });
+              return state;
+            }
           }
         } else {
           skippedStages.push('debugger');
@@ -1677,38 +1682,46 @@ export async function runPipeline(
         }
       }
 
-      if (testResult.passed) {
-        logDiagnostic('GRAPH', 'ENTER ReviewerAgent', { state: 'post_test_pass' });
-        emitSSE('agent_step', { agent: 'ReviewerAgent', status: 'running', message: 'Performing automated code review & quality audit...' });
-        const reviewResult = await reviewerAgentNode(state);
-        completedStages.push('reviewer');
-        logDiagnostic('GRAPH', 'EXIT ReviewerAgent', { approved: reviewResult.approved });
+      // If safely rerouted to GENERATE_CODE, fall through to Branch B instead of returning
+      if (state.status !== "ROUTED_GENERATE_CODE") {
+        if (testResult.passed) {
+          logDiagnostic('GRAPH', 'ENTER ReviewerAgent', { state: 'post_test_pass' });
+          emitSSE('agent_step', { agent: 'ReviewerAgent', status: 'running', message: 'Performing automated code review & quality audit...' });
+          const reviewResult = await reviewerAgentNode(state);
+          completedStages.push('reviewer');
+          logDiagnostic('GRAPH', 'EXIT ReviewerAgent', { approved: reviewResult.approved });
 
-        emitSSE('agent_step', {
-          agent: 'ReviewerAgent',
-          status: 'completed',
-          result: reviewResult
-        });
+          emitSSE('agent_step', {
+            agent: 'ReviewerAgent',
+            status: 'completed',
+            result: reviewResult
+          });
 
-        await finalizeExecution('TESTS_PASSED', {
-          route: state.status,
-          testResult,
-          reviewResult,
-          diffCards: await prepareDiffCards(appliedDebuggerPatches, state.originalSnapshots)
-        });
-      } else {
-        skippedStages.push('reviewer');
-        emitSSE('agent_step', { agent: 'DebuggerAgent', status: 'failed', message: 'Self-healing retries exhausted without resolving test failures.' });
-        emitSSE('agent_step', { agent: 'ReviewerAgent', status: 'skipped', message: 'Code review skipped due to unresolved test failures.' });
+          await finalizeExecution('TESTS_PASSED', {
+            route: state.status,
+            testResult,
+            verificationLevel: testResult.verificationLevel,
+            verificationNote: testResult.verificationNote,
+            reviewResult,
+            diffCards: await prepareDiffCards(appliedDebuggerPatches, state.originalSnapshots)
+          });
+        } else {
+          skippedStages.push('reviewer');
+          emitSSE('agent_step', { agent: 'DebuggerAgent', status: 'failed', message: 'Self-healing retries exhausted without resolving test failures.' });
+          emitSSE('agent_step', { agent: 'ReviewerAgent', status: 'skipped', message: 'Code review skipped due to unresolved test failures.' });
 
-        await finalizeExecution('FAILED', {
-          error: `Test failures unresolved after ${MAX_SELF_HEAL_RETRIES} retries.`,
-          errorsEncountered: state.errorsEncountered,
-          testResult,
-          diffCards: await prepareDiffCards(appliedDebuggerPatches, state.originalSnapshots)
-        });
+          const failureMsg = healResult?.failureMessage || `Test failures unresolved after ${state.retryCount || 3} retries.`;
+          await finalizeExecution('FAILED', {
+            error: failureMsg,
+            errorsEncountered: state.errorsEncountered,
+            testResult,
+            verificationLevel: testResult.verificationLevel,
+            verificationNote: testResult.verificationNote,
+            diffCards: await prepareDiffCards(appliedDebuggerPatches, state.originalSnapshots)
+          });
+        }
+        return state;
       }
-      return state;
     }
 
     // Branch B: Code Generation & Feature Implementation Workflow
@@ -1971,79 +1984,24 @@ export async function runPipeline(
       emitSSE('agent_step', { agent: 'TestRunnerAgent', status: 'running', message: 'Executing workspace automated unit test suite...' });
       let testResult = await runWorkspaceTests(state.targetFiles);
 
-      const MAX_SELF_HEAL_RETRIES = 3;
-      let selfHealRetries = 0;
+      let healResult: SelfHealLoopResult | undefined;
       state.retryCount = 0;
 
       if (!testResult.passed) {
-        logDiagnostic('SELF_HEAL', 'INITIATING_LOOP_BRANCH_B', { maxRetries: MAX_SELF_HEAL_RETRIES });
-        state.errorsEncountered = (state.errorsEncountered || 0) + 1;
-        if (testResult.structuredFailure) {
-          state.structuredFailures = [...(state.structuredFailures || []), testResult.structuredFailure];
-        }
-
-        while (!testResult.passed && selfHealRetries < MAX_SELF_HEAL_RETRIES) {
-          selfHealRetries++;
-          state.retryCount = selfHealRetries;
-
-          const discoveredFiles = extractFailingFilesFromLogs(`${testResult.summary}\n${testResult.stdout}\n${testResult.stderr}`);
-          if (discoveredFiles.length > 0) {
-            state.targetFiles = Array.from(new Set([...state.targetFiles, ...discoveredFiles]));
-          }
-
-          emitSSE('agent_step', {
-            agent: 'DebuggerAgent',
-            status: 'running',
-            message: `Self-Healing Test Failure Diagnosis (Attempt #${selfHealRetries}/${MAX_SELF_HEAL_RETRIES})...`
-          });
-
-          state.failureDetails = {
-            summary: testResult.summary,
-            stdout: testResult.stdout,
-            stderr: testResult.stderr,
-            structuredFailure: testResult.structuredFailure
-          };
-
-          state.testLogs = `[AUTOMATED TEST FAILURE REPORT - ATTEMPT #${selfHealRetries}]:\n${testResult.summary}\nSTDOUT:\n${testResult.stdout}\nSTDERR:\n${testResult.stderr}\nPlease diagnose the root cause and generate fixed patches to make tests pass.`;
-
-          const debugResult = await debuggerAgentNode(state);
-          completedStages.push('debugger');
-          if (debugResult.filePatches && debugResult.filePatches.length > 0) {
-            // Guard: Never allow DebuggerAgent to edit test files to pass tests
-            const safePatches = debugResult.filePatches.filter(p => !isTestFile(p.filePath) && !isProtectedFile(p.filePath));
-            if (safePatches.length > 0) {
-              saveFilePatchesToServerDisk(safePatches);
-              const currentCoderPatches: GeneratedFilePatch[] = [...(coderOutput.filePatches || [])];
-              for (const sp of safePatches) {
-                const patchIdx = currentCoderPatches.findIndex(p => p.filePath === sp.filePath);
-                if (patchIdx >= 0) {
-                  currentCoderPatches[patchIdx] = sp;
-                } else {
-                  currentCoderPatches.push(sp);
-                }
-              }
-              coderOutput.filePatches = currentCoderPatches;
-              state.filePatches = currentCoderPatches;
-            }
-          }
-          persistenceEngine.saveCheckpoint(sessionId, `DebuggerAgent_Retry_${selfHealRetries}`, state);
-
-          emitSSE('agent_step', {
-            agent: 'DebuggerAgent',
-            status: 'completed',
-            result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation }
-          });
-
-          emitSSE('agent_step', { agent: 'TestRunnerAgent', status: 'running', message: `Re-running unit tests after self-healing bug fix (Attempt #${selfHealRetries})...` });
-          testResult = await runWorkspaceTests(state.targetFiles);
-          if (!testResult.passed) {
-            state.errorsEncountered = (state.errorsEncountered || 0) + 1;
-            if (testResult.structuredFailure) {
-              state.structuredFailures = [...(state.structuredFailures || []), testResult.structuredFailure];
-            }
-          }
-          emitSSE('agent_step', { agent: 'TestRunnerAgent', status: 'completed', result: { summary: testResult.summary, passed: testResult.passed } });
-        }
+        healResult = await runSelfHealLoop({
+          state,
+          testResult,
+          emitSSE,
+          sessionId,
+          mode: 'B',
+          appliedDebuggerPatches: [],
+          coderOutput,
+          completedStages,
+          sessionSnapshots,
+          saveFilePatchesToServerDisk,
+          prepareDiffCards
+        });
+        testResult = healResult.testResult;
       } else {
         skippedStages.push('debugger');
       }
@@ -2118,7 +2076,7 @@ export async function runPipeline(
 
       if (!testResult.passed) {
         finalStatus = 'FAILED';
-        finalFailureMessage = `Tests failed after ${MAX_SELF_HEAL_RETRIES} self-healing attempts.`;
+        finalFailureMessage = healResult?.failureMessage || `Tests failed after ${state.retryCount || 3} self-healing attempts.`;
         state.status = 'SELF_HEAL_FAILED';
       } else if (compilerErrorOccurred) {
         finalStatus = 'FAILED';
@@ -2138,6 +2096,8 @@ export async function runPipeline(
         diffCards: finalDiffCards,
         reviewResult,
         testResult,
+        verificationLevel: testResult.verificationLevel,
+        verificationNote: testResult.verificationNote,
         originalSnapshots: state.originalSnapshots
       });
       return state;
@@ -2151,21 +2111,10 @@ export async function runPipeline(
   return state;
 }
 
-export function isTestFile(filePath: string): boolean {
-  const norm = filePath.replace(/\\/g, '/').toLowerCase();
-  const baseName = path.basename(norm);
-  return (
-    norm.includes('.test.') ||
-    norm.includes('.spec.') ||
-    norm.includes('/test/') ||
-    norm.includes('/tests/') ||
-    norm.includes('/__tests__/') ||
-    baseName.startsWith('test_') ||
-    baseName.endsWith('_test.py') ||
-    baseName.endsWith('.test.ts') ||
-    baseName.endsWith('.test.js')
-  );
-}
+/**
+ * Re-export single source of truth isTestFile from sandboxPathUtils
+ */
+export { isTestFile };
 
 async function prepareDiffCards(
   filePatches: GeneratedFilePatch[],
@@ -2211,6 +2160,9 @@ function saveFilePatchesToServerDisk(patches: GeneratedFilePatch[]) {
         if (cleanCode.startsWith('"') && cleanCode.endsWith('"') && cleanCode.includes('\\n')) {
           try { cleanCode = JSON.parse(cleanCode); } catch { }
         }
+        if (!cleanCode.includes('\n') && cleanCode.includes('\\n')) {
+          cleanCode = cleanCode.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+        }
         fs.writeFileSync(fullPath, cleanCode, 'utf-8');
       } catch (err) {
         console.error(`Failed to write patch ${patch.filePath}:`, err);
@@ -2218,6 +2170,272 @@ function saveFilePatchesToServerDisk(patches: GeneratedFilePatch[]) {
     }
   }
 }
+
+export interface SelfHealLoopContext {
+  state: KaizenStateType;
+  testResult: TestExecutionResult;
+  emitSSE: (event: string, data: any) => void;
+  sessionId: string;
+  mode: 'A' | 'B';
+  appliedDebuggerPatches: GeneratedFilePatch[];
+  coderOutput?: { filePatches?: GeneratedFilePatch[]; generatedPatch?: string };
+  completedStages: string[];
+  sessionSnapshots: Map<string, Array<{ filePath: string; originalCode: string }>>;
+  saveFilePatchesToServerDisk?: (patches: GeneratedFilePatch[]) => void;
+  prepareDiffCards?: (patches: GeneratedFilePatch[], originalSnapshots?: Array<{ filePath: string; originalCode: string }>) => Promise<any[]>;
+}
+
+export interface SelfHealLoopResult {
+  testResult: TestExecutionResult;
+  exhausted: boolean;
+  escalated: boolean;
+  failureMessage?: string;
+  attemptsUsed: number;
+}
+
+export async function runSelfHealLoop(ctx: SelfHealLoopContext): Promise<SelfHealLoopResult> {
+  const MAX_SELF_HEAL_RETRIES = 3;
+  const { state, emitSSE, sessionId, mode, appliedDebuggerPatches, coderOutput, completedStages, sessionSnapshots } = ctx;
+  const savePatches = ctx.saveFilePatchesToServerDisk || saveFilePatchesToServerDisk;
+  const makeDiffCards = ctx.prepareDiffCards || prepareDiffCards;
+  let testResult = ctx.testResult;
+
+  logDiagnostic('SELF_HEAL', mode === 'A' ? 'INITIATING_LOOP' : 'INITIATING_LOOP_BRANCH_B', { maxRetries: MAX_SELF_HEAL_RETRIES, mode });
+  state.errorsEncountered = (state.errorsEncountered || 0) + 1;
+  if (testResult.structuredFailure) {
+    state.structuredFailures = [...(state.structuredFailures || []), testResult.structuredFailure];
+  }
+
+  const tracker = createHealGuardTracker();
+  let lastRootCause = '';
+  let lastFailureReason: string | undefined = undefined;
+  let lastSignature = failureSignature(testResult);
+  tracker.seenSignatures.add(lastSignature);
+
+  let attempt = 0;
+  let shouldEscalate = false;
+
+  while (!testResult.passed && attempt < MAX_SELF_HEAL_RETRIES) {
+    attempt++;
+    state.retryCount = attempt;
+
+    const discoveredFiles = extractFailingFilesFromLogs(`${testResult.summary}\n${testResult.stdout}\n${testResult.stderr}`);
+    const existingDiscovered = discoveredFiles.filter(f => fs.existsSync(f) || fs.existsSync(path.resolve(process.cwd(), f)));
+    if (existingDiscovered.length > 0) {
+      state.targetFiles = Array.from(new Set([...existingDiscovered, ...state.targetFiles]));
+    }
+
+    logDiagnostic('GRAPH', 'ENTER DebuggerAgent', { attempt, targetFiles: state.targetFiles, signature: lastSignature });
+    emitSSE('agent_step', {
+      agent: 'DebuggerAgent',
+      status: 'running',
+      message: `Self-Healing Test Failure Diagnosis (Attempt #${attempt}/${MAX_SELF_HEAL_RETRIES})...`
+    });
+
+    state.failureDetails = {
+      summary: testResult.summary,
+      stdout: testResult.stdout,
+      stderr: testResult.stderr,
+      structuredFailure: testResult.structuredFailure
+    };
+
+    state.testLogs = `[AUTOMATED TEST FAILURE REPORT - ATTEMPT #${attempt}]:\n${testResult.summary}\nSTDOUT:\n${testResult.stdout}\nSTDERR:\n${testResult.stderr}\nPlease diagnose the root cause and generate fixed patches to make tests pass.`;
+
+    const debugResult = await debuggerAgentNode(state);
+    completedStages.push('debugger');
+    lastRootCause = debugResult.rootCause || '';
+    lastFailureReason = debugResult.failureReason;
+
+    logDiagnostic('GRAPH', 'EXIT DebuggerAgent', {
+      attempt,
+      signature: lastSignature,
+      targetFiles: state.targetFiles,
+      patchCount: (debugResult.filePatches || []).length,
+      failureReason: debugResult.failureReason,
+      rootCause: debugResult.rootCause
+    });
+
+    try {
+      langfuseTracer.recordSpan('DebuggerAgent_Attempt', {
+        attempt,
+        signature: lastSignature,
+        targetFiles: state.targetFiles,
+        patchCount: (debugResult.filePatches || []).length,
+        failureReason: debugResult.failureReason,
+        status: debugResult.status
+      });
+    } catch {}
+
+    const safePatches = (debugResult.filePatches || []).filter(p => !isTestFile(p.filePath) && !isProtectedFile(p.filePath));
+
+    // Rule (i): if debugResult.filePatches is empty, don't re-run the identical test unchanged; count zeroPatchStreak.
+    if (safePatches.length === 0) {
+      tracker.zeroPatchStreak += 1;
+      persistenceEngine.saveCheckpoint(sessionId, `DebuggerAgent_Retry_${attempt}`, state);
+      emitSSE('agent_step', {
+        agent: 'DebuggerAgent',
+        status: 'completed',
+        result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation }
+      });
+
+      // Rule (iii): zeroPatchStreak >= 2 -> STOP calling the debugger and escalate
+      if (tracker.zeroPatchStreak >= 2) {
+        logDiagnostic('SELF_HEAL', 'ZERO_PATCH_STREAK_ESCALATE', { streak: tracker.zeroPatchStreak, attempt });
+        shouldEscalate = true;
+        break;
+      }
+      continue;
+    }
+
+    // Rule (ii): never apply a patch set whose hash was already applied.
+    const currentHash = patchHash(safePatches);
+    if (tracker.appliedPatchHashes.has(currentHash)) {
+      logDiagnostic('SELF_HEAL', 'DUPLICATE_PATCH_HASH_SKIPPED', { hash: currentHash, attempt });
+      tracker.zeroPatchStreak += 1;
+      persistenceEngine.saveCheckpoint(sessionId, `DebuggerAgent_Retry_${attempt}`, state);
+      emitSSE('agent_step', {
+        agent: 'DebuggerAgent',
+        status: 'completed',
+        result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation }
+      });
+      if (tracker.zeroPatchStreak >= 2) {
+        shouldEscalate = true;
+        break;
+      }
+      continue;
+    }
+
+    tracker.zeroPatchStreak = 0;
+    tracker.appliedPatchHashes.add(currentHash);
+
+    savePatches(safePatches);
+    appliedDebuggerPatches.push(...safePatches);
+    completedStages.push('coder');
+
+    if (mode === 'A') {
+      emitSSE('agent_step', {
+        agent: 'CoderAgent',
+        status: 'completed',
+        result: { filePatches: safePatches, diffCards: await makeDiffCards(safePatches, state.originalSnapshots) }
+      });
+    } else if (mode === 'B' && coderOutput) {
+      const currentCoderPatches: GeneratedFilePatch[] = [...(coderOutput.filePatches || [])];
+      for (const sp of safePatches) {
+        const patchIdx = currentCoderPatches.findIndex(p => p.filePath === sp.filePath);
+        if (patchIdx >= 0) {
+          currentCoderPatches[patchIdx] = sp;
+        } else {
+          currentCoderPatches.push(sp);
+        }
+      }
+      coderOutput.filePatches = currentCoderPatches;
+      state.filePatches = currentCoderPatches;
+    }
+
+    persistenceEngine.saveCheckpoint(sessionId, `DebuggerAgent_Retry_${attempt}`, state);
+
+    emitSSE('agent_step', {
+      agent: 'DebuggerAgent',
+      status: 'completed',
+      result: { rootCause: debugResult.rootCause, fixExplanation: debugResult.fixExplanation }
+    });
+
+    logDiagnostic('GRAPH', 'RE-ENTER TestRunnerAgent', { attempt });
+    emitSSE('agent_step', { agent: 'TestRunnerAgent', status: 'running', message: `Re-running unit tests after self-healing bug fix (Attempt #${attempt})...` });
+    testResult = await runWorkspaceTests(state.targetFiles);
+    logDiagnostic('TEST', 'RE_RUN_RESULT', { passed: testResult.passed, attempt });
+
+    if (!testResult.passed) {
+      state.errorsEncountered = (state.errorsEncountered || 0) + 1;
+      if (testResult.structuredFailure) {
+        state.structuredFailures = [...(state.structuredFailures || []), testResult.structuredFailure];
+      }
+      const newSignature = failureSignature(testResult);
+      // Rule (iii): if the same signature recurs after a debugger attempt -> STOP calling debugger and escalate
+      if (tracker.seenSignatures.has(newSignature)) {
+        logDiagnostic('SELF_HEAL', 'SIGNATURE_RECURRENCE_ESCALATE', { signature: newSignature, attempt });
+        shouldEscalate = true;
+        lastSignature = newSignature;
+        emitSSE('agent_step', { agent: 'TestRunnerAgent', status: 'completed', result: { summary: testResult.summary, passed: testResult.passed } });
+        break;
+      }
+      tracker.seenSignatures.add(newSignature);
+      lastSignature = newSignature;
+    }
+
+    emitSSE('agent_step', { agent: 'TestRunnerAgent', status: 'completed', result: { summary: testResult.summary, passed: testResult.passed } });
+  }
+
+  // Escalation: mode B only (a plan exists): set state.reviewerFeedback and call codeGenAgentNode once, then re-run tests once.
+  if (!testResult.passed && mode === 'B' && state.plan && state.plan.length > 0) {
+    logDiagnostic('SELF_HEAL', 'ESCALATING_TO_CODER', {
+      attempt,
+      signature: lastSignature,
+      rootCause: lastRootCause,
+      reason: shouldEscalate ? 'GUARD_TRIGGERED' : 'RETRIES_EXHAUSTED'
+    });
+
+    emitSSE('agent_step', {
+      agent: 'CoderAgent',
+      status: 'running',
+      message: `[Self-Heal Escalation]: Debugger progress halted. Escalating to CoderAgent for re-implementation (Signature: ${lastSignature})...`
+    });
+
+    const traceTail = (testResult.stderr || testResult.stdout || testResult.summary || '').slice(-1500);
+    const targetFile = state.targetFiles[0] || 'src/sandbox/game.js';
+    state.reviewerFeedback = `[SELF-HEAL ESCALATION MANDATE - SIGNATURE: ${lastSignature}]:
+Target File: ${targetFile}
+Debugger Root Cause: ${lastRootCause || 'Unresolved test failure'}
+Failure Trace:
+${traceTail}
+Please regenerate corrected source code addressing this failure.`;
+
+    const escalatedCoderOutput = await codeGenAgentNode(state, emitSSE);
+    if (escalatedCoderOutput.filePatches) {
+      if (coderOutput) coderOutput.filePatches = escalatedCoderOutput.filePatches;
+      state.filePatches = escalatedCoderOutput.filePatches;
+    }
+    if (escalatedCoderOutput.generatedPatch) {
+      if (coderOutput) coderOutput.generatedPatch = escalatedCoderOutput.generatedPatch;
+      state.generatedPatch = escalatedCoderOutput.generatedPatch;
+    }
+    if (escalatedCoderOutput.originalSnapshots) {
+      const existingSnapshots = state.originalSnapshots || [];
+      for (const newSnap of escalatedCoderOutput.originalSnapshots) {
+        if (!existingSnapshots.some(s => s.filePath === newSnap.filePath)) {
+          existingSnapshots.push(newSnap);
+        }
+      }
+      state.originalSnapshots = existingSnapshots;
+      sessionSnapshots.set(sessionId, state.originalSnapshots);
+    }
+
+    emitSSE('agent_step', {
+      agent: 'TestRunnerAgent',
+      status: 'running',
+      message: 'Re-running unit tests after CoderAgent escalation...'
+    });
+    testResult = await runWorkspaceTests(state.targetFiles);
+    emitSSE('agent_step', {
+      agent: 'TestRunnerAgent',
+      status: 'completed',
+      result: { summary: testResult.summary, passed: testResult.passed }
+    });
+  }
+
+  const failureMessage = !testResult.passed
+    ? `Self-healing failed after ${attempt} attempt(s) [Signature: ${lastSignature}]. Last Diagnosis: ${lastRootCause || 'Diagnostic unresolved'} (Reason: ${lastFailureReason || 'UNRESOLVED'}).`
+    : undefined;
+
+  return {
+    testResult,
+    exhausted: attempt >= MAX_SELF_HEAL_RETRIES,
+    escalated: shouldEscalate,
+    failureMessage,
+    attemptsUsed: attempt
+  };
+}
+
 
 // Helper to recursively retrieve all sandbox files
 function getSandboxFilesRecursively(dir: string, baseDir: string = dir): { name: string; path: string; isDir: boolean }[] {

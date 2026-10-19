@@ -93,6 +93,12 @@ export function sanitizeCodePatch(code: string, _filePath?: string): string {
   clean = clean.replace(/^```[a-zA-Z0-9_+.-]*[ \t]*\r?\n/, '');
   clean = clean.replace(/\r?\n[ \t]*```$/, '');
   clean = clean.trim();
+  if (clean.startsWith('"') && clean.endsWith('"') && clean.includes('\\n')) {
+    try { clean = JSON.parse(clean); } catch { }
+  }
+  if (!clean.includes('\n') && clean.includes('\\n')) {
+    clean = clean.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"');
+  }
   return clean + '\n';
 }
 
@@ -128,7 +134,14 @@ export function saveFilePatchesToServerDiskWithVerification(
         fs.mkdirSync(dir, { recursive: true });
       }
 
-      fs.writeFileSync(fullPath, patch.code, 'utf-8');
+      let cleanPatchCode = patch.code || '';
+      if (cleanPatchCode.startsWith('"') && cleanPatchCode.endsWith('"') && cleanPatchCode.includes('\\n')) {
+        try { cleanPatchCode = JSON.parse(cleanPatchCode); } catch { }
+      }
+      if (!cleanPatchCode.includes('\n') && cleanPatchCode.includes('\\n')) {
+        cleanPatchCode = cleanPatchCode.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+      }
+      fs.writeFileSync(fullPath, cleanPatchCode, 'utf-8');
 
       if (verifyFileWasWritten(fullPath)) {
         successCount++;

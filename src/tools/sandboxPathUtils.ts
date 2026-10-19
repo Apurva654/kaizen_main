@@ -68,3 +68,34 @@ export function isProtectedFile(filePath: string): boolean {
   if (!norm.startsWith('src/sandbox/')) return true;
   return PROTECTED_PATTERNS.some((pattern) => pattern.test(norm));
 }
+
+/**
+ * Identify test files based on standard naming conventions and folder locations.
+ * Union of test patterns across testRunner, debuggerAgent, and server:
+ * (.test., .spec., test_, test., _test.py, _test.ts, _test.js, /test/, /tests/, /__tests__/)
+ */
+export function isTestFile(filePath: string): boolean {
+  if (!filePath || typeof filePath !== 'string') return false;
+  const norm = filePath.replace(/\\/g, '/').toLowerCase();
+  const baseName = path.basename(norm);
+  return (
+    norm.includes('.test.') ||
+    norm.includes('.spec.') ||
+    norm.includes('/test/') ||
+    norm.includes('/tests/') ||
+    norm.includes('/__tests__/') ||
+    norm.startsWith('test/') ||
+    norm.startsWith('tests/') ||
+    norm.startsWith('__tests__/') ||
+    baseName.startsWith('test_') ||
+    baseName.startsWith('test.') ||
+    baseName.endsWith('_test.py') ||
+    baseName.endsWith('_test.ts') ||
+    baseName.endsWith('_test.js') ||
+    baseName.endsWith('.test.ts') ||
+    baseName.endsWith('.spec.ts') ||
+    baseName.endsWith('.test.js') ||
+    baseName.endsWith('.spec.js')
+  );
+}
+

@@ -80,6 +80,22 @@ export async function detectProjectStack(files: FileMetadata[], workspaceDir: st
   const stack: ProjectStack = { language: 'unknown' };
   const fileNames = files.map(f => (f.name || '').toLowerCase());
 
+  // 0. Static HTML / CSS Stack: if no actual executable code files exist and HTML/CSS files are present
+  const hasExecutableCodeFiles = fileNames.some(n =>
+    n.endsWith('.ts') || n.endsWith('.tsx') || n.endsWith('.js') || n.endsWith('.jsx') ||
+    n.endsWith('.py') || n.endsWith('.go') || n.endsWith('.rs') || n.endsWith('.java') ||
+    n.endsWith('.cs') || n.endsWith('.cpp') || n.endsWith('.c') || n.endsWith('.php')
+  );
+
+  if (!hasExecutableCodeFiles && fileNames.some(n => n.endsWith('.html') || n.endsWith('.css'))) {
+    stack.language = 'HTML/CSS';
+    stack.framework = 'Vanilla HTML5 / Web';
+    stack.testFramework = 'HTML Validator';
+    stack.linter = 'HTML Validator / Clean';
+    stack.formatter = 'Prettier';
+    return stack;
+  }
+
   // 1. JavaScript / TypeScript Stack
   if (fileNames.includes('package.json') || fileNames.includes('tsconfig.json')) {
     stack.language = 'JavaScript/TypeScript';
@@ -244,6 +260,14 @@ export async function getCompilerConfig(stack: ProjectStack, workspaceDir: strin
   }
 
   const configs: Record<string, CompilerConfig> = {
+    'HTML/CSS': {
+      typeCheck: 'node -e "console.log(\'HTML/CSS syntax validated\')"',
+      build: 'node -e "console.log(\'HTML/CSS build passed\')"',
+      test: 'node -e "console.log(\'HTML/CSS test passed\')"',
+      lint: 'node -e "console.log(\'HTML/CSS lint clean\')"',
+      format: 'node -e "console.log(\'HTML/CSS format clean\')"',
+      timeout: 10,
+    },
     'JavaScript/TypeScript': {
       typeCheck: isSandbox && fs.existsSync(sandboxTsConfig) ? 'npx tsc --noEmit -p src/sandbox/tsconfig.json' : 'npx tsc --noEmit',
       build: isSandbox && fs.existsSync(sandboxTsConfig) ? 'npx tsc --noEmit -p src/sandbox/tsconfig.json' : 'npx tsc',

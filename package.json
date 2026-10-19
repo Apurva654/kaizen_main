@@ -64,6 +64,13 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "npx ts-node test/backend.test.ts",
+    "test:debugger": "npx ts-node test/debuggerAgent.test.ts",
+    "test:routing": "npx ts-node test/routing.golden.test.ts",
+    "test:phase1": "npx ts-node test/phase1.test.ts",
+    "test:phase2": "npx ts-node test/phase2.test.ts",
+    "test:phase3": "npx ts-node test/phase3.test.ts",
+    "test:phase4": "npx ts-node test/phase4.test.ts",
+    "test:all": "npx ts-node test/backend.test.ts && npx ts-node test/intentAgent.test.ts && npx ts-node test/debuggerAgent.test.ts && npx ts-node test/routing.golden.test.ts && npx ts-node test/phase1.test.ts && npx ts-node test/phase2.test.ts && npx ts-node test/phase3.test.ts && npx ts-node test/phase4.test.ts",
     "start": "tsc && node dist/index.js",
     "server": "ts-node-dev --respawn --transpile-only src/server.ts",
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts"
