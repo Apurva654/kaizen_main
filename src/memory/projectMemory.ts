@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -55,7 +56,7 @@ export class ProjectMemoryStore {
   }
 
   private getProjectKey(projectRoot: string): string {
-    return Buffer.from(path.resolve(projectRoot)).toString('hex').substring(0, 16);
+    return crypto.createHash('sha1').update(path.resolve(projectRoot)).digest('hex').substring(0, 16);
   }
 
   private persistProject(projectRoot: string, data: ProjectMetadata): void {

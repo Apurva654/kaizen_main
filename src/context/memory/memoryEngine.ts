@@ -127,8 +127,16 @@ export class MemoryEngine {
     const relevant = this.retrieveRelevant(query);
 
     const stateBlock = this.stateMemory.formatForPrompt();
-    const shortTermBlock = this.shortTermMemory.formatForPrompt(query.topKShortTerm || 6);
-    const longTermBlock = this.longTermMemory.formatForPrompt(query.workspaceId || 'default');
+    const shortTermBlock = relevant.shortTermMemory.length > 0
+      ? 'SHORT-TERM MEMORY (most relevant):\n' + relevant.shortTermMemory
+          .map(e => `  - ${e.role === 'assistant' ? 'Assistant' : e.role === 'user' ? 'User' : e.eventKind}: ${(e.summary || e.content).substring(0, 160)}`)
+          .join('\n')
+      : this.shortTermMemory.formatForPrompt(query.topKShortTerm || 6);
+    const longTermBlock = relevant.longTermMemory.length > 0
+      ? 'LONG-TERM MEMORY (most relevant):\n' + relevant.longTermMemory
+          .map(f => `  - [${f.category}] ${f.key}: ${f.value}`)
+          .join('\n')
+      : this.longTermMemory.formatForPrompt(query.workspaceId || 'default');
     const episodicBlock = this.episodicMemory.formatForPrompt(relevant.episodicMemory);
 
     return `

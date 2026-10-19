@@ -36,9 +36,6 @@ export function isEquivalentLongTermFact(
   // 1. Exact key match
   if (normKey1 && normKey2 && normKey1 === normKey2) return true;
 
-  // 2. Exact value match (after secret scrubbing & normalization)
-  if (normVal1 && normVal2 && normVal1 === normVal2) return true;
-
   // 3. Combined key+value match
   const combined1 = `${normKey1} ${normVal1}`.trim();
   const combined2 = `${normKey2} ${normVal2}`.trim();

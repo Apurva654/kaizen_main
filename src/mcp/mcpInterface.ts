@@ -260,6 +260,11 @@ export class MCPUnifiedInterface {
   /**
    * Ensures the MCP Client is connected to an active server
    */
+  private clientFor(serverId?: string): Client | null {
+    if (serverId) return this.activeSessions.get(serverId)?.client || null;
+    return this.mcpClient;
+  }
+
   public async ensureConnected(serverId?: string): Promise<void> {
     const target = serverId || this.activeConfig?.id || 'default-inprocess';
     if (this.activeSessions.get(target)?.isConnected) return;
@@ -296,15 +301,16 @@ export class MCPUnifiedInterface {
    * Execute an arbitrary MCP tool by name after passing PermissionGate
    */
   public async callMCPTool(toolName: string, args: Record<string, any> = {}, options?: GitActionOptions): Promise<MCPActionResult> {
-    await this.ensureConnected();
+    const toolLabel: MCPActionResult['tool'] = (toolName.startsWith('filesystem_') ? 'filesystem' : toolName.startsWith('git_') ? 'git' : toolName.startsWith('browser_') ? 'browser' : 'terminal') as MCPActionResult['tool'];
+    await this.ensureConnected(toolName.startsWith('browser_') ? undefined : 'default-inprocess');
 
     const evalResult = permissionGate.evaluate(toolName, args);
     const isDryRun = options?.dryRun ?? permissionGate.isDryRunMode();
 
     if (isDryRun) {
       return {
-        success: options?.approved !== false,
-        tool: 'terminal',
+        success: options?.approved === true,
+        tool: toolLabel,
         action: toolName,
         output: options?.approved === false ? `SIMULATED ${toolName.toUpperCase()} DENIED` : `SIMULATED ${toolName.toUpperCase()} APPROVED`,
         riskScore: evalResult.riskScore,
@@ -317,7 +323,7 @@ export class MCPUnifiedInterface {
     if (evalResult.requiresApproval && !evalResult.allowed && options?.approved !== true) {
       return {
         success: false,
-        tool: 'terminal',
+        tool: toolLabel,
         action: toolName,
         output: '',
         error: `Permission Gate Blocked: ${evalResult.reason}`,
@@ -328,7 +334,7 @@ export class MCPUnifiedInterface {
     }
 
     try {
-      const result: any = await this.mcpClient!.callTool({
+      const result: any = await this.clientFor(toolName.startsWith('browser_') ? undefined : 'default-inprocess')!.callTool({
         name: toolName,
         arguments: args
       });
@@ -338,7 +344,7 @@ export class MCPUnifiedInterface {
 
       return {
         success: !isError,
-        tool: 'terminal',
+        tool: toolLabel,
         action: toolName,
         output: textOutput,
         error: isError ? textOutput : undefined,
@@ -349,7 +355,7 @@ export class MCPUnifiedInterface {
     } catch (err: any) {
       return {
         success: false,
-        tool: 'terminal',
+        tool: toolLabel,
         action: toolName,
         output: '',
         error: err?.message || String(err),
@@ -371,7 +377,7 @@ export class MCPUnifiedInterface {
 
     if (isDryRun) {
       return {
-        success: options?.approved !== false,
+        success: options?.approved === true,
         tool: 'browser',
         action: `browser_${action}`,
         output: options?.approved === false ? `SIMULATED BROWSER ${action.toUpperCase()} DENIED` : `SIMULATED BROWSER ${action.toUpperCase()} APPROVED`,
@@ -396,6 +402,7 @@ export class MCPUnifiedInterface {
     }
 
     // Connect to external Playwright MCP server if not already on a browser-capable server
+    let usingSimulatedBrowser = false;
     try {
       if (!this.isConnected || (this.activeConfig?.id !== 'playwright-mcp-stdio' && !this.discoveredTools.has('browser_navigate') && !this.discoveredTools.has('browser_snapshot') && !this.discoveredTools.has('navigate'))) {
         await this.connectServer('playwright-mcp-stdio');
@@ -403,7 +410,9 @@ export class MCPUnifiedInterface {
     } catch (err) {
       console.warn('[MCPClient] Playwright MCP server failed to connect, falling back to in-process browser simulation:', err);
       await this.connectServer('default-inprocess');
+      usingSimulatedBrowser = true;
     }
+    if (this.activeConfig?.id === 'default-inprocess') usingSimulatedBrowser = true;
 
     // Find actual tool name in discovered tools matching the action
     let targetToolName = `browser_${action}`;
@@ -448,6 +457,20 @@ export class MCPUnifiedInterface {
 
       const textOutput = result.content?.map((c: any) => typeof c === 'string' ? c : (c.text || JSON.stringify(c))).join('\n') || '';
       const isError = Boolean(result.isError);
+
+      if (usingSimulatedBrowser) {
+        return {
+          success: false,
+          tool: 'browser',
+          action: `browser_${action}`,
+          output: textOutput,
+          error: 'Playwright MCP is not available, so no real browser action was performed. Install it with `npx @playwright/mcp@latest --help` / `npx playwright install chromium`.',
+          riskScore: evalResult.riskScore,
+          isSimulated: true,
+          approvalStatus: options?.approved ? 'APPROVED' : 'AUTO_APPROVED',
+          requestedAction: `browser_${action}`
+        };
+      }
 
       return {
         success: !isError,
@@ -543,13 +566,13 @@ export class MCPUnifiedInterface {
       };
     }
 
-    await this.ensureConnected();
+    await this.ensureConnected('default-inprocess');
 
     const toolName = `filesystem_${action}`;
     const toolArgs = { relPath, content };
 
     try {
-      const result: any = await this.mcpClient!.callTool({
+      const result: any = await this.clientFor('default-inprocess')!.callTool({
         name: toolName,
         arguments: toolArgs
       });
@@ -605,6 +628,21 @@ export class MCPUnifiedInterface {
         };
       }
 
+      if (options?.approved !== true) {
+        return {
+          success: false,
+          tool: 'git',
+          action: `git_${action}`,
+          output: '',
+          error: `Permission Gate Intercepted: ${evalResult.reason}`,
+          riskScore: evalResult.riskScore,
+          isSimulated: true,
+          approvalStatus: 'PENDING_APPROVAL',
+          requestedAction: action,
+          confirmation: 'No Git command was executed.'
+        };
+      }
+
       return {
         success: true,
         tool: 'git',
@@ -631,13 +669,13 @@ export class MCPUnifiedInterface {
       };
     }
 
-    await this.ensureConnected();
+    await this.ensureConnected('default-inprocess');
 
     const toolName = `git_${action}`;
     const toolArgs = { message };
 
     try {
-      const result: any = await this.mcpClient!.callTool({
+      const result: any = await this.clientFor('default-inprocess')!.callTool({
         name: toolName,
         arguments: toolArgs
       });
@@ -752,10 +790,10 @@ export class MCPUnifiedInterface {
       };
     }
 
-    await this.ensureConnected();
+    await this.ensureConnected('default-inprocess');
 
     try {
-      const result: any = await this.mcpClient!.callTool({
+      const result: any = await this.clientFor('default-inprocess')!.callTool({
         name: 'terminal_exec',
         arguments: { command, cwd, stdin: (options as any)?.stdin }
       });

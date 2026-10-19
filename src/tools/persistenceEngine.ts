@@ -1,3 +1,4 @@
+import { workspaceManager } from './workspaceManager';
 import * as fs from 'fs';
 import * as path from 'path';
 import { KaizenStateType, PlanStep } from '../state';
@@ -32,6 +33,12 @@ export interface WorkspaceGraphCacheRecord {
   summary: string;
   fileFactsCount: number;
   structuredPayload?: any;
+}
+
+function safeId(id: string): string {
+  const clean = String(id || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+  if (!clean) throw new Error('Invalid session id');
+  return clean;
 }
 
 export class PersistenceEngine {
@@ -74,7 +81,7 @@ export class PersistenceEngine {
   public saveSession(session: PipelineSessionRecord): boolean {
     try {
       this.ensureDirectories();
-      const filePath = path.join(this.sessionsDir, `${session.sessionId}.json`);
+      const filePath = path.join(this.sessionsDir, `${safeId(session.sessionId)}.json`);
       fs.writeFileSync(filePath, JSON.stringify(session, null, 2), 'utf-8');
       
       this.updateSessionIndex(session);
@@ -86,7 +93,7 @@ export class PersistenceEngine {
         metadata: { status: session.status, targetFiles: session.targetFiles }
       });
 
-      projectMemory.saveProjectMetadata(process.cwd(), {
+      projectMemory.saveProjectMetadata(workspaceManager.getWorkspaceRoot(), {
         fileCount: session.targetFiles?.length || 0,
         envVars: { lastSessionId: session.sessionId }
       });
@@ -129,7 +136,7 @@ export class PersistenceEngine {
 
   public getSession(sessionId: string): PipelineSessionRecord | null {
     try {
-      const filePath = path.join(this.sessionsDir, `${sessionId}.json`);
+      const filePath = path.join(this.sessionsDir, `${safeId(sessionId)}.json`);
       if (fs.existsSync(filePath)) {
         const raw = fs.readFileSync(filePath, 'utf-8');
         return JSON.parse(raw);
@@ -159,7 +166,7 @@ export class PersistenceEngine {
   public saveCheckpoint(sessionId: string, stepName: string, stateSnapshot: Partial<KaizenStateType>): boolean {
     try {
       this.ensureDirectories();
-      const sessionCheckpointsDir = path.join(this.checkpointsDir, sessionId);
+      const sessionCheckpointsDir = path.join(this.checkpointsDir, safeId(sessionId));
       if (!fs.existsSync(sessionCheckpointsDir)) {
         fs.mkdirSync(sessionCheckpointsDir, { recursive: true });
       }
@@ -198,7 +205,7 @@ export class PersistenceEngine {
 
   public getCheckpoints(sessionId: string): StateCheckpointRecord[] {
     try {
-      const sessionCheckpointsDir = path.join(this.checkpointsDir, sessionId);
+      const sessionCheckpointsDir = path.join(this.checkpointsDir, safeId(sessionId));
       if (fs.existsSync(sessionCheckpointsDir)) {
         const files = fs.readdirSync(sessionCheckpointsDir).sort();
         const records: StateCheckpointRecord[] = [];

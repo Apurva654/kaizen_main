@@ -3,7 +3,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import * as fs from 'fs';
 import * as path from 'path';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 
 export interface MCPToolDefinition {
   name: string;
@@ -189,12 +189,21 @@ export class KaizenMCPServer {
     this.server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
       const { name, arguments: args } = request.params;
       const rootDir = process.cwd();
+      const sandboxRoot = path.resolve(rootDir, 'src/sandbox');
+      const resolveSafe = (relPath: string): string => {
+        const fullPath = path.resolve(rootDir, relPath);
+        const rel = path.relative(sandboxRoot, fullPath);
+        if (!relPath || rel.startsWith('..') || path.isAbsolute(rel)) {
+          throw new Error(`Access denied: '${relPath}' is outside src/sandbox/`);
+        }
+        return fullPath;
+      };
 
       try {
         switch (name) {
           case 'filesystem_read': {
             const relPath = String(args?.relPath || '');
-            const fullPath = path.resolve(rootDir, relPath);
+            const fullPath = resolveSafe(relPath);
             if (!fs.existsSync(fullPath)) {
               return { isError: true, content: [{ type: 'text', text: `File not found: ${relPath}` }] };
             }
@@ -205,7 +214,7 @@ export class KaizenMCPServer {
           case 'filesystem_write': {
             const relPath = String(args?.relPath || '');
             const content = String(args?.content || '');
-            const fullPath = path.resolve(rootDir, relPath);
+            const fullPath = resolveSafe(relPath);
             const dir = path.dirname(fullPath);
             if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
             fs.writeFileSync(fullPath, content, 'utf-8');
@@ -214,7 +223,7 @@ export class KaizenMCPServer {
 
           case 'filesystem_list': {
             const relPath = String(args?.relPath || '');
-            const fullPath = path.resolve(rootDir, relPath);
+            const fullPath = relPath ? resolveSafe(relPath) : sandboxRoot;
             const dir = fs.existsSync(fullPath) ? fullPath : path.resolve(rootDir, 'src/sandbox');
             if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
             const files = fs.readdirSync(dir);
@@ -223,7 +232,7 @@ export class KaizenMCPServer {
 
           case 'filesystem_delete': {
             const relPath = String(args?.relPath || '');
-            const fullPath = path.resolve(rootDir, relPath);
+            const fullPath = resolveSafe(relPath);
             if (fs.existsSync(fullPath)) {
               fs.unlinkSync(fullPath);
               return { content: [{ type: 'text', text: `Deleted file ${relPath}` }] };
@@ -237,15 +246,25 @@ export class KaizenMCPServer {
           case 'git_push':
           case 'git_log': {
             const action = name.replace('git_', '');
-            let gitCmd = 'git status';
-            if (action === 'status') gitCmd = 'git status';
-            else if (action === 'diff') gitCmd = 'git diff';
-            else if (action === 'commit') gitCmd = `git commit -m "${args?.message || 'Auto-commit'}"`;
-            else if (action === 'push') gitCmd = 'git push';
-            else if (action === 'log') gitCmd = 'git log -n 5';
+            const runGit = (gitArgs: string[]): Promise<{ error: Error | null; stdout: string; stderr: string }> =>
+              new Promise((res) => {
+                execFile('git', gitArgs, { cwd: rootDir, timeout: 10000 }, (error, stdout, stderr) => res({ error, stdout, stderr }));
+              });
+
+            let gitArgs: string[] = ['status'];
+            if (action === 'diff') gitArgs = ['diff'];
+            else if (action === 'commit') {
+              const staged = await runGit(['add', '-A', '--', 'src/sandbox']);
+              if (staged.error) {
+                return { isError: true, content: [{ type: 'text', text: (staged.stderr || staged.error.message).trim() }] };
+              }
+              gitArgs = ['commit', '-m', String(args?.message || 'Auto-commit')];
+            }
+            else if (action === 'push') gitArgs = ['push'];
+            else if (action === 'log') gitArgs = ['log', '-n', '5'];
 
             return new Promise((resolve) => {
-              exec(gitCmd, { cwd: rootDir, timeout: 10000 }, (error, stdout, stderr) => {
+              runGit(gitArgs).then(({ error, stdout, stderr }) => {
                 const combined = (stdout + '\n' + stderr).trim();
                 if (error) {
                   resolve({ isError: true, content: [{ type: 'text', text: combined || error.message }] });

@@ -2,6 +2,9 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
+import * as dotenv from 'dotenv';
+import { resolveProjectRoot } from './tools/githubAuthManager';
+dotenv.config({ path: path.join(resolveProjectRoot(), '.env') });
 import { exec, execSync, spawn, ChildProcess } from 'child_process';
 import { promisify } from 'util';
 
@@ -1837,6 +1840,7 @@ export async function runPipeline(
             return state;
           }
 
+          state.planFeedback = undefined;
           persistenceEngine.saveCheckpoint(sessionId, `PlannerAgent_Replan_Attempt_${nextAttempt}`, state);
           continue;
         }
@@ -1876,6 +1880,7 @@ export async function runPipeline(
             return state;
           }
 
+          state.planFeedback = undefined;
           persistenceEngine.saveCheckpoint(sessionId, 'PlannerAgent_Feedback', state);
 
           // Loop repeats! The modified plan will be presented again to the user for approval!

@@ -1,3 +1,4 @@
+import { normalizeSandboxPath } from '../tools/sandboxPathUtils';
 import { z } from 'zod';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import * as dotenv from 'dotenv';
@@ -5,7 +6,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { KaizenState } from '../state';
 import { langfuseTracer } from '../tools/langfuseTracer';
-import { normalizeSandboxPath } from '../tools/sandboxPathUtils';
 
 dotenv.config();
 
@@ -182,7 +182,7 @@ export function extractGitActions(input: string): Array<'status' | 'diff' | 'com
   const rawPrompt = extractRawUserPrompt(input).toLowerCase();
   const requestedActions: Array<'status' | 'diff' | 'commit' | 'push' | 'log'> = [];
 
-  if (/\b(git\s+status|repo(sitory)?\s+status|check\s+status|show\s+status|status\s+of\s+(repo|repository|git|workspace)|changes)\b/i.test(rawPrompt)) {
+  if (/\b(git\s+status|repo(sitory)?\s+status|check\s+status|show\s+status|status\s+of\s+(repo|repository|git|workspace)|what\s+(has\s+)?changed|(show|list|check)\s+(the\s+|my\s+)?(uncommitted\s+)?changes)\b/i.test(rawPrompt)) {
     requestedActions.push('status');
   }
   if (/\b(git\s+diff|repo(sitory)?\s+diff|recent\s+diff|show\s+diff|check\s+diff)\b/i.test(rawPrompt) || /\bgit\s+diff\b/i.test(rawPrompt)) {
@@ -335,10 +335,10 @@ export function isGeneralQuery(input: string): boolean {
     'json', 'component', 'test', 'create', 'write', 'make', 'delete', 'refactor', 'fix',
     'implement', 'add', 'modify', 'directory', 'folder', 'npm', 'node', 'run', 'execute',
     'calculator', 'utils', 'main.ts', 'solution', 'import', 'export', 'const', 'let', 'var',
-    'git', 'status', 'diff', 'commit', 'push', 'branch', 'repository', 'log', 'checkout', 'stash',
+    'git', 'git status', 'diff', 'commit', 'push', 'branch', 'repository', 'git log', 'checkout', 'stash',
     'terminal', 'command', 'shell', 'rm', 'del', 'sudo', 'chmod',
     'website', 'webpage', 'web', 'landing', 'page', 'site', 'index.html', 'style.css', 'styles.css', 'script.js', 'frontend',
-    'agent', 'agents', 'llm', 'model', 'models', 'mcp', 'intent', 'pipeline', 'router', 'classification'
+    'agent', 'agents', 'llm', 'mcp', 'intent', 'pipeline', 'router', 'classification'
   ];
 
   // Conceptual questions about data structures / algorithms (e.g. "what is a binary search tree")
@@ -388,14 +388,6 @@ export function isBrowserQuery(input: string): boolean {
 
   // Do NOT classify as code mutation if prompt contains explicit read-only / execution / non-mutation directives
   const isExplicitReadOnly = /\b(do\s+not\s+modify|don't\s+modify|read[\s-]*only|without\s+modifying|just\s+inspect|only\s+inspect|inspect\s+only)\b/i.test(rawPrompt);
-
-  const buildVerbsRegex = /\b(build|create|implement|modify|edit|add|write|make|refactor|fix|update|upgrade|improve|extend|enhance|overhaul|revamp|polish|develop)\b/i;
-
-  // A prompt containing the word "existing" together with a build verb is ALWAYS a code mutation, NEVER a read-only browser query
-  const hasExistingWithBuildVerb = /\bexisting\b/i.test(rawPrompt) && buildVerbsRegex.test(rawPrompt);
-  if (hasExistingWithBuildVerb) {
-    return false;
-  }
 
   // Check for explicit code creation, editing, debugging, or testing requests
   const hasCodeMutationOrFix = !isExplicitReadOnly && (
@@ -848,7 +840,9 @@ Rules:
           return { status: 'ROUTED_DELETE_FILES', targetFiles: promptExtracted.map(normalizeSandboxPath).filter(Boolean), requestedLanguage, languageInfo };
         }
 
-        const rawFiles = result.targetFiles || result.target_files;
+        const rawFiles = ((result.targetFiles || result.target_files || []) as string[])
+          .map(f => { try { return normalizeSandboxPath(f); } catch { return ''; } })
+          .filter(Boolean);
         let extractedFiles: string[] = [];
         if (promptExtracted.length > 0) {
           extractedFiles = [...promptExtracted];

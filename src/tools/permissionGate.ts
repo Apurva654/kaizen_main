@@ -1,3 +1,4 @@
+import * as path from 'path';
 export type PermissionMode = 'deny_first' | 'auto_mode';
 export type PermissionStatus = 'APPROVED' | 'REJECTED' | 'PENDING_APPROVAL' | 'AUTO_APPROVED';
 
@@ -36,29 +37,31 @@ export class PermissionGateManager {
    */
   public calculateRiskScore(actionType: string, payload: any = {}): number {
     const action = actionType.toLowerCase();
-    const commandStr = (payload?.command || payload?.content || payload?.path || '').toString().toLowerCase();
+    const commandStr = (payload?.command || '').toString().toLowerCase();
+    const rawPath = (payload?.path || payload?.relPath || payload?.filePath || '').toString();
+    const normPath = rawPath ? path.posix.normalize(rawPath.replace(/\\/g, '/')).replace(/^\.\//, '') : '';
+    const destructiveCmd = /(^|[;&|]\s*|\s)(rm|rmdir|del|rd|erase)\s/.test(` ${commandStr} `) || /\brm\s+-[a-z]*[rf]/.test(commandStr);
 
     // High Risk Operations (70 - 100)
-    if (action.includes('delete') || action.includes('remove') || commandStr.includes('rm ') || commandStr.includes('rm -rf') || commandStr.includes('del ')) {
+    if (/\b(delete|remove)\b|_delete\b|_remove\b/.test(action) || destructiveCmd) {
       return 90;
     }
-    if (action.includes('git_push') || commandStr.includes('git push') || commandStr.includes('sudo') || commandStr.includes('chmod') || commandStr.includes('npm publish')) {
+    if (action.includes('git_push') || /\bgit\s+push\b/.test(commandStr) || /\bsudo\b/.test(commandStr) || /\bchmod\b/.test(commandStr) || /\bnpm\s+publish\b/.test(commandStr)) {
       return 90;
     }
     if (action.includes('terminal_exec') || action.includes('shell_exec')) {
-      if (/\b(dir|ls|pwd|echo|cat|node -v|npm -v|whoami)\b/i.test(commandStr) && !/\b(rm|del|sudo|chmod|rf)\b/i.test(commandStr)) {
+      if (/^\s*(dir|ls|pwd|echo|cat|node -v|npm -v|whoami)\b/i.test(commandStr) && !/[;&|`$><]/.test(commandStr)) {
         return 15;
       }
       return 75;
     }
 
     // Medium Risk Operations (30 - 69)
-    if (action.includes('git_commit') || commandStr.includes('git commit')) {
+    if (action.includes('git_commit') || /\bgit\s+commit\b/.test(commandStr)) {
       return 50;
     }
     if (action.includes('write') || action.includes('patch_file')) {
-      // Writing outside src/sandbox is higher risk
-      if (payload?.path && !payload.path.toString().startsWith('src/sandbox/')) {
+      if (normPath && (path.posix.isAbsolute(normPath) || normPath.startsWith('..') || !normPath.startsWith('src/sandbox/'))) {
         return 80;
       }
       return 45;
@@ -68,7 +71,7 @@ export class PermissionGateManager {
     }
 
     // Low Risk / Safe Read Operations (0 - 29)
-    if (action.includes('git_status') || action.includes('git_diff') || action.includes('git_log') || action.includes('read') || action.includes('list') || action.includes('ast_parse') || action.includes('general_query')) {
+    if (/^(git_status|git_diff|git_log|ast_parse|general_query)$/.test(action) || /(^|_)(read|list)($|_)/.test(action)) {
       return 10;
     }
 

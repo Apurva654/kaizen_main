@@ -1,4 +1,4 @@
-import * as Parser from 'web-tree-sitter';
+import * as TreeSitter from 'web-tree-sitter';
 import * as ts from 'typescript';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -60,23 +60,67 @@ export class ASTParserTool {
     }
   }
 
+  private grammars: Map<string, any> = new Map();
+
+  private static readonly GRAMMAR_FILES: Record<string, string> = {
+    python: 'tree-sitter-python.wasm',
+    html: 'tree-sitter-html.wasm',
+    css: 'tree-sitter-css.wasm',
+    json: 'tree-sitter-json.wasm'
+  };
+
+  private static packageDir(pkg: string): string | null {
+    try {
+      let dir = path.dirname(require.resolve(pkg));
+      while (dir !== path.dirname(dir)) {
+        const pj = path.join(dir, 'package.json');
+        if (fs.existsSync(pj) && JSON.parse(fs.readFileSync(pj, 'utf-8')).name === pkg) return dir;
+        dir = path.dirname(dir);
+      }
+    } catch {
+      // not resolvable from here
+    }
+    const local = path.resolve(process.cwd(), 'node_modules', pkg);
+    return fs.existsSync(local) ? local : null;
+  }
+
   async init(wasmPath?: string, languageWasmPath?: string, language: string = 'typescript'): Promise<void> {
     this.currentLanguage = language;
+    if (this.isInitialized && this.parser) return;
     this.isInitialized = true;
     try {
-      const ParserConstructor: any = (Parser as any).default || Parser;
-      if (typeof ParserConstructor?.init === 'function') {
-        const defaultWasm = wasmPath || path.resolve(process.cwd(), 'node_modules/web-tree-sitter/tree-sitter.wasm');
-        if (fs.existsSync(defaultWasm)) {
-          await ParserConstructor.init({ locateFile: () => defaultWasm });
-          this.parser = new ParserConstructor();
-          if (languageWasmPath && fs.existsSync(languageWasmPath)) {
-            const Lang = await ParserConstructor.Language.load(languageWasmPath);
-            this.parser.setLanguage(Lang);
+      const mod: any = TreeSitter as any;
+      const ParserCls: any = mod.Parser || mod.default || mod;
+      const LanguageCls: any = mod.Language || ParserCls.Language;
+      if (typeof ParserCls?.init !== 'function' || !LanguageCls?.load) return;
+
+      const coreDir = ASTParserTool.packageDir('web-tree-sitter');
+      const coreWasm = wasmPath || [ 'web-tree-sitter.wasm', 'tree-sitter.wasm' ]
+        .map(f => (coreDir ? path.join(coreDir, f) : ''))
+        .find(f => f && fs.existsSync(f));
+      if (!coreWasm || !fs.existsSync(coreWasm)) return;
+
+      await ParserCls.init({ locateFile: () => coreWasm });
+      this.parser = new ParserCls();
+
+      const grammarDirs = [
+        ASTParserTool.packageDir('@vscode/tree-sitter-wasm'),
+        ASTParserTool.packageDir('tree-sitter-wasms')
+      ].filter((d): d is string => Boolean(d)).flatMap(d => [path.join(d, 'wasm'), path.join(d, 'out')]);
+      for (const [lang, file] of Object.entries(ASTParserTool.GRAMMAR_FILES)) {
+        const grammarPath = lang === language && languageWasmPath
+          ? languageWasmPath
+          : (grammarDirs.map(d => path.join(d, file)).find(f => fs.existsSync(f)) || '');
+        if (grammarPath && fs.existsSync(grammarPath)) {
+          try {
+            this.grammars.set(lang, await LanguageCls.load(grammarPath));
+          } catch (err: any) {
+            console.warn(`[AST] Could not load ${lang} grammar:`, err?.message || err);
           }
         }
       }
-    } catch {
+    } catch (err: any) {
+      console.warn('[AST] Tree-sitter unavailable, using regex fallback:', err?.message || err);
       this.parser = null;
     }
   }
@@ -93,13 +137,16 @@ export class ASTParserTool {
       return this.parseTypeScriptAST(sourceCode, lang);
     }
 
-    if (this.parser) {
+    const grammar = this.grammars.get(lang);
+    if (this.parser && grammar) {
       try {
+        this.parser.setLanguage(grammar);
         const tree = this.parser.parse(sourceCode);
         const symbols: ExtractedSymbol[] = [];
         for (let i = 0; i < tree.rootNode.childCount; i++) {
-          const node = tree.rootNode.child(i);
-          if (node && (node.type.includes('function') || node.type.includes('class') || node.type.includes('method') || node.type.includes('def'))) {
+          const outer = tree.rootNode.child(i);
+          const node = outer?.type === 'decorated_definition' ? (outer.childForFieldName('definition') || outer) : outer;
+          if (node && (node.type.includes('function') || node.type.includes('class') || node.type.includes('method'))) {
             const startLine = node.startPosition.row + 1;
             const endLine = node.endPosition.row + 1;
             const startColumn = node.startPosition.column + 1;

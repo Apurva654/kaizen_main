@@ -115,7 +115,8 @@ export class EpisodicMemoryManager {
 
       // Check for explicit episodic query indicators (previous, task, coding, experience, outcome, divide, self-healing, etc.)
       const isEpisodicQuery = /\b(previous|prior|past|task|experience|outcome|happened|solution|fixed|resolved|divide|self-healing|episode)\b/i.test(taskQuery);
-      if (isEpisodicQuery && list.length > 0) {
+      const hasRelevanceMatch = score > 0;
+      if (isEpisodicQuery && hasRelevanceMatch) {
         score += 1;
       }
 
@@ -126,8 +127,10 @@ export class EpisodicMemoryManager {
         }
       }
 
-      if (ep.outcome === 'success') score += 1;
-      if (ep.testsPassed) score += 1;
+      if (score > 0) {
+        if (ep.outcome === 'success') score += 1;
+        if (ep.testsPassed) score += 1;
+      }
 
       return { ep, score };
     });

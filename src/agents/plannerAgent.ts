@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import * as dotenv from 'dotenv';
 import * as fs from 'fs';
+import { workspaceManager } from '../tools/workspaceManager';
 import * as path from 'path';
 import { KaizenState, PlanStep } from '../state';
 import { ASTParserTool, ExtractedSymbol } from '../tools/astParser';
@@ -289,7 +290,7 @@ Each step must represent a meaningful, actionable unit of work.
 
 Every step must:
 
-- Have a specific description of at least 30 characters.
+- Have a specific description of at least 10 characters.
 - Identify the actual files, functions, classes, modules, or behavior to create or modify.
 - Explain the technical purpose of the step.
 - Include relevant dependency ordering.
@@ -371,7 +372,8 @@ Use the following top-level structure:
     {
       "description": "A concrete, technically specific implementation step of at least 10 characters.",
       "targetFile": "src/sandbox/relative/path/to/file.ext",
-      "action": "create | modify | test"
+      "action": "create | modify | test",
+      "dependsOn": [1]
     }
   ]
 }
@@ -380,7 +382,7 @@ Output requirements:
 
 - \`approach\` must be a non-empty string.
 - \`steps\` must be a non-empty array of actionable steps.
-- Every step must contain \`description\`, \`targetFile\`, and \`action\` ('create', 'modify', or 'test').
+- Every step must contain \`description\`, \`targetFile\`, and \`action\` ('create', 'modify', or 'test'). Optionally add \`dependsOn\`: 1-indexed numbers of earlier steps it needs.
 - Every \`targetFile\` must start with \`src/sandbox/\`.
 - Use only fields supported by the existing planner output schema.
 - Do not add unrecognized fields such as \`priority\`, \`dependencies\`, \`language\`, or \`acceptanceCriteria\` unless the application schema explicitly supports them.
@@ -402,7 +404,7 @@ Return the final JSON plan only.`;
 
   const existingFilesContent: string[] = [];
   for (const targetPath of normalizedTargets) {
-    const fullPath = path.resolve(process.cwd(), targetPath);
+    const fullPath = workspaceManager.resolvePath(targetPath);
     if (fs.existsSync(fullPath)) {
       try {
         const content = fs.readFileSync(fullPath, 'utf-8').slice(0, 50000);
@@ -499,7 +501,7 @@ Return the final JSON plan only.`;
     const planSteps: PlanStep[] = rawSteps.map((step, idx) => {
       const normTarget = normalizeSandboxPath(step.targetFile);
       const isBlocked = isProtectedFile(normTarget);
-      const fullPath = normTarget ? path.resolve(process.cwd(), normTarget) : '';
+      const fullPath = normTarget ? workspaceManager.resolvePath(normTarget) : '';
       const isNew = !fullPath || !fs.existsSync(fullPath);
       const stepDeps = (step.dependsOn || [])
         .map(depIdx => rawSteps[depIdx - 1]?.targetFile)

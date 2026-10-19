@@ -185,6 +185,14 @@ const PYTHON_KNOWN_THIRD_PARTY = new Set([
   'xlsxwriter', 'docx', 'pptx', 'pypdf', 'fitz'
 ]);
 
+function isSymbolExported(content: string, name: string): boolean {
+  const n = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const declared = new RegExp(`\\bexport\\s+(?:default\\s+)?(?:declare\\s+)?(?:abstract\\s+)?(?:async\\s+)?(?:function\\*?|class|const|let|var|interface|type|enum)\\s+${n}\\b`);
+  const listed = new RegExp(`\\bexport\\s*\\{[^}]*\\b${n}\\b[^}]*\\}`);
+  const defaultRef = new RegExp(`\\bexport\\s+default\\s+${n}\\s*;?`);
+  return declared.test(content) || listed.test(content) || defaultRef.test(content);
+}
+
 export class GraphifyEngine {
   private astParser: ASTParserTool;
   private fileFactsMap: Map<string, FileNodeFacts> = new Map();
@@ -304,7 +312,7 @@ export class GraphifyEngine {
         symbols = extracted.map((s: ExtractedSymbol) => {
           const isExported = language === 'python'
             ? !s.name.startsWith('_')
-            : (content.includes(`export ` + s.name) || content.includes(`export function ` + s.name) || content.includes(`export class ` + s.name) || content.includes(`export const ` + s.name));
+            : isSymbolExported(content, s.name);
           return {
             name: s.name,
             type: s.type,
@@ -461,12 +469,23 @@ export class GraphifyEngine {
   public findMatchingKey(targetPath: string): string | undefined {
     const norm = this.normalizePath(targetPath);
     if (this.fileFactsMap.has(norm)) return norm;
+    const matches: string[] = [];
     for (const key of this.fileFactsMap.keys()) {
-      if (key.endsWith('/' + norm) || norm.endsWith('/' + key) || key === norm) {
-        return key;
+      if (key.endsWith('/' + norm) || norm.endsWith('/' + key)) {
+        matches.push(key);
       }
     }
-    return undefined;
+    if (matches.length <= 1) return matches[0];
+    // Several files share this suffix: pick the one sharing the longest path tail, refuse ties.
+    const tailScore = (key: string): number => {
+      const a = key.split('/').reverse();
+      const b = norm.split('/').reverse();
+      let n = 0;
+      while (n < a.length && n < b.length && a[n] === b[n]) n++;
+      return n;
+    };
+    matches.sort((x, y) => tailScore(y) - tailScore(x));
+    return tailScore(matches[0]) > tailScore(matches[1]) ? matches[0] : undefined;
   }
 
   private resolveImports(): void {
