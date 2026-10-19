@@ -5,6 +5,16 @@ import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 
+export function resolveProjectRoot(): string {
+  let dir = __dirname;
+  while (true) {
+    if (fs.existsSync(path.join(dir, 'package.json'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return process.cwd();
+    dir = parent;
+  }
+}
+
 export interface GitHubUserProfile {
   login: string;
   id: number;
@@ -30,9 +40,10 @@ export interface GitHubAuthStatus {
 export class GitHubAuthManager {
   private configPath: string;
   private token: string | null = null;
+  private lastError: string | undefined;
 
   constructor() {
-    this.configPath = path.resolve(process.cwd(), '.env');
+    this.configPath = path.join(resolveProjectRoot(), '.env');
     this.loadTokenFromEnv();
   }
 
@@ -132,13 +143,18 @@ export class GitHubAuthManager {
       });
 
       if (!response.ok) {
-        console.warn(`[GitHubAuth] API validation returned status ${response.status}`);
+        this.lastError = response.status === 401
+          ? 'GitHub rejected the token (401). It is invalid, expired or revoked.'
+          : `GitHub API returned status ${response.status}.`;
+        console.warn(`[GitHubAuth] ${this.lastError}`);
         return null;
       }
 
+      this.lastError = undefined;
       const data = (await response.json()) as GitHubUserProfile;
       return data;
-    } catch (err) {
+    } catch (err: any) {
+      this.lastError = `Could not reach api.github.com: ${err?.message || err}`;
       console.error('[GitHubAuth] API fetch error:', err);
       return null;
     }
@@ -146,22 +162,26 @@ export class GitHubAuthManager {
 
   public async checkCLIStatus(): Promise<{ isLoggedIN: boolean; username?: string; error?: string }> {
     try {
-      const { stdout } = await execAsync('gh auth status', { timeout: 5000 });
-      const match = stdout.match(/Logged in to github\.com account ([a-zA-Z0-9_\-]+)/i) ||
-                    stdout.match(/Logged in to github\.com as ([a-zA-Z0-9_\-]+)/i);
-      if (match && match[1]) {
-        return { isLoggedIN: true, username: match[1] };
-      }
-      return { isLoggedIN: true };
-    } catch (err: any) {
-      const stderr = err?.stderr || err?.stdout || '';
-      const match = stderr.match(/Logged in to github\.com account ([a-zA-Z0-9_\-]+)/i) ||
-                    stderr.match(/Logged in to github\.com as ([a-zA-Z0-9_\-]+)/i);
-      if (match && match[1]) {
-        return { isLoggedIN: true, username: match[1] };
-      }
-      return { isLoggedIN: false, error: 'GitHub CLI (gh) not logged in' };
+      const { stdout } = await execAsync('gh api user --jq .login', { timeout: 8000 });
+      const login = stdout.trim();
+      if (login) return { isLoggedIN: true, username: login };
+    } catch {
+      // fall through to parsing `gh auth status`
     }
+
+    // `gh auth status` writes to stderr (even on success) in most gh versions.
+    let output = '';
+    try {
+      const { stdout, stderr } = await execAsync('gh auth status', { timeout: 5000 });
+      output = `${stdout}\n${stderr}`;
+    } catch (err: any) {
+      output = `${err?.stdout || ''}\n${err?.stderr || ''}`;
+    }
+    const match = output.match(/Logged in to github\.com (?:account|as) ([a-zA-Z0-9_\-]+)/i);
+    if (match && match[1]) {
+      return { isLoggedIN: true, username: match[1] };
+    }
+    return { isLoggedIN: false, error: 'GitHub CLI (gh) not installed or not logged in' };
   }
 
   public async getStatus(): Promise<GitHubAuthStatus> {
@@ -195,7 +215,8 @@ export class GitHubAuthManager {
 
     return {
       isAuthenticated: false,
-      authType: 'none'
+      authType: 'none',
+      error: activeToken ? this.lastError : (cliRes.error || 'No GITHUB_TOKEN found in ' + this.configPath)
     };
   }
 }

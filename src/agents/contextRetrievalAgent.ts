@@ -1,3 +1,4 @@
+import { workspaceManager } from '../tools/workspaceManager';
 import * as path from 'path';
 import * as fs from 'fs';
 import { KaizenState } from '../state';
@@ -11,7 +12,7 @@ export async function contextRetrievalAgentNode(state: typeof KaizenState.State)
     : [];
 
   if (targetFiles.length === 0) {
-    const sandboxDir = path.resolve(process.cwd(), 'src/sandbox');
+    const sandboxDir = workspaceManager.getSandboxDir();
     if (fs.existsSync(sandboxDir)) {
       const existing = fs.readdirSync(sandboxDir)
         .filter(f => fs.statSync(path.join(sandboxDir, f)).isFile() && !f.startsWith('.'))

@@ -26,6 +26,7 @@ export interface ReviewResult {
 }
 
 import * as fs from 'fs';
+import { workspaceManager } from '../tools/workspaceManager';
 import * as path from 'path';
 import { validateCodeSyntax } from '../tools/languageResolver';
 
@@ -43,7 +44,7 @@ export async function reviewerAgentNode(state: typeof KaizenState.State): Promis
   if (!patchText) {
     const diskFiles: string[] = [];
     for (const tf of targetFiles) {
-      const full = path.resolve(process.cwd(), tf);
+      const full = workspaceManager.resolvePath(tf);
       if (fs.existsSync(full)) {
         try {
           diskFiles.push(`// File: ${tf}\n${fs.readFileSync(full, 'utf-8').slice(0, 30000)}`);

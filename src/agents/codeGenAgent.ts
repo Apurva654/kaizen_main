@@ -6,6 +6,8 @@ import { KaizenState } from '../state';
 import { isProtectedFile, normalizeSandboxPath, PROTECTED_PATTERNS } from '../tools/sandboxPathUtils';
 import { validateCodeSyntax } from '../tools/languageResolver';
 import { runStructured } from '../tools/llmRunner';
+import { workspaceManager } from '../tools/workspaceManager';
+import { permissionGate } from '../tools/permissionGate';
 
 dotenv.config();
 
@@ -119,7 +121,12 @@ export function saveFilePatchesToServerDiskWithVerification(
     }
 
     try {
-      const fullPath = path.resolve(process.cwd(), patch.filePath);
+      const fullPath = workspaceManager.resolvePath(patch.filePath);
+      if (!workspaceManager.isWithinWorkspace(fullPath)) {
+        console.warn(`[CodeGen] Skipping file outside workspace: ${patch.filePath}`);
+        failedFiles.push(patch.filePath);
+        continue;
+      }
       const dir = path.dirname(fullPath);
 
       let originalCode = "";
@@ -129,6 +136,13 @@ export function saveFilePatchesToServerDiskWithVerification(
         } catch { }
       }
       originalSnapshots.push({ filePath: patch.filePath, originalCode });
+
+      if (permissionGate.isDryRunMode()) {
+        successCount++;
+        verifiedPaths.push(patch.filePath);
+        if (emitSSE) emitSSE('file_write_simulated', { filePath: patch.filePath, message: 'Dry-Run: file not written to disk.' });
+        continue;
+      }
 
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
@@ -205,7 +219,7 @@ export async function codeGenAgentNode(
 
   const fileContexts: string[] = [];
   for (const tf of targetFiles) {
-    const fullPath = path.resolve(process.cwd(), tf);
+    const fullPath = workspaceManager.resolvePath(tf);
     if (fs.existsSync(fullPath)) {
       try {
         const content = fs.readFileSync(fullPath, 'utf-8').slice(0, 100000);

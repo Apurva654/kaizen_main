@@ -1,0 +1,1299 @@
+From fff1dd73c4fd999c8c897ce38f9a4570b9fd8cb4 Mon Sep 17 00:00:00 2001
+From: Aaryan Johri <82aaryan@gmail.com>
+Date: Mon, 19 Oct 2026 11:46:51 +0000
+Subject: [PATCH 1/2] Fix logic errors in GitHub auth, MCP, permission gate,
+ memory, persistence, planner, debugger, graphify
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ package.json                         |  2 +-
+ src/agents/debuggerAgent.ts          | 25 +-----------
+ src/agents/intentAgent.ts            |  2 +-
+ src/agents/plannerAgent.ts           |  7 ++--
+ src/context/memory/episodicMemory.ts |  9 +++--
+ src/context/memory/longTermMemory.ts |  3 --
+ src/mcp/mcpInterface.ts              | 49 +++++++++++++++++-------
+ src/mcp/mcpServer.ts                 | 43 +++++++++++++++------
+ src/memory/projectMemory.ts          |  3 +-
+ src/memory/structuralMemory.ts       |  3 +-
+ src/server.ts                        |  5 +++
+ src/tools/githubAuthManager.ts       | 57 +++++++++++++++++++---------
+ src/tools/graphifyEngine.ts          | 10 ++++-
+ src/tools/permissionGate.ts          | 19 ++++++----
+ src/tools/persistenceEngine.ts       | 14 +++++--
+ test/logicFixes.test.ts              | 37 ++++++++++++++++++
+ 16 files changed, 194 insertions(+), 94 deletions(-)
+ create mode 100644 test/logicFixes.test.ts
+
+diff --git a/package.json b/package.json
+index c388409..12aee94 100644
+--- a/package.json
++++ b/package.json
+@@ -63,7 +63,7 @@
+   "scripts": {
+     "build": "tsc",
+     "typecheck": "tsc --noEmit",
+-    "test": "npx ts-node test/backend.test.ts",
++    "test": "npx ts-node test/backend.test.ts && npx ts-node test/logicFixes.test.ts",
+     "start": "tsc && node dist/index.js",
+     "server": "ts-node-dev --respawn --transpile-only src/server.ts",
+     "dev": "ts-node-dev --respawn --transpile-only src/server.ts"
+diff --git a/src/agents/debuggerAgent.ts b/src/agents/debuggerAgent.ts
+index baa1932..6d7d1bd 100644
+--- a/src/agents/debuggerAgent.ts
++++ b/src/agents/debuggerAgent.ts
+@@ -169,30 +169,7 @@ ${failureDetails || '(No diagnostic logs available)'}`;
+   // Grounded deterministic fallback bug resolution
+   console.log("[DebuggerAgent] Operating in grounded deterministic fallback bug resolution mode...");
+   
+-  let fallbackCode = targetCode;
+-  let fixApplied = false;
+-
+-  if (primaryTarget.endsWith('.py')) {
+-    if (targetCode.includes('def divide(')) {
+-      fallbackCode = `def divide(a, b):\n    if b == 0:\n        raise ValueError("Cannot divide by zero")\n    return a / b\n`;
+-      fixApplied = true;
+-    }
+-  } else if (primaryTarget.endsWith('.ts') || primaryTarget.endsWith('.js')) {
+-    if (targetCode.includes('function divide')) {
+-      fallbackCode = `export function divide(a: number, b: number): number {\n  if (b === 0) throw new Error("Cannot divide by zero");\n  return a / b;\n}\n`;
+-      fixApplied = true;
+-    }
+-  }
+-
+-  if (fixApplied) {
+-    fallbackCode = sanitizeCodePatch(fallbackCode, primaryTarget);
+-    return {
+-      rootCause: `Identified edge-case error (e.g. division by zero or assertion failure) in ${primaryTarget}.`,
+-      fixExplanation: `Refactored ${primaryTarget} to handle error conditions and satisfy test assertions.`,
+-      filePatches: [{ filePath: primaryTarget, code: fallbackCode }],
+-      status: "DEBUG_COMPLETED"
+-    };
+-  }
++  // No LLM available: never overwrite user code with a guessed patch.
+ 
+   return {
+     rootCause: `Diagnosed test failure or compilation issue in ${primaryTarget}.`,
+diff --git a/src/agents/intentAgent.ts b/src/agents/intentAgent.ts
+index 7e6f567..883e538 100644
+--- a/src/agents/intentAgent.ts
++++ b/src/agents/intentAgent.ts
+@@ -317,7 +317,7 @@ export function isBrowserQuery(input: string): boolean {
+   if (!rawPrompt) return false;
+ 
+   // Do NOT classify as code mutation if prompt contains explicit read-only / execution / non-mutation directives
+-  const isExplicitReadOnly = /\b(do\s+not\s+modify|don't\s+modify|read[\s-]*only|existing|without\s+modifying|just\s+inspect|only\s+inspect|inspect\s+only)\b/i.test(rawPrompt);
++  const isExplicitReadOnly = /\b(do\s+not\s+modify|don't\s+modify|read[\s-]*only|without\s+modifying|just\s+inspect|only\s+inspect|inspect\s+only)\b/i.test(rawPrompt);
+ 
+   // Check for explicit code creation, editing, debugging, or testing requests
+   const hasCodeMutationOrFix = !isExplicitReadOnly && (
+diff --git a/src/agents/plannerAgent.ts b/src/agents/plannerAgent.ts
+index 588638b..1d56c94 100644
+--- a/src/agents/plannerAgent.ts
++++ b/src/agents/plannerAgent.ts
+@@ -289,7 +289,7 @@ Each step must represent a meaningful, actionable unit of work.
+ 
+ Every step must:
+ 
+-- Have a specific description of at least 30 characters.
++- Have a specific description of at least 10 characters.
+ - Identify the actual files, functions, classes, modules, or behavior to create or modify.
+ - Explain the technical purpose of the step.
+ - Include relevant dependency ordering.
+@@ -371,7 +371,8 @@ Use the following top-level structure:
+     {
+       "description": "A concrete, technically specific implementation step of at least 10 characters.",
+       "targetFile": "src/sandbox/relative/path/to/file.ext",
+-      "action": "create | modify | test"
++      "action": "create | modify | test",
++      "dependsOn": [1]
+     }
+   ]
+ }
+@@ -380,7 +381,7 @@ Output requirements:
+ 
+ - \`approach\` must be a non-empty string.
+ - \`steps\` must be a non-empty array of actionable steps.
+-- Every step must contain \`description\`, \`targetFile\`, and \`action\` ('create', 'modify', or 'test').
++- Every step must contain \`description\`, \`targetFile\`, and \`action\` ('create', 'modify', or 'test'). Optionally add \`dependsOn\`: 1-indexed numbers of earlier steps it needs.
+ - Every \`targetFile\` must start with \`src/sandbox/\`.
+ - Use only fields supported by the existing planner output schema.
+ - Do not add unrecognized fields such as \`priority\`, \`dependencies\`, \`language\`, or \`acceptanceCriteria\` unless the application schema explicitly supports them.
+diff --git a/src/context/memory/episodicMemory.ts b/src/context/memory/episodicMemory.ts
+index f51072d..1edd208 100644
+--- a/src/context/memory/episodicMemory.ts
++++ b/src/context/memory/episodicMemory.ts
+@@ -115,7 +115,8 @@ export class EpisodicMemoryManager {
+ 
+       // Check for explicit episodic query indicators (previous, task, coding, experience, outcome, divide, self-healing, etc.)
+       const isEpisodicQuery = /\b(previous|prior|past|task|experience|outcome|happened|solution|fixed|resolved|divide|self-healing|episode)\b/i.test(taskQuery);
+-      if (isEpisodicQuery && list.length > 0) {
++      const hasRelevanceMatch = score > 0;
++      if (isEpisodicQuery && hasRelevanceMatch) {
+         score += 1;
+       }
+ 
+@@ -126,8 +127,10 @@ export class EpisodicMemoryManager {
+         }
+       }
+ 
+-      if (ep.outcome === 'success') score += 1;
+-      if (ep.testsPassed) score += 1;
++      if (score > 0) {
++        if (ep.outcome === 'success') score += 1;
++        if (ep.testsPassed) score += 1;
++      }
+ 
+       return { ep, score };
+     });
+diff --git a/src/context/memory/longTermMemory.ts b/src/context/memory/longTermMemory.ts
+index 259cab4..992ded0 100644
+--- a/src/context/memory/longTermMemory.ts
++++ b/src/context/memory/longTermMemory.ts
+@@ -36,9 +36,6 @@ export function isEquivalentLongTermFact(
+   // 1. Exact key match
+   if (normKey1 && normKey2 && normKey1 === normKey2) return true;
+ 
+-  // 2. Exact value match (after secret scrubbing & normalization)
+-  if (normVal1 && normVal2 && normVal1 === normVal2) return true;
+-
+   // 3. Combined key+value match
+   const combined1 = `${normKey1} ${normVal1}`.trim();
+   const combined2 = `${normKey2} ${normVal2}`.trim();
+diff --git a/src/mcp/mcpInterface.ts b/src/mcp/mcpInterface.ts
+index c7f22fe..ffebc9b 100644
+--- a/src/mcp/mcpInterface.ts
++++ b/src/mcp/mcpInterface.ts
+@@ -260,6 +260,11 @@ export class MCPUnifiedInterface {
+   /**
+    * Ensures the MCP Client is connected to an active server
+    */
++  private clientFor(serverId?: string): Client | null {
++    if (serverId) return this.activeSessions.get(serverId)?.client || null;
++    return this.mcpClient;
++  }
++
+   public async ensureConnected(serverId?: string): Promise<void> {
+     const target = serverId || this.activeConfig?.id || 'default-inprocess';
+     if (this.activeSessions.get(target)?.isConnected) return;
+@@ -296,15 +301,16 @@ export class MCPUnifiedInterface {
+    * Execute an arbitrary MCP tool by name after passing PermissionGate
+    */
+   public async callMCPTool(toolName: string, args: Record<string, any> = {}, options?: GitActionOptions): Promise<MCPActionResult> {
+-    await this.ensureConnected();
++    const toolLabel: MCPActionResult['tool'] = (toolName.startsWith('filesystem_') ? 'filesystem' : toolName.startsWith('git_') ? 'git' : toolName.startsWith('browser_') ? 'browser' : 'terminal') as MCPActionResult['tool'];
++    await this.ensureConnected(toolName.startsWith('browser_') ? undefined : 'default-inprocess');
+ 
+     const evalResult = permissionGate.evaluate(toolName, args);
+     const isDryRun = options?.dryRun ?? permissionGate.isDryRunMode();
+ 
+     if (isDryRun) {
+       return {
+-        success: options?.approved !== false,
+-        tool: 'terminal',
++        success: options?.approved === true,
++        tool: toolLabel,
+         action: toolName,
+         output: options?.approved === false ? `SIMULATED ${toolName.toUpperCase()} DENIED` : `SIMULATED ${toolName.toUpperCase()} APPROVED`,
+         riskScore: evalResult.riskScore,
+@@ -317,7 +323,7 @@ export class MCPUnifiedInterface {
+     if (evalResult.requiresApproval && !evalResult.allowed && options?.approved !== true) {
+       return {
+         success: false,
+-        tool: 'terminal',
++        tool: toolLabel,
+         action: toolName,
+         output: '',
+         error: `Permission Gate Blocked: ${evalResult.reason}`,
+@@ -328,7 +334,7 @@ export class MCPUnifiedInterface {
+     }
+ 
+     try {
+-      const result: any = await this.mcpClient!.callTool({
++      const result: any = await this.clientFor(toolName.startsWith('browser_') ? undefined : 'default-inprocess')!.callTool({
+         name: toolName,
+         arguments: args
+       });
+@@ -338,7 +344,7 @@ export class MCPUnifiedInterface {
+ 
+       return {
+         success: !isError,
+-        tool: 'terminal',
++        tool: toolLabel,
+         action: toolName,
+         output: textOutput,
+         error: isError ? textOutput : undefined,
+@@ -349,7 +355,7 @@ export class MCPUnifiedInterface {
+     } catch (err: any) {
+       return {
+         success: false,
+-        tool: 'terminal',
++        tool: toolLabel,
+         action: toolName,
+         output: '',
+         error: err?.message || String(err),
+@@ -371,7 +377,7 @@ export class MCPUnifiedInterface {
+ 
+     if (isDryRun) {
+       return {
+-        success: options?.approved !== false,
++        success: options?.approved === true,
+         tool: 'browser',
+         action: `browser_${action}`,
+         output: options?.approved === false ? `SIMULATED BROWSER ${action.toUpperCase()} DENIED` : `SIMULATED BROWSER ${action.toUpperCase()} APPROVED`,
+@@ -543,13 +549,13 @@ export class MCPUnifiedInterface {
+       };
+     }
+ 
+-    await this.ensureConnected();
++    await this.ensureConnected('default-inprocess');
+ 
+     const toolName = `filesystem_${action}`;
+     const toolArgs = { relPath, content };
+ 
+     try {
+-      const result: any = await this.mcpClient!.callTool({
++      const result: any = await this.clientFor('default-inprocess')!.callTool({
+         name: toolName,
+         arguments: toolArgs
+       });
+@@ -605,6 +611,21 @@ export class MCPUnifiedInterface {
+         };
+       }
+ 
++      if (options?.approved !== true) {
++        return {
++          success: false,
++          tool: 'git',
++          action: `git_${action}`,
++          output: '',
++          error: `Permission Gate Intercepted: ${evalResult.reason}`,
++          riskScore: evalResult.riskScore,
++          isSimulated: true,
++          approvalStatus: 'PENDING_APPROVAL',
++          requestedAction: action,
++          confirmation: 'No Git command was executed.'
++        };
++      }
++
+       return {
+         success: true,
+         tool: 'git',
+@@ -631,13 +652,13 @@ export class MCPUnifiedInterface {
+       };
+     }
+ 
+-    await this.ensureConnected();
++    await this.ensureConnected('default-inprocess');
+ 
+     const toolName = `git_${action}`;
+     const toolArgs = { message };
+ 
+     try {
+-      const result: any = await this.mcpClient!.callTool({
++      const result: any = await this.clientFor('default-inprocess')!.callTool({
+         name: toolName,
+         arguments: toolArgs
+       });
+@@ -752,10 +773,10 @@ export class MCPUnifiedInterface {
+       };
+     }
+ 
+-    await this.ensureConnected();
++    await this.ensureConnected('default-inprocess');
+ 
+     try {
+-      const result: any = await this.mcpClient!.callTool({
++      const result: any = await this.clientFor('default-inprocess')!.callTool({
+         name: 'terminal_exec',
+         arguments: { command, cwd, stdin: (options as any)?.stdin }
+       });
+diff --git a/src/mcp/mcpServer.ts b/src/mcp/mcpServer.ts
+index 8db8d76..a4007bf 100644
+--- a/src/mcp/mcpServer.ts
++++ b/src/mcp/mcpServer.ts
+@@ -3,7 +3,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
+ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+ import * as fs from 'fs';
+ import * as path from 'path';
+-import { exec } from 'child_process';
++import { exec, execFile } from 'child_process';
+ 
+ export interface MCPToolDefinition {
+   name: string;
+@@ -189,12 +189,21 @@ export class KaizenMCPServer {
+     this.server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
+       const { name, arguments: args } = request.params;
+       const rootDir = process.cwd();
++      const sandboxRoot = path.resolve(rootDir, 'src/sandbox');
++      const resolveSafe = (relPath: string): string => {
++        const fullPath = path.resolve(rootDir, relPath);
++        const rel = path.relative(sandboxRoot, fullPath);
++        if (!relPath || rel.startsWith('..') || path.isAbsolute(rel)) {
++          throw new Error(`Access denied: '${relPath}' is outside src/sandbox/`);
++        }
++        return fullPath;
++      };
+ 
+       try {
+         switch (name) {
+           case 'filesystem_read': {
+             const relPath = String(args?.relPath || '');
+-            const fullPath = path.resolve(rootDir, relPath);
++            const fullPath = resolveSafe(relPath);
+             if (!fs.existsSync(fullPath)) {
+               return { isError: true, content: [{ type: 'text', text: `File not found: ${relPath}` }] };
+             }
+@@ -205,7 +214,7 @@ export class KaizenMCPServer {
+           case 'filesystem_write': {
+             const relPath = String(args?.relPath || '');
+             const content = String(args?.content || '');
+-            const fullPath = path.resolve(rootDir, relPath);
++            const fullPath = resolveSafe(relPath);
+             const dir = path.dirname(fullPath);
+             if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+             fs.writeFileSync(fullPath, content, 'utf-8');
+@@ -214,7 +223,7 @@ export class KaizenMCPServer {
+ 
+           case 'filesystem_list': {
+             const relPath = String(args?.relPath || '');
+-            const fullPath = path.resolve(rootDir, relPath);
++            const fullPath = relPath ? resolveSafe(relPath) : sandboxRoot;
+             const dir = fs.existsSync(fullPath) ? fullPath : path.resolve(rootDir, 'src/sandbox');
+             if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+             const files = fs.readdirSync(dir);
+@@ -223,7 +232,7 @@ export class KaizenMCPServer {
+ 
+           case 'filesystem_delete': {
+             const relPath = String(args?.relPath || '');
+-            const fullPath = path.resolve(rootDir, relPath);
++            const fullPath = resolveSafe(relPath);
+             if (fs.existsSync(fullPath)) {
+               fs.unlinkSync(fullPath);
+               return { content: [{ type: 'text', text: `Deleted file ${relPath}` }] };
+@@ -237,15 +246,25 @@ export class KaizenMCPServer {
+           case 'git_push':
+           case 'git_log': {
+             const action = name.replace('git_', '');
+-            let gitCmd = 'git status';
+-            if (action === 'status') gitCmd = 'git status';
+-            else if (action === 'diff') gitCmd = 'git diff';
+-            else if (action === 'commit') gitCmd = `git commit -m "${args?.message || 'Auto-commit'}"`;
+-            else if (action === 'push') gitCmd = 'git push';
+-            else if (action === 'log') gitCmd = 'git log -n 5';
++            const runGit = (gitArgs: string[]): Promise<{ error: Error | null; stdout: string; stderr: string }> =>
++              new Promise((res) => {
++                execFile('git', gitArgs, { cwd: rootDir, timeout: 10000 }, (error, stdout, stderr) => res({ error, stdout, stderr }));
++              });
++
++            let gitArgs: string[] = ['status'];
++            if (action === 'diff') gitArgs = ['diff'];
++            else if (action === 'commit') {
++              const staged = await runGit(['add', '-A', '--', 'src/sandbox']);
++              if (staged.error) {
++                return { isError: true, content: [{ type: 'text', text: (staged.stderr || staged.error.message).trim() }] };
++              }
++              gitArgs = ['commit', '-m', String(args?.message || 'Auto-commit')];
++            }
++            else if (action === 'push') gitArgs = ['push'];
++            else if (action === 'log') gitArgs = ['log', '-n', '5'];
+ 
+             return new Promise((resolve) => {
+-              exec(gitCmd, { cwd: rootDir, timeout: 10000 }, (error, stdout, stderr) => {
++              runGit(gitArgs).then(({ error, stdout, stderr }) => {
+                 const combined = (stdout + '\n' + stderr).trim();
+                 if (error) {
+                   resolve({ isError: true, content: [{ type: 'text', text: combined || error.message }] });
+diff --git a/src/memory/projectMemory.ts b/src/memory/projectMemory.ts
+index 5d31e99..b544442 100644
+--- a/src/memory/projectMemory.ts
++++ b/src/memory/projectMemory.ts
+@@ -1,3 +1,4 @@
++import * as crypto from 'crypto';
+ import * as fs from 'fs';
+ import * as path from 'path';
+ 
+@@ -55,7 +56,7 @@ export class ProjectMemoryStore {
+   }
+ 
+   private getProjectKey(projectRoot: string): string {
+-    return Buffer.from(path.resolve(projectRoot)).toString('hex').substring(0, 16);
++    return crypto.createHash('sha1').update(path.resolve(projectRoot)).digest('hex').substring(0, 16);
+   }
+ 
+   private persistProject(projectRoot: string, data: ProjectMetadata): void {
+diff --git a/src/memory/structuralMemory.ts b/src/memory/structuralMemory.ts
+index c033f2f..c0057d6 100644
+--- a/src/memory/structuralMemory.ts
++++ b/src/memory/structuralMemory.ts
+@@ -1,3 +1,4 @@
++import * as crypto from 'crypto';
+ import * as fs from 'fs';
+ import * as path from 'path';
+ 
+@@ -44,7 +45,7 @@ export class StructuralMemoryStore {
+   }
+ 
+   private getGraphKey(workspaceRoot: string): string {
+-    return Buffer.from(path.resolve(workspaceRoot)).toString('hex').substring(0, 16);
++    return crypto.createHash('sha1').update(path.resolve(workspaceRoot)).digest('hex').substring(0, 16);
+   }
+ 
+   private persistGraph(workspaceRoot: string, entry: StructuralGraphCache): void {
+diff --git a/src/server.ts b/src/server.ts
+index e80460d..83d1ad1 100644
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -2,6 +2,9 @@ import express, { Request, Response } from 'express';
+ import cors from 'cors';
+ import path from 'path';
+ import fs from 'fs';
++import * as dotenv from 'dotenv';
++import { resolveProjectRoot } from './tools/githubAuthManager';
++dotenv.config({ path: path.join(resolveProjectRoot(), '.env') });
+ import { exec, execSync, spawn, ChildProcess } from 'child_process';
+ import { promisify } from 'util';
+ 
+@@ -1824,6 +1827,7 @@ export async function runPipeline(
+             return state;
+           }
+ 
++          state.planFeedback = undefined;
+           persistenceEngine.saveCheckpoint(sessionId, `PlannerAgent_Replan_Attempt_${nextAttempt}`, state);
+           continue;
+         }
+@@ -1863,6 +1867,7 @@ export async function runPipeline(
+             return state;
+           }
+ 
++          state.planFeedback = undefined;
+           persistenceEngine.saveCheckpoint(sessionId, 'PlannerAgent_Feedback', state);
+ 
+           // Loop repeats! The modified plan will be presented again to the user for approval!
+diff --git a/src/tools/githubAuthManager.ts b/src/tools/githubAuthManager.ts
+index f4c0647..4fd746f 100644
+--- a/src/tools/githubAuthManager.ts
++++ b/src/tools/githubAuthManager.ts
+@@ -5,6 +5,16 @@ import { promisify } from 'util';
+ 
+ const execAsync = promisify(exec);
+ 
++export function resolveProjectRoot(): string {
++  let dir = __dirname;
++  while (true) {
++    if (fs.existsSync(path.join(dir, 'package.json'))) return dir;
++    const parent = path.dirname(dir);
++    if (parent === dir) return process.cwd();
++    dir = parent;
++  }
++}
++
+ export interface GitHubUserProfile {
+   login: string;
+   id: number;
+@@ -30,9 +40,10 @@ export interface GitHubAuthStatus {
+ export class GitHubAuthManager {
+   private configPath: string;
+   private token: string | null = null;
++  private lastError: string | undefined;
+ 
+   constructor() {
+-    this.configPath = path.resolve(process.cwd(), '.env');
++    this.configPath = path.join(resolveProjectRoot(), '.env');
+     this.loadTokenFromEnv();
+   }
+ 
+@@ -132,13 +143,18 @@ export class GitHubAuthManager {
+       });
+ 
+       if (!response.ok) {
+-        console.warn(`[GitHubAuth] API validation returned status ${response.status}`);
++        this.lastError = response.status === 401
++          ? 'GitHub rejected the token (401). It is invalid, expired or revoked.'
++          : `GitHub API returned status ${response.status}.`;
++        console.warn(`[GitHubAuth] ${this.lastError}`);
+         return null;
+       }
+ 
++      this.lastError = undefined;
+       const data = (await response.json()) as GitHubUserProfile;
+       return data;
+-    } catch (err) {
++    } catch (err: any) {
++      this.lastError = `Could not reach api.github.com: ${err?.message || err}`;
+       console.error('[GitHubAuth] API fetch error:', err);
+       return null;
+     }
+@@ -146,22 +162,26 @@ export class GitHubAuthManager {
+ 
+   public async checkCLIStatus(): Promise<{ isLoggedIN: boolean; username?: string; error?: string }> {
+     try {
+-      const { stdout } = await execAsync('gh auth status', { timeout: 5000 });
+-      const match = stdout.match(/Logged in to github\.com account ([a-zA-Z0-9_\-]+)/i) ||
+-                    stdout.match(/Logged in to github\.com as ([a-zA-Z0-9_\-]+)/i);
+-      if (match && match[1]) {
+-        return { isLoggedIN: true, username: match[1] };
+-      }
+-      return { isLoggedIN: true };
++      const { stdout } = await execAsync('gh api user --jq .login', { timeout: 8000 });
++      const login = stdout.trim();
++      if (login) return { isLoggedIN: true, username: login };
++    } catch {
++      // fall through to parsing `gh auth status`
++    }
++
++    // `gh auth status` writes to stderr (even on success) in most gh versions.
++    let output = '';
++    try {
++      const { stdout, stderr } = await execAsync('gh auth status', { timeout: 5000 });
++      output = `${stdout}\n${stderr}`;
+     } catch (err: any) {
+-      const stderr = err?.stderr || err?.stdout || '';
+-      const match = stderr.match(/Logged in to github\.com account ([a-zA-Z0-9_\-]+)/i) ||
+-                    stderr.match(/Logged in to github\.com as ([a-zA-Z0-9_\-]+)/i);
+-      if (match && match[1]) {
+-        return { isLoggedIN: true, username: match[1] };
+-      }
+-      return { isLoggedIN: false, error: 'GitHub CLI (gh) not logged in' };
++      output = `${err?.stdout || ''}\n${err?.stderr || ''}`;
++    }
++    const match = output.match(/Logged in to github\.com (?:account|as) ([a-zA-Z0-9_\-]+)/i);
++    if (match && match[1]) {
++      return { isLoggedIN: true, username: match[1] };
+     }
++    return { isLoggedIN: false, error: 'GitHub CLI (gh) not installed or not logged in' };
+   }
+ 
+   public async getStatus(): Promise<GitHubAuthStatus> {
+@@ -195,7 +215,8 @@ export class GitHubAuthManager {
+ 
+     return {
+       isAuthenticated: false,
+-      authType: 'none'
++      authType: 'none',
++      error: activeToken ? this.lastError : (cliRes.error || 'No GITHUB_TOKEN found in ' + this.configPath)
+     };
+   }
+ }
+diff --git a/src/tools/graphifyEngine.ts b/src/tools/graphifyEngine.ts
+index dc0aa53..b40c032 100644
+--- a/src/tools/graphifyEngine.ts
++++ b/src/tools/graphifyEngine.ts
+@@ -185,6 +185,14 @@ const PYTHON_KNOWN_THIRD_PARTY = new Set([
+   'xlsxwriter', 'docx', 'pptx', 'pypdf', 'fitz'
+ ]);
+ 
++function isSymbolExported(content: string, name: string): boolean {
++  const n = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
++  const declared = new RegExp(`\\bexport\\s+(?:default\\s+)?(?:declare\\s+)?(?:abstract\\s+)?(?:async\\s+)?(?:function\\*?|class|const|let|var|interface|type|enum)\\s+${n}\\b`);
++  const listed = new RegExp(`\\bexport\\s*\\{[^}]*\\b${n}\\b[^}]*\\}`);
++  const defaultRef = new RegExp(`\\bexport\\s+default\\s+${n}\\s*;?`);
++  return declared.test(content) || listed.test(content) || defaultRef.test(content);
++}
++
+ export class GraphifyEngine {
+   private astParser: ASTParserTool;
+   private fileFactsMap: Map<string, FileNodeFacts> = new Map();
+@@ -304,7 +312,7 @@ export class GraphifyEngine {
+         symbols = extracted.map((s: ExtractedSymbol) => {
+           const isExported = language === 'python'
+             ? !s.name.startsWith('_')
+-            : (content.includes(`export ` + s.name) || content.includes(`export function ` + s.name) || content.includes(`export class ` + s.name) || content.includes(`export const ` + s.name));
++            : isSymbolExported(content, s.name);
+           return {
+             name: s.name,
+             type: s.type,
+diff --git a/src/tools/permissionGate.ts b/src/tools/permissionGate.ts
+index b8ba018..5a82740 100644
+--- a/src/tools/permissionGate.ts
++++ b/src/tools/permissionGate.ts
+@@ -1,3 +1,4 @@
++import * as path from 'path';
+ export type PermissionMode = 'deny_first' | 'auto_mode';
+ export type PermissionStatus = 'APPROVED' | 'REJECTED' | 'PENDING_APPROVAL' | 'AUTO_APPROVED';
+ 
+@@ -36,29 +37,31 @@ export class PermissionGateManager {
+    */
+   public calculateRiskScore(actionType: string, payload: any = {}): number {
+     const action = actionType.toLowerCase();
+-    const commandStr = (payload?.command || payload?.content || payload?.path || '').toString().toLowerCase();
++    const commandStr = (payload?.command || '').toString().toLowerCase();
++    const rawPath = (payload?.path || payload?.relPath || payload?.filePath || '').toString();
++    const normPath = rawPath ? path.posix.normalize(rawPath.replace(/\\/g, '/')).replace(/^\.\//, '') : '';
++    const destructiveCmd = /(^|[;&|]\s*|\s)(rm|rmdir|del|rd|erase)\s/.test(` ${commandStr} `) || /\brm\s+-[a-z]*[rf]/.test(commandStr);
+ 
+     // High Risk Operations (70 - 100)
+-    if (action.includes('delete') || action.includes('remove') || commandStr.includes('rm ') || commandStr.includes('rm -rf') || commandStr.includes('del ')) {
++    if (/\b(delete|remove)\b|_delete\b|_remove\b/.test(action) || destructiveCmd) {
+       return 90;
+     }
+-    if (action.includes('git_push') || commandStr.includes('git push') || commandStr.includes('sudo') || commandStr.includes('chmod') || commandStr.includes('npm publish')) {
++    if (action.includes('git_push') || /\bgit\s+push\b/.test(commandStr) || /\bsudo\b/.test(commandStr) || /\bchmod\b/.test(commandStr) || /\bnpm\s+publish\b/.test(commandStr)) {
+       return 90;
+     }
+     if (action.includes('terminal_exec') || action.includes('shell_exec')) {
+-      if (/\b(dir|ls|pwd|echo|cat|node -v|npm -v|whoami)\b/i.test(commandStr) && !/\b(rm|del|sudo|chmod|rf)\b/i.test(commandStr)) {
++      if (/^\s*(dir|ls|pwd|echo|cat|node -v|npm -v|whoami)\b/i.test(commandStr) && !/[;&|`$><]/.test(commandStr)) {
+         return 15;
+       }
+       return 75;
+     }
+ 
+     // Medium Risk Operations (30 - 69)
+-    if (action.includes('git_commit') || commandStr.includes('git commit')) {
++    if (action.includes('git_commit') || /\bgit\s+commit\b/.test(commandStr)) {
+       return 50;
+     }
+     if (action.includes('write') || action.includes('patch_file')) {
+-      // Writing outside src/sandbox is higher risk
+-      if (payload?.path && !payload.path.toString().startsWith('src/sandbox/')) {
++      if (normPath && (path.posix.isAbsolute(normPath) || normPath.startsWith('..') || !normPath.startsWith('src/sandbox/'))) {
+         return 80;
+       }
+       return 45;
+@@ -68,7 +71,7 @@ export class PermissionGateManager {
+     }
+ 
+     // Low Risk / Safe Read Operations (0 - 29)
+-    if (action.includes('git_status') || action.includes('git_diff') || action.includes('git_log') || action.includes('read') || action.includes('list') || action.includes('ast_parse') || action.includes('general_query')) {
++    if (/^(git_status|git_diff|git_log|ast_parse|general_query)$/.test(action) || /(^|_)(read|list)($|_)/.test(action)) {
+       return 10;
+     }
+ 
+diff --git a/src/tools/persistenceEngine.ts b/src/tools/persistenceEngine.ts
+index 3e60dea..9088b41 100644
+--- a/src/tools/persistenceEngine.ts
++++ b/src/tools/persistenceEngine.ts
+@@ -34,6 +34,12 @@ export interface WorkspaceGraphCacheRecord {
+   structuredPayload?: any;
+ }
+ 
++function safeId(id: string): string {
++  const clean = String(id || '').replace(/[^a-zA-Z0-9_-]/g, '_');
++  if (!clean) throw new Error('Invalid session id');
++  return clean;
++}
++
+ export class PersistenceEngine {
+   private baseDir: string;
+   private sessionsDir: string;
+@@ -74,7 +80,7 @@ export class PersistenceEngine {
+   public saveSession(session: PipelineSessionRecord): boolean {
+     try {
+       this.ensureDirectories();
+-      const filePath = path.join(this.sessionsDir, `${session.sessionId}.json`);
++      const filePath = path.join(this.sessionsDir, `${safeId(session.sessionId)}.json`);
+       fs.writeFileSync(filePath, JSON.stringify(session, null, 2), 'utf-8');
+       
+       this.updateSessionIndex(session);
+@@ -129,7 +135,7 @@ export class PersistenceEngine {
+ 
+   public getSession(sessionId: string): PipelineSessionRecord | null {
+     try {
+-      const filePath = path.join(this.sessionsDir, `${sessionId}.json`);
++      const filePath = path.join(this.sessionsDir, `${safeId(sessionId)}.json`);
+       if (fs.existsSync(filePath)) {
+         const raw = fs.readFileSync(filePath, 'utf-8');
+         return JSON.parse(raw);
+@@ -159,7 +165,7 @@ export class PersistenceEngine {
+   public saveCheckpoint(sessionId: string, stepName: string, stateSnapshot: Partial<KaizenStateType>): boolean {
+     try {
+       this.ensureDirectories();
+-      const sessionCheckpointsDir = path.join(this.checkpointsDir, sessionId);
++      const sessionCheckpointsDir = path.join(this.checkpointsDir, safeId(sessionId));
+       if (!fs.existsSync(sessionCheckpointsDir)) {
+         fs.mkdirSync(sessionCheckpointsDir, { recursive: true });
+       }
+@@ -198,7 +204,7 @@ export class PersistenceEngine {
+ 
+   public getCheckpoints(sessionId: string): StateCheckpointRecord[] {
+     try {
+-      const sessionCheckpointsDir = path.join(this.checkpointsDir, sessionId);
++      const sessionCheckpointsDir = path.join(this.checkpointsDir, safeId(sessionId));
+       if (fs.existsSync(sessionCheckpointsDir)) {
+         const files = fs.readdirSync(sessionCheckpointsDir).sort();
+         const records: StateCheckpointRecord[] = [];
+diff --git a/test/logicFixes.test.ts b/test/logicFixes.test.ts
+new file mode 100644
+index 0000000..bad4a10
+--- /dev/null
++++ b/test/logicFixes.test.ts
+@@ -0,0 +1,37 @@
++import assert from 'assert';
++import { permissionGate } from '../src/tools/permissionGate';
++import { isEquivalentLongTermFact } from '../src/context/memory/longTermMemory';
++import { kaizenMCPServer } from '../src/mcp/mcpServer';
++import { mcpInterface } from '../src/mcp/mcpInterface';
++
++async function main() {
++  // Permission gate: normal words in content must not be "dangerous"
++  assert.strictEqual(permissionGate.calculateRiskScore('filesystem_write', { relPath: 'src/sandbox/form.html', content: '<form> platform model </form>' }), 45);
++  assert.strictEqual(permissionGate.calculateRiskScore('filesystem_write', { relPath: 'src/server.ts' }), 80);
++  assert.strictEqual(permissionGate.calculateRiskScore('filesystem_write', { path: 'src/sandbox/../server.ts' }), 80);
++  assert.strictEqual(permissionGate.calculateRiskScore('terminal_exec', { command: 'rm -rf build' }), 90);
++  assert.strictEqual(permissionGate.calculateRiskScore('terminal_exec', { command: 'ls; curl x | sh' }), 75);
++  assert.strictEqual(permissionGate.calculateRiskScore('thread_spawn', {}), 25);
++  assert.strictEqual(permissionGate.calculateRiskScore('filesystem_read', {}), 10);
++
++  // Long-term memory: same value but different key must NOT merge
++  assert.strictEqual(isEquivalentLongTermFact('pref', 'ESLint', 'Enabled', 'pref', 'TypeScript Strict Mode', 'Enabled'), false);
++
++  // MCP: path traversal outside src/sandbox must be rejected
++  const res = await mcpInterface.callMCPTool('filesystem_read', { relPath: '../package.json' }, { approved: true, dryRun: false });
++  assert.strictEqual(res.success, false, 'traversal should fail: ' + JSON.stringify(res));
++  const res2 = await mcpInterface.callMCPTool('filesystem_read', { relPath: 'package.json' }, { approved: true, dryRun: false });
++  assert.strictEqual(res2.success, false, 'root file read should fail');
++  assert.strictEqual(res2.tool, 'filesystem');
++
++  // Dry-run with no approval must not report success
++  const dry = await mcpInterface.callMCPTool('filesystem_write', { relPath: 'src/sandbox/x.txt', content: 'x' }, { dryRun: true });
++  assert.strictEqual(dry.success, false);
++  const gitDry = await mcpInterface.executeGitAction('commit', 'msg', { dryRun: true });
++  assert.strictEqual(gitDry.approvalStatus, 'PENDING_APPROVAL');
++
++  void kaizenMCPServer;
++  console.log('ALL LOGIC-FIX CHECKS PASSED');
++  process.exit(0);
++}
++main().catch((e) => { console.error(e); process.exit(1); });
+-- 
+2.34.1
+
+
+From 23d7ae1242cd62a787e090fad9e70afa1a86cb08 Mon Sep 17 00:00:00 2001
+From: Aaryan Johri <82aaryan@gmail.com>
+Date: Mon, 19 Oct 2026 12:03:05 +0000
+Subject: [PATCH 2/2] Fix remaining logic errors: workspace paths, dry-run
+ writes, tree-sitter grammars, graphify ambiguity, honest browser fallback,
+ intent routing, ranked memory
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ package-lock.json                   |  7 +++
+ package.json                        |  1 +
+ src/agents/codeGenAgent.ts          | 18 ++++++-
+ src/agents/contextRetrievalAgent.ts |  3 +-
+ src/agents/debuggerAgent.ts         | 14 ++++--
+ src/agents/intentAgent.ts           | 11 +++--
+ src/agents/plannerAgent.ts          |  5 +-
+ src/agents/reviewerAgent.ts         |  3 +-
+ src/context/memory/memoryEngine.ts  | 12 ++++-
+ src/mcp/mcpInterface.ts             | 17 +++++++
+ src/tools/astParser.ts              | 75 +++++++++++++++++++++++------
+ src/tools/graphifyEngine.ts         | 17 +++++--
+ src/tools/persistenceEngine.ts      |  3 +-
+ test/logicFixes.test.ts             | 20 ++++++++
+ 14 files changed, 171 insertions(+), 35 deletions(-)
+
+diff --git a/package-lock.json b/package-lock.json
+index abe7329..a007a82 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -16,6 +16,7 @@
+         "@playwright/mcp": "^0.0.82",
+         "@types/cors": "^2.8.19",
+         "@types/express": "^5.0.6",
++        "@vscode/tree-sitter-wasm": "^0.3.1",
+         "cors": "^2.8.6",
+         "csv-parse": "^7.0.2",
+         "dotenv": "^17.4.2",
+@@ -456,6 +457,12 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@vscode/tree-sitter-wasm": {
++      "version": "0.3.1",
++      "resolved": "https://registry.npmjs.org/@vscode/tree-sitter-wasm/-/tree-sitter-wasm-0.3.1.tgz",
++      "integrity": "sha512-RJFoomET6FajjG511fmQxeBQfU6M24a0aFZPqpid+ttIxanWf1VGytBG0UmsGjt07qmIPJS8U31D+aecuCucsQ==",
++      "license": "MIT"
++    },
+     "node_modules/accepts": {
+       "version": "2.0.0",
+       "resolved": "https://registry.npmjs.org/accepts/-/accepts-2.0.0.tgz",
+diff --git a/package.json b/package.json
+index 12aee94..49b0e2a 100644
+--- a/package.json
++++ b/package.json
+@@ -77,6 +77,7 @@
+     "@playwright/mcp": "^0.0.82",
+     "@types/cors": "^2.8.19",
+     "@types/express": "^5.0.6",
++    "@vscode/tree-sitter-wasm": "^0.3.1",
+     "cors": "^2.8.6",
+     "csv-parse": "^7.0.2",
+     "dotenv": "^17.4.2",
+diff --git a/src/agents/codeGenAgent.ts b/src/agents/codeGenAgent.ts
+index 646811e..938694c 100644
+--- a/src/agents/codeGenAgent.ts
++++ b/src/agents/codeGenAgent.ts
+@@ -6,6 +6,8 @@ import { KaizenState } from '../state';
+ import { isProtectedFile, normalizeSandboxPath, PROTECTED_PATTERNS } from '../tools/sandboxPathUtils';
+ import { validateCodeSyntax } from '../tools/languageResolver';
+ import { runStructured } from '../tools/llmRunner';
++import { workspaceManager } from '../tools/workspaceManager';
++import { permissionGate } from '../tools/permissionGate';
+ 
+ dotenv.config();
+ 
+@@ -113,7 +115,12 @@ export function saveFilePatchesToServerDiskWithVerification(
+     }
+ 
+     try {
+-      const fullPath = path.resolve(process.cwd(), patch.filePath);
++      const fullPath = workspaceManager.resolvePath(patch.filePath);
++      if (!workspaceManager.isWithinWorkspace(fullPath)) {
++        console.warn(`[CodeGen] Skipping file outside workspace: ${patch.filePath}`);
++        failedFiles.push(patch.filePath);
++        continue;
++      }
+       const dir = path.dirname(fullPath);
+ 
+       let originalCode = "";
+@@ -124,6 +131,13 @@ export function saveFilePatchesToServerDiskWithVerification(
+       }
+       originalSnapshots.push({ filePath: patch.filePath, originalCode });
+ 
++      if (permissionGate.isDryRunMode()) {
++        successCount++;
++        verifiedPaths.push(patch.filePath);
++        if (emitSSE) emitSSE('file_write_simulated', { filePath: patch.filePath, message: 'Dry-Run: file not written to disk.' });
++        continue;
++      }
++
+       if (!fs.existsSync(dir)) {
+         fs.mkdirSync(dir, { recursive: true });
+       }
+@@ -192,7 +206,7 @@ export async function codeGenAgentNode(
+ 
+   const fileContexts: string[] = [];
+   for (const tf of targetFiles) {
+-    const fullPath = path.resolve(process.cwd(), tf);
++    const fullPath = workspaceManager.resolvePath(tf);
+     if (fs.existsSync(fullPath)) {
+       try {
+         const content = fs.readFileSync(fullPath, 'utf-8').slice(0, 100000);
+diff --git a/src/agents/contextRetrievalAgent.ts b/src/agents/contextRetrievalAgent.ts
+index 45a6c1d..3dd57a5 100644
+--- a/src/agents/contextRetrievalAgent.ts
++++ b/src/agents/contextRetrievalAgent.ts
+@@ -1,3 +1,4 @@
++import { workspaceManager } from '../tools/workspaceManager';
+ import * as path from 'path';
+ import * as fs from 'fs';
+ import { KaizenState } from '../state';
+@@ -11,7 +12,7 @@ export async function contextRetrievalAgentNode(state: typeof KaizenState.State)
+     : [];
+ 
+   if (targetFiles.length === 0) {
+-    const sandboxDir = path.resolve(process.cwd(), 'src/sandbox');
++    const sandboxDir = workspaceManager.getSandboxDir();
+     if (fs.existsSync(sandboxDir)) {
+       const existing = fs.readdirSync(sandboxDir)
+         .filter(f => fs.statSync(path.join(sandboxDir, f)).isFile() && !f.startsWith('.'))
+diff --git a/src/agents/debuggerAgent.ts b/src/agents/debuggerAgent.ts
+index 6d7d1bd..999d5a7 100644
+--- a/src/agents/debuggerAgent.ts
++++ b/src/agents/debuggerAgent.ts
+@@ -7,6 +7,10 @@ import { KaizenState } from '../state';
+ import { langfuseTracer } from '../tools/langfuseTracer';
+ import { normalizeSandboxPath, isProtectedFile } from '../tools/sandboxPathUtils';
+ import { FilePatchSchema, getLanguageFromPath, sanitizeCodePatch } from './codeGenAgent';
++import { workspaceManager } from '../tools/workspaceManager';
++
++const existsInWorkspace = (p: string): boolean => fs.existsSync(workspaceManager.resolvePath(p));
++const readInWorkspace = (p: string): string => existsInWorkspace(p) ? fs.readFileSync(workspaceManager.resolvePath(p), 'utf-8') : '';
+ 
+ dotenv.config();
+ 
+@@ -48,7 +52,7 @@ export async function debuggerAgentNode(state: typeof KaizenState.State): Promis
+       const baseName = path.basename(norm);
+       const implName = baseName.replace('test_', '').replace('_test.py', '.py').replace('.test.ts', '.ts');
+       const possibleImplPath = `src/sandbox/${implName}`;
+-      if (fs.existsSync(possibleImplPath)) {
++      if (existsInWorkspace(possibleImplPath)) {
+         resolvedTargets.push(possibleImplPath);
+       }
+     } else {
+@@ -58,7 +62,7 @@ export async function debuggerAgentNode(state: typeof KaizenState.State): Promis
+ 
+   // Fallback scan of src/sandbox for impl file if only test file existed
+   if (resolvedTargets.length === 0 && testFileCandidate) {
+-    const sandboxDir = path.resolve(process.cwd(), 'src/sandbox');
++    const sandboxDir = workspaceManager.getSandboxDir();
+     if (fs.existsSync(sandboxDir)) {
+       const impls = fs.readdirSync(sandboxDir).filter(f => !f.startsWith('test_') && !f.includes('_test.'));
+       if (impls.length > 0) {
+@@ -74,13 +78,13 @@ export async function debuggerAgentNode(state: typeof KaizenState.State): Promis
+     const norm = primaryTarget.replace(/\\/g, '/');
+     const baseName = path.basename(norm);
+     const possibleTestPath = `src/sandbox/test_${baseName}`;
+-    if (fs.existsSync(possibleTestPath)) {
++    if (existsInWorkspace(possibleTestPath)) {
+       testFileCandidate = possibleTestPath;
+     }
+   }
+ 
+-  const targetCode = fs.existsSync(primaryTarget) ? fs.readFileSync(primaryTarget, 'utf-8') : '';
+-  const testCode = (testFileCandidate && fs.existsSync(testFileCandidate)) ? fs.readFileSync(testFileCandidate, 'utf-8') : '';
++  const targetCode = readInWorkspace(primaryTarget);
++  const testCode = testFileCandidate ? readInWorkspace(testFileCandidate) : '';
+ 
+   // Retrieve latest structured failure object & compiler errors
+   const failures = (state as any).structuredFailures || [];
+diff --git a/src/agents/intentAgent.ts b/src/agents/intentAgent.ts
+index 883e538..2197da9 100644
+--- a/src/agents/intentAgent.ts
++++ b/src/agents/intentAgent.ts
+@@ -1,3 +1,4 @@
++import { normalizeSandboxPath } from '../tools/sandboxPathUtils';
+ import { z } from 'zod';
+ import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
+ import * as dotenv from 'dotenv';
+@@ -112,7 +113,7 @@ export function extractGitActions(input: string): Array<'status' | 'diff' | 'com
+   const rawPrompt = extractRawUserPrompt(input).toLowerCase();
+   const requestedActions: Array<'status' | 'diff' | 'commit' | 'push' | 'log'> = [];
+ 
+-  if (/\b(git\s+status|repo(sitory)?\s+status|check\s+status|show\s+status|status\s+of\s+(repo|repository|git|workspace)|changes)\b/i.test(rawPrompt)) {
++  if (/\b(git\s+status|repo(sitory)?\s+status|check\s+status|show\s+status|status\s+of\s+(repo|repository|git|workspace)|what\s+(has\s+)?changed|(show|list|check)\s+(the\s+|my\s+)?(uncommitted\s+)?changes)\b/i.test(rawPrompt)) {
+     requestedActions.push('status');
+   }
+   if (/\b(git\s+diff|repo(sitory)?\s+diff|recent\s+diff|show\s+diff|check\s+diff)\b/i.test(rawPrompt) || /\bgit\s+diff\b/i.test(rawPrompt)) {
+@@ -265,10 +266,10 @@ export function isGeneralQuery(input: string): boolean {
+     'json', 'component', 'test', 'create', 'write', 'make', 'delete', 'refactor', 'fix',
+     'implement', 'add', 'modify', 'directory', 'folder', 'npm', 'node', 'run', 'execute',
+     'calculator', 'utils', 'main.ts', 'solution', 'import', 'export', 'const', 'let', 'var',
+-    'git', 'status', 'diff', 'commit', 'push', 'branch', 'repository', 'log', 'checkout', 'stash',
++    'git', 'git status', 'diff', 'commit', 'push', 'branch', 'repository', 'git log', 'checkout', 'stash',
+     'terminal', 'command', 'shell', 'rm', 'del', 'sudo', 'chmod',
+     'website', 'webpage', 'web', 'landing', 'page', 'site', 'index.html', 'style.css', 'styles.css', 'script.js', 'frontend',
+-    'agent', 'agents', 'llm', 'model', 'models', 'mcp', 'intent', 'pipeline', 'router', 'classification'
++    'agent', 'agents', 'llm', 'mcp', 'intent', 'pipeline', 'router', 'classification'
+   ];
+ 
+   // Conceptual questions about data structures / algorithms (e.g. "what is a binary search tree")
+@@ -784,7 +785,9 @@ Rules:
+           return { status: 'ROUTED_DELETE_FILES', targetFiles: promptExtracted, requestedLanguage, languageInfo };
+         }
+ 
+-        const rawFiles = result.targetFiles || result.target_files;
++        const rawFiles = ((result.targetFiles || result.target_files || []) as string[])
++          .map(f => { try { return normalizeSandboxPath(f); } catch { return ''; } })
++          .filter(Boolean);
+         let extractedFiles: string[] = [];
+         if (promptExtracted.length > 0) {
+           extractedFiles = [...promptExtracted];
+diff --git a/src/agents/plannerAgent.ts b/src/agents/plannerAgent.ts
+index 1d56c94..8d59dc5 100644
+--- a/src/agents/plannerAgent.ts
++++ b/src/agents/plannerAgent.ts
+@@ -1,6 +1,7 @@
+ import { z } from 'zod';
+ import * as dotenv from 'dotenv';
+ import * as fs from 'fs';
++import { workspaceManager } from '../tools/workspaceManager';
+ import * as path from 'path';
+ import { KaizenState, PlanStep } from '../state';
+ import { ASTParserTool, ExtractedSymbol } from '../tools/astParser';
+@@ -403,7 +404,7 @@ Return the final JSON plan only.`;
+ 
+   const existingFilesContent: string[] = [];
+   for (const targetPath of normalizedTargets) {
+-    const fullPath = path.resolve(process.cwd(), targetPath);
++    const fullPath = workspaceManager.resolvePath(targetPath);
+     if (fs.existsSync(fullPath)) {
+       try {
+         const content = fs.readFileSync(fullPath, 'utf-8').slice(0, 50000);
+@@ -500,7 +501,7 @@ Return the final JSON plan only.`;
+     const planSteps: PlanStep[] = rawSteps.map((step, idx) => {
+       const normTarget = normalizeSandboxPath(step.targetFile);
+       const isBlocked = isProtectedFile(normTarget);
+-      const fullPath = normTarget ? path.resolve(process.cwd(), normTarget) : '';
++      const fullPath = normTarget ? workspaceManager.resolvePath(normTarget) : '';
+       const isNew = !fullPath || !fs.existsSync(fullPath);
+       const stepDeps = (step.dependsOn || [])
+         .map(depIdx => rawSteps[depIdx - 1]?.targetFile)
+diff --git a/src/agents/reviewerAgent.ts b/src/agents/reviewerAgent.ts
+index ca075c6..248130d 100644
+--- a/src/agents/reviewerAgent.ts
++++ b/src/agents/reviewerAgent.ts
+@@ -26,6 +26,7 @@ export interface ReviewResult {
+ }
+ 
+ import * as fs from 'fs';
++import { workspaceManager } from '../tools/workspaceManager';
+ import * as path from 'path';
+ import { validateCodeSyntax } from '../tools/languageResolver';
+ 
+@@ -43,7 +44,7 @@ export async function reviewerAgentNode(state: typeof KaizenState.State): Promis
+   if (!patchText) {
+     const diskFiles: string[] = [];
+     for (const tf of targetFiles) {
+-      const full = path.resolve(process.cwd(), tf);
++      const full = workspaceManager.resolvePath(tf);
+       if (fs.existsSync(full)) {
+         try {
+           diskFiles.push(`// File: ${tf}\n${fs.readFileSync(full, 'utf-8').slice(0, 30000)}`);
+diff --git a/src/context/memory/memoryEngine.ts b/src/context/memory/memoryEngine.ts
+index c2a82ee..e9ff8c4 100644
+--- a/src/context/memory/memoryEngine.ts
++++ b/src/context/memory/memoryEngine.ts
+@@ -127,8 +127,16 @@ export class MemoryEngine {
+     const relevant = this.retrieveRelevant(query);
+ 
+     const stateBlock = this.stateMemory.formatForPrompt();
+-    const shortTermBlock = this.shortTermMemory.formatForPrompt(query.topKShortTerm || 6);
+-    const longTermBlock = this.longTermMemory.formatForPrompt(query.workspaceId || 'default');
++    const shortTermBlock = relevant.shortTermMemory.length > 0
++      ? 'SHORT-TERM MEMORY (most relevant):\n' + relevant.shortTermMemory
++          .map(e => `  - ${e.role === 'assistant' ? 'Assistant' : e.role === 'user' ? 'User' : e.eventKind}: ${(e.summary || e.content).substring(0, 160)}`)
++          .join('\n')
++      : this.shortTermMemory.formatForPrompt(query.topKShortTerm || 6);
++    const longTermBlock = relevant.longTermMemory.length > 0
++      ? 'LONG-TERM MEMORY (most relevant):\n' + relevant.longTermMemory
++          .map(f => `  - [${f.category}] ${f.key}: ${f.value}`)
++          .join('\n')
++      : this.longTermMemory.formatForPrompt(query.workspaceId || 'default');
+     const episodicBlock = this.episodicMemory.formatForPrompt(relevant.episodicMemory);
+ 
+     return `
+diff --git a/src/mcp/mcpInterface.ts b/src/mcp/mcpInterface.ts
+index ffebc9b..ac8c1bd 100644
+--- a/src/mcp/mcpInterface.ts
++++ b/src/mcp/mcpInterface.ts
+@@ -402,6 +402,7 @@ export class MCPUnifiedInterface {
+     }
+ 
+     // Connect to external Playwright MCP server if not already on a browser-capable server
++    let usingSimulatedBrowser = false;
+     try {
+       if (!this.isConnected || (this.activeConfig?.id !== 'playwright-mcp-stdio' && !this.discoveredTools.has('browser_navigate') && !this.discoveredTools.has('browser_snapshot') && !this.discoveredTools.has('navigate'))) {
+         await this.connectServer('playwright-mcp-stdio');
+@@ -409,7 +410,9 @@ export class MCPUnifiedInterface {
+     } catch (err) {
+       console.warn('[MCPClient] Playwright MCP server failed to connect, falling back to in-process browser simulation:', err);
+       await this.connectServer('default-inprocess');
++      usingSimulatedBrowser = true;
+     }
++    if (this.activeConfig?.id === 'default-inprocess') usingSimulatedBrowser = true;
+ 
+     // Find actual tool name in discovered tools matching the action
+     let targetToolName = `browser_${action}`;
+@@ -455,6 +458,20 @@ export class MCPUnifiedInterface {
+       const textOutput = result.content?.map((c: any) => typeof c === 'string' ? c : (c.text || JSON.stringify(c))).join('\n') || '';
+       const isError = Boolean(result.isError);
+ 
++      if (usingSimulatedBrowser) {
++        return {
++          success: false,
++          tool: 'browser',
++          action: `browser_${action}`,
++          output: textOutput,
++          error: 'Playwright MCP is not available, so no real browser action was performed. Install it with `npx @playwright/mcp@latest --help` / `npx playwright install chromium`.',
++          riskScore: evalResult.riskScore,
++          isSimulated: true,
++          approvalStatus: options?.approved ? 'APPROVED' : 'AUTO_APPROVED',
++          requestedAction: `browser_${action}`
++        };
++      }
++
+       return {
+         success: !isError,
+         tool: 'browser',
+diff --git a/src/tools/astParser.ts b/src/tools/astParser.ts
+index 9cd0b82..475b6d3 100644
+--- a/src/tools/astParser.ts
++++ b/src/tools/astParser.ts
+@@ -1,4 +1,4 @@
+-import * as Parser from 'web-tree-sitter';
++import * as TreeSitter from 'web-tree-sitter';
+ import * as ts from 'typescript';
+ import * as fs from 'fs';
+ import * as path from 'path';
+@@ -60,23 +60,67 @@ export class ASTParserTool {
+     }
+   }
+ 
++  private grammars: Map<string, any> = new Map();
++
++  private static readonly GRAMMAR_FILES: Record<string, string> = {
++    python: 'tree-sitter-python.wasm',
++    html: 'tree-sitter-html.wasm',
++    css: 'tree-sitter-css.wasm',
++    json: 'tree-sitter-json.wasm'
++  };
++
++  private static packageDir(pkg: string): string | null {
++    try {
++      let dir = path.dirname(require.resolve(pkg));
++      while (dir !== path.dirname(dir)) {
++        const pj = path.join(dir, 'package.json');
++        if (fs.existsSync(pj) && JSON.parse(fs.readFileSync(pj, 'utf-8')).name === pkg) return dir;
++        dir = path.dirname(dir);
++      }
++    } catch {
++      // not resolvable from here
++    }
++    const local = path.resolve(process.cwd(), 'node_modules', pkg);
++    return fs.existsSync(local) ? local : null;
++  }
++
+   async init(wasmPath?: string, languageWasmPath?: string, language: string = 'typescript'): Promise<void> {
+     this.currentLanguage = language;
++    if (this.isInitialized && this.parser) return;
+     this.isInitialized = true;
+     try {
+-      const ParserConstructor: any = (Parser as any).default || Parser;
+-      if (typeof ParserConstructor?.init === 'function') {
+-        const defaultWasm = wasmPath || path.resolve(process.cwd(), 'node_modules/web-tree-sitter/tree-sitter.wasm');
+-        if (fs.existsSync(defaultWasm)) {
+-          await ParserConstructor.init({ locateFile: () => defaultWasm });
+-          this.parser = new ParserConstructor();
+-          if (languageWasmPath && fs.existsSync(languageWasmPath)) {
+-            const Lang = await ParserConstructor.Language.load(languageWasmPath);
+-            this.parser.setLanguage(Lang);
++      const mod: any = TreeSitter as any;
++      const ParserCls: any = mod.Parser || mod.default || mod;
++      const LanguageCls: any = mod.Language || ParserCls.Language;
++      if (typeof ParserCls?.init !== 'function' || !LanguageCls?.load) return;
++
++      const coreDir = ASTParserTool.packageDir('web-tree-sitter');
++      const coreWasm = wasmPath || [ 'web-tree-sitter.wasm', 'tree-sitter.wasm' ]
++        .map(f => (coreDir ? path.join(coreDir, f) : ''))
++        .find(f => f && fs.existsSync(f));
++      if (!coreWasm || !fs.existsSync(coreWasm)) return;
++
++      await ParserCls.init({ locateFile: () => coreWasm });
++      this.parser = new ParserCls();
++
++      const grammarDirs = [
++        ASTParserTool.packageDir('@vscode/tree-sitter-wasm'),
++        ASTParserTool.packageDir('tree-sitter-wasms')
++      ].filter((d): d is string => Boolean(d)).flatMap(d => [path.join(d, 'wasm'), path.join(d, 'out')]);
++      for (const [lang, file] of Object.entries(ASTParserTool.GRAMMAR_FILES)) {
++        const grammarPath = lang === language && languageWasmPath
++          ? languageWasmPath
++          : (grammarDirs.map(d => path.join(d, file)).find(f => fs.existsSync(f)) || '');
++        if (grammarPath && fs.existsSync(grammarPath)) {
++          try {
++            this.grammars.set(lang, await LanguageCls.load(grammarPath));
++          } catch (err: any) {
++            console.warn(`[AST] Could not load ${lang} grammar:`, err?.message || err);
+           }
+         }
+       }
+-    } catch {
++    } catch (err: any) {
++      console.warn('[AST] Tree-sitter unavailable, using regex fallback:', err?.message || err);
+       this.parser = null;
+     }
+   }
+@@ -93,13 +137,16 @@ export class ASTParserTool {
+       return this.parseTypeScriptAST(sourceCode, lang);
+     }
+ 
+-    if (this.parser) {
++    const grammar = this.grammars.get(lang);
++    if (this.parser && grammar) {
+       try {
++        this.parser.setLanguage(grammar);
+         const tree = this.parser.parse(sourceCode);
+         const symbols: ExtractedSymbol[] = [];
+         for (let i = 0; i < tree.rootNode.childCount; i++) {
+-          const node = tree.rootNode.child(i);
+-          if (node && (node.type.includes('function') || node.type.includes('class') || node.type.includes('method') || node.type.includes('def'))) {
++          const outer = tree.rootNode.child(i);
++          const node = outer?.type === 'decorated_definition' ? (outer.childForFieldName('definition') || outer) : outer;
++          if (node && (node.type.includes('function') || node.type.includes('class') || node.type.includes('method'))) {
+             const startLine = node.startPosition.row + 1;
+             const endLine = node.endPosition.row + 1;
+             const startColumn = node.startPosition.column + 1;
+diff --git a/src/tools/graphifyEngine.ts b/src/tools/graphifyEngine.ts
+index b40c032..9960923 100644
+--- a/src/tools/graphifyEngine.ts
++++ b/src/tools/graphifyEngine.ts
+@@ -469,12 +469,23 @@ export class GraphifyEngine {
+   public findMatchingKey(targetPath: string): string | undefined {
+     const norm = this.normalizePath(targetPath);
+     if (this.fileFactsMap.has(norm)) return norm;
++    const matches: string[] = [];
+     for (const key of this.fileFactsMap.keys()) {
+-      if (key.endsWith('/' + norm) || norm.endsWith('/' + key) || key === norm) {
+-        return key;
++      if (key.endsWith('/' + norm) || norm.endsWith('/' + key)) {
++        matches.push(key);
+       }
+     }
+-    return undefined;
++    if (matches.length <= 1) return matches[0];
++    // Several files share this suffix: pick the one sharing the longest path tail, refuse ties.
++    const tailScore = (key: string): number => {
++      const a = key.split('/').reverse();
++      const b = norm.split('/').reverse();
++      let n = 0;
++      while (n < a.length && n < b.length && a[n] === b[n]) n++;
++      return n;
++    };
++    matches.sort((x, y) => tailScore(y) - tailScore(x));
++    return tailScore(matches[0]) > tailScore(matches[1]) ? matches[0] : undefined;
+   }
+ 
+   private resolveImports(): void {
+diff --git a/src/tools/persistenceEngine.ts b/src/tools/persistenceEngine.ts
+index 9088b41..baa856c 100644
+--- a/src/tools/persistenceEngine.ts
++++ b/src/tools/persistenceEngine.ts
+@@ -1,3 +1,4 @@
++import { workspaceManager } from './workspaceManager';
+ import * as fs from 'fs';
+ import * as path from 'path';
+ import { KaizenStateType, PlanStep } from '../state';
+@@ -92,7 +93,7 @@ export class PersistenceEngine {
+         metadata: { status: session.status, targetFiles: session.targetFiles }
+       });
+ 
+-      projectMemory.saveProjectMetadata(process.cwd(), {
++      projectMemory.saveProjectMetadata(workspaceManager.getWorkspaceRoot(), {
+         fileCount: session.targetFiles?.length || 0,
+         envVars: { lastSessionId: session.sessionId }
+       });
+diff --git a/test/logicFixes.test.ts b/test/logicFixes.test.ts
+index bad4a10..296bedf 100644
+--- a/test/logicFixes.test.ts
++++ b/test/logicFixes.test.ts
+@@ -3,6 +3,9 @@ import { permissionGate } from '../src/tools/permissionGate';
+ import { isEquivalentLongTermFact } from '../src/context/memory/longTermMemory';
+ import { kaizenMCPServer } from '../src/mcp/mcpServer';
+ import { mcpInterface } from '../src/mcp/mcpInterface';
++import { extractGitActions } from '../src/agents/intentAgent';
++import { ASTParserTool } from '../src/tools/astParser';
++import { GraphifyEngine } from '../src/tools/graphifyEngine';
+ 
+ async function main() {
+   // Permission gate: normal words in content must not be "dangerous"
+@@ -30,6 +33,23 @@ async function main() {
+   const gitDry = await mcpInterface.executeGitAction('commit', 'msg', { dryRun: true });
+   assert.strictEqual(gitDry.approvalStatus, 'PENDING_APPROVAL');
+ 
++  // Intent: "commit these changes" should not also run status
++  assert.deepStrictEqual(extractGitActions('commit these changes'), ['commit']);
++
++  // AST: tree-sitter python grammar is loaded and decorated functions get real names
++  const ast = new ASTParserTool();
++  await ast.init();
++  const pySyms = ast.extractTopLevelSymbols('@cache\ndef add(a, b):\n    return a + b\n\nclass Calc:\n    pass\n', 'python');
++  assert.deepStrictEqual(pySyms.map(x => x.name).sort(), ['Calc', 'add']);
++  assert.ok((ast as any).grammars.has('python'), 'python grammar should be loaded');
++
++  // Graphify: ambiguous suffix must not link to an arbitrary file
++  const g = new GraphifyEngine() as any;
++  g.fileFactsMap.set('src/a/utils.ts', {});
++  g.fileFactsMap.set('src/b/utils.ts', {});
++  assert.strictEqual(g.findMatchingKey('utils.ts'), undefined);
++  assert.strictEqual(g.findMatchingKey('/repo/src/b/utils.ts'), 'src/b/utils.ts');
++
+   void kaizenMCPServer;
+   console.log('ALL LOGIC-FIX CHECKS PASSED');
+   process.exit(0);
+-- 
+2.34.1
+
