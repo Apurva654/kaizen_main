@@ -57,6 +57,9 @@ export class PermissionGateManager {
     }
 
     // Medium Risk Operations (30 - 69)
+    if (action.includes('file_move') || action.includes('move_file') || action.includes('move') || action.includes('rename')) {
+      return 45;
+    }
     if (action.includes('git_commit') || /\bgit\s+commit\b/.test(commandStr)) {
       return 50;
     }

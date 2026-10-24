@@ -10,7 +10,7 @@ import { langfuseTracer } from '../tools/langfuseTracer';
 dotenv.config();
 
 export const IntentSchema = z.object({
-  intent: z.enum(['GENERATE_CODE', 'DEBUG_ERROR', 'EXPLAIN_CODE', 'REFACTOR', 'RUN_EXISTING_TESTS', 'GENERAL_QUERY', 'MCP_GIT', 'MCP_TERMINAL', 'DELETE_FILES', 'MEMORY_WRITE', 'MEMORY_READ'])
+  intent: z.enum(['GENERATE_CODE', 'DEBUG_ERROR', 'EXPLAIN_CODE', 'REFACTOR', 'RUN_EXISTING_TESTS', 'GENERAL_QUERY', 'MCP_GIT', 'MCP_TERMINAL', 'DELETE_FILES', 'MOVE_FILES', 'MEMORY_WRITE', 'MEMORY_READ'])
     .describe("The classified intent of the user request"),
   targetFiles: z.array(z.string()).optional()
     .describe("All target source file paths identified or implied for the task (e.g., ['src/sandbox/utils.ts', 'src/sandbox/main.ts'])"),
@@ -58,7 +58,7 @@ export function hasErrorEvidence(prompt: string): boolean {
   const p = prompt;
   const hasErrorClass = /\b(TypeError|ReferenceError|SyntaxError|RangeError|URIError|AssertionError|Traceback|Exception|NullPointerException)\b/i.test(p);
   const hasStackFrame = /\bat\s+(?:[a-zA-Z0-9_$<>.]+\s+\()?[a-zA-Z0-9_\-\.\/\\:]+:\d+(?::\d+)?\)?/i.test(p) ||
-                        /\b[a-zA-Z0-9_\-]+\.(?:ts|js|py|html|css|json|cpp|c|java):\d+\b/i.test(p);
+    /\b[a-zA-Z0-9_\-]+\.(?:ts|js|py|html|css|json|cpp|c|java):\d+\b/i.test(p);
   const hasTsCode = /\bTS\d{4}\b/i.test(p);
   const hasSysError = /\b(ENOENT|MODULE_NOT_FOUND|EACCES|ECONNREFUSED)\b/i.test(p);
   const hasTestFailure = /\b(failing\s+test|test\s+fail(ed|ures?)|assertions?|exit\s+code\s+\d+)\b/i.test(p);
@@ -262,7 +262,7 @@ export function extractTerminalCommand(input: string): string {
   if (isCommandInquiryOrExplanation(raw.toLowerCase())) {
     return '';
   }
-  
+
   // 1. If quoted with `...`, "...", or '...', extract inside quote ONLY IF preceded by execution verb or standalone command
   const matchQuote = raw.match(/[`'"]([^`'"]+)[`'"]/);
   if (matchQuote && matchQuote[1]) {
@@ -309,11 +309,11 @@ export function extractTerminalCommand(input: string): string {
   ];
   const firstWord = clean.split(/\s+/)[0].toLowerCase();
   const isGoCli = firstWord === 'go' && /^\s*go\s+(run|build|test|get|mod|vet|fmt|version|install|clean|env|doc)\b/i.test(clean);
-  
+
   if ((validCmdPrefixes.includes(firstWord) || isGoCli) || firstWord.endsWith('.exe') || firstWord.endsWith('.bat') || firstWord.endsWith('.cmd') || firstWord.startsWith('./') || firstWord.startsWith('.\\')) {
     return clean;
   }
-  
+
   return '';
 }
 
@@ -481,6 +481,33 @@ export function isDeleteQuery(input: string): boolean {
   return false;
 }
 
+export function isMoveQuery(input: string): boolean {
+  const rawPrompt = extractRawUserPrompt(input).toLowerCase().trim();
+
+  // Guard: Code element edits inside a file (e.g., "move function foo to bottom", "move import", "move class")
+  const isCodeElement = /\b(function|method|class|variable|line|lines|code|import|imports|logic|statement|component|block|tag)\b/i.test(rawPrompt);
+  const isInsideFileDirective = /\b(from|inside|within|of)\s+([a-zA-Z0-9_\-\.\/]+\.(ts|js|py|cpp|c|java|html|css|json)|class|function)\b/i.test(rawPrompt);
+  const isCodeMovePhrase = /\b(move|relocate|shift|transfer|put)\s+(the\s+)?(function|method|class|variable|line|lines|code|import|imports|logic|statement)\b/i.test(rawPrompt);
+
+  if ((isCodeElement && isInsideFileDirective) || isCodeMovePhrase) {
+    return false;
+  }
+
+  // 1. "put/move/relocate/transfer/place/shift/organize [these/those/the/all/N] files in/into/to <folder>"
+  const moveFilesPattern = /\b(put|move|relocate|transfer|place|shift|organize)\s+(these|those|the|all|both|\d+\s+|[a-zA-Z]+\s+)?(files?|folders?|directories|directory)\s+(in|into|to)\s+([a-zA-Z0-9_\-\.\/]+)/i;
+
+  // 2. "move/rename [the file] <file> to <file/folder>"
+  const moveFileToPattern = /\b(move|rename)\s+(the\s+file\s+)?([a-zA-Z0-9_\-\/]+\.[a-zA-Z0-9]+)\s+(to|into|in)\s+([a-zA-Z0-9_\-\.\/]+)/i;
+
+  // 3. "rename [the] folder/directory <dir> to <dir>"
+  const renameDirPattern = /\b(rename|move)\s+(the\s+)?(folder|directory)\s+([a-zA-Z0-9_\-\/]+)\s+to\s+([a-zA-Z0-9_\-\/]+)/i;
+
+  // 4. "put <file1> and <file2> in <folder>"
+  const putExplicitFilesPattern = /\b(put|move|relocate|place)\s+([a-zA-Z0-9_\-\/]+\.[a-zA-Z0-9]+(?:\s*(?:,|and)\s*[a-zA-Z0-9_\-\/]+\.[a-zA-Z0-9]+)*)\s+(in|into|to)\s+([a-zA-Z0-9_\-\.\/]+)/i;
+
+  return moveFilesPattern.test(rawPrompt) || moveFileToPattern.test(rawPrompt) || renameDirPattern.test(rawPrompt) || putExplicitFilesPattern.test(rawPrompt);
+}
+
 export function detectRequestedLanguageExtension(input: string): string {
   const rawPrompt = extractRawUserPrompt(input).toLowerCase();
   if (/\b(c\+\+|cpp|cplusplus)\b/i.test(rawPrompt)) return '.cpp';
@@ -526,7 +553,7 @@ export function extractBrowserUrl(input: string): string {
       if (firstHtml) {
         return `http://localhost:3000/sandbox/${firstHtml}`;
       }
-    } catch {}
+    } catch { }
   }
 
   // If prompt is asking for a webpage/website/landing page/html, default to static sandbox index.html
@@ -629,12 +656,12 @@ export function extractTargetFilesFromPrompt(prompt: string): string[] {
 
   const lower = rawPrompt.toLowerCase();
   const includesTestRequest = /\b(pytest|test|unit\s+test|spec)\b/i.test(lower);
-  
+
   if (includesTestRequest && foundFiles.length > 0) {
     const mainFile = foundFiles[0];
     const isPy = mainFile.endsWith('.py');
     const isTs = mainFile.endsWith('.ts') || mainFile.endsWith('.js');
-    
+
     if (isPy && !foundFiles.some(f => f.includes('test'))) {
       const parts = mainFile.split('/');
       const fileName = parts.pop()!;
@@ -670,6 +697,17 @@ export async function intentAgentNode(state: typeof KaizenState.State): Promise<
     const extracted = extractTargetFilesFromPrompt(state.userInput);
     return {
       status: 'ROUTED_DELETE_FILES',
+      targetFiles: extracted,
+      requestedLanguage,
+      languageInfo
+    };
+  }
+
+  // Fast-track heuristic for File Move queries
+  if (isMoveQuery(state.userInput)) {
+    const extracted = extractTargetFilesFromPrompt(state.userInput);
+    return {
+      status: 'ROUTED_MOVE_FILES',
       targetFiles: extracted,
       requestedLanguage,
       languageInfo
@@ -778,11 +816,12 @@ Analyze the user's prompt and classify their primary intent into one of:
 - MCP_GIT: Explicit version control operations (git status, git diff, git commit, git push, git log).
 - MCP_TERMINAL: Explicit terminal command execution requests (running shell commands, npm, pytest, etc.).
 - DELETE_FILES: Explicit workspace file or directory deletion requests.
+- MOVE_FILES: Explicit workspace file or directory moving, organizing, or renaming requests (e.g. "put these 4 files in game_folder", "move utils.ts to src/sandbox/lib", "rename player.ts to character.ts").
 - MEMORY_WRITE: Saving user preferences, project conventions, or facts into persistent memory.
 - MEMORY_READ: Querying or recalling remembered preferences, conventions, or past facts.
 
 Rules:
-1. For GENERAL_QUERY, MCP_GIT, MCP_TERMINAL, DELETE_FILES, MEMORY_WRITE, and MEMORY_READ, targetFiles must be an empty array [].
+1. For GENERAL_QUERY, MCP_GIT, MCP_TERMINAL, DELETE_FILES, MOVE_FILES, MEMORY_WRITE, and MEMORY_READ, targetFiles must be an empty array [].
 2. If the user asks to explain a command (e.g. "what does git status do?"), classify as EXPLAIN_CODE or GENERAL_QUERY, NOT MCP_GIT.
 3. If the user asks to delete code within a file (e.g. "delete unused imports"), classify as REFACTOR, NOT DELETE_FILES.
 4. DEBUG_ERROR only when the user reports a concrete failure (error message, stack trace, failing test, or specific broken behaviour). Requests to upgrade, enhance, improve or extend existing code are GENERATE_CODE, even if the project already exists.
@@ -839,6 +878,9 @@ Rules:
         if (intent === 'DELETE_FILES') {
           return { status: 'ROUTED_DELETE_FILES', targetFiles: promptExtracted.map(normalizeSandboxPath).filter(Boolean), requestedLanguage, languageInfo };
         }
+        if (intent === 'MOVE_FILES') {
+          return { status: 'ROUTED_MOVE_FILES', targetFiles: promptExtracted.map(normalizeSandboxPath).filter(Boolean), requestedLanguage, languageInfo };
+        }
 
         const rawFiles = ((result.targetFiles || result.target_files || []) as string[])
           .map(f => { try { return normalizeSandboxPath(f); } catch { return ''; } })
@@ -894,6 +936,16 @@ Rules:
     return {
       status: 'ROUTED_GENERAL_QUERY',
       targetFiles: [],
+      requestedLanguage,
+      languageInfo
+    };
+  }
+
+  // File move fallback
+  if (isMoveQuery(state.userInput)) {
+    return {
+      status: 'ROUTED_MOVE_FILES',
+      targetFiles: promptExtracted.map(normalizeSandboxPath).filter(Boolean),
       requestedLanguage,
       languageInfo
     };

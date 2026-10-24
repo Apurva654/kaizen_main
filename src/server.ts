@@ -11,7 +11,7 @@ import { promisify } from 'util';
 const execAsync = promisify(exec);
 import * as universalValidator from './tools/universalValidator';
 import { KaizenStateType, applyStateReducers } from './state';
-import { intentAgentNode, extractTerminalCommand, extractGitActions, extractBrowserUrl, hasErrorEvidence } from './agents/intentAgent';
+import { intentAgentNode, extractTerminalCommand, extractGitActions, extractBrowserUrl, hasErrorEvidence, isMoveQuery } from './agents/intentAgent';
 import { contextRetrievalAgentNode } from './agents/contextRetrievalAgent';
 import { evaluateContextSufficiency } from './agents/contextSufficiencyAgent';
 import { plannerAgentNode } from './agents/plannerAgent';
@@ -1429,6 +1429,325 @@ export async function runPipeline(
 
       await finalizeExecution(hasBlockedAction ? 'HITL_REQUIRED' : 'GENERAL_COMPLETE', {
         route: 'DELETE_FILES',
+        explanation
+      });
+      return state;
+    }
+
+    // Routing Logic for File Moving & Organizing (Permission Gate HITL)
+    if (state.status === "ROUTED_MOVE_FILES") {
+      skippedStages.push('context', 'planner', 'coder', 'testrunner', 'debugger', 'reviewer');
+      emitSSE('agent_step', { agent: 'IntentAgent', status: 'running', message: '📁 Evaluating file move request with Permission Gate...' });
+
+      const sandboxDir = workspaceManager.getSandboxDir();
+
+      // Separator check and path validator using resolved path and isProtectedFile
+      const validateSandboxPath = (rawPath: string): { valid: boolean; resolved: string; relPath: string; error?: string } => {
+        if (!rawPath || typeof rawPath !== 'string') {
+          return { valid: false, resolved: '', relPath: '', error: 'Path is empty or invalid.' };
+        }
+        let clean = rawPath.replace(/\\/g, '/').trim();
+        if (clean.startsWith('src/sandbox/')) {
+          clean = clean.substring('src/sandbox/'.length);
+        } else if (clean.startsWith('sandbox/')) {
+          clean = clean.substring('sandbox/'.length);
+        }
+        const resolvedSandbox = path.resolve(sandboxDir);
+        const resolved = path.resolve(resolvedSandbox, clean);
+
+        // Separator check: resolved must be resolvedSandbox or strictly inside it with separator
+        const isInside = resolved === resolvedSandbox || resolved.startsWith(resolvedSandbox + path.sep);
+        if (!isInside) {
+          return { valid: false, resolved, relPath: '', error: `Path "${rawPath}" resolves outside src/sandbox.` };
+        }
+        const relPath = workspaceManager.toRelativePath(resolved);
+        if (isProtectedFile(relPath)) {
+          return { valid: false, resolved, relPath, error: `Path "${relPath}" is a protected file or directory.` };
+        }
+        return { valid: true, resolved, relPath };
+      };
+
+      // 1. Extract Destination
+      const destMatch = rawUserInput.match(/\b(?:in|into|to)\s+([a-zA-Z0-9_\-\.\/]+)/i);
+      let rawDestination = destMatch ? destMatch[1].replace(/[.,;:!?]+$/, '').trim() : '';
+
+      if (!rawDestination) {
+        await finalizeExecution('FAILED', {
+          route: 'MOVE_FILES',
+          explanation: `### 🛑 Move Failed\n\nCould not determine destination folder or filename from prompt: "${rawUserInput}".`
+        });
+        return state;
+      }
+
+      const destValidation = validateSandboxPath(rawDestination);
+      if (!destValidation.valid) {
+        await finalizeExecution('FAILED', {
+          route: 'MOVE_FILES',
+          explanation: `### 🛑 Security Rejection: Invalid Destination Path\n\n${destValidation.error}`
+        });
+        return state;
+      }
+
+      // 2. Extract Requested Count N (e.g. "these 4 files", "these four files")
+      const wordToNum: Record<string, number> = {
+        one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10
+      };
+      const countMatch = rawUserInput.match(/\b(?:these|those|the)?\s*(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+files\b/i);
+      let requestedCount: number | undefined;
+      if (countMatch) {
+        const rawNum = countMatch[1].toLowerCase();
+        requestedCount = wordToNum[rawNum] !== undefined ? wordToNum[rawNum] : parseInt(rawNum, 10);
+      }
+
+      // 3. Resolve eligible top-level sandbox files
+      const topLevelItems = fs.existsSync(sandboxDir) ? fs.readdirSync(sandboxDir, { withFileTypes: true }) : [];
+      const eligibleTopLevelFiles = topLevelItems
+        .filter(item => item.isFile() && !item.name.startsWith('.'))
+        .map(item => `src/sandbox/${item.name}`)
+        .filter(f => !isProtectedFile(f) && path.basename(f) !== path.basename(destValidation.resolved));
+
+      // (1) Resolve named files: check sandbox top level first, search subfolders only if no top-level match
+      const resolveNamedFile = (name: string): string | null => {
+        const baseName = path.basename(name);
+        const topLevelPath = path.join(sandboxDir, baseName);
+        if (fs.existsSync(topLevelPath) && fs.statSync(topLevelPath).isFile()) {
+          return workspaceManager.toRelativePath(topLevelPath);
+        }
+        const searchSubfolders = (dir: string): string | null => {
+          if (!fs.existsSync(dir)) return null;
+          const items = fs.readdirSync(dir, { withFileTypes: true });
+          for (const item of items) {
+            const full = path.join(dir, item.name);
+            if (item.isDirectory()) {
+              const subMatch = searchSubfolders(full);
+              if (subMatch) return subMatch;
+            } else if (item.isFile() && item.name.toLowerCase() === baseName.toLowerCase()) {
+              return workspaceManager.toRelativePath(full);
+            }
+          }
+          return null;
+        };
+        return searchSubfolders(sandboxDir);
+      };
+
+      // Extract named files from prompt and state.targetFiles
+      const rawNamedTokens = new Set<string>();
+      if (state.targetFiles && state.targetFiles.length > 0) {
+        for (const tf of state.targetFiles) rawNamedTokens.add(path.basename(tf));
+      }
+      const promptFileMatches = rawUserInput.match(/\b([a-zA-Z0-9_\-]+\.[a-zA-Z0-9]+)\b/g);
+      if (promptFileMatches) {
+        for (const m of promptFileMatches) {
+          if (m.toLowerCase() !== path.basename(destValidation.resolved).toLowerCase()) {
+            rawNamedTokens.add(m);
+          }
+        }
+      }
+
+      let rawFilesToMove: string[] = [];
+      let isCountMismatch = false;
+
+      if (rawNamedTokens.size > 0 && !/\b(?:these|all)\b/i.test(rawUserInput)) {
+        for (const token of rawNamedTokens) {
+          const resolved = resolveNamedFile(token);
+          if (resolved) rawFilesToMove.push(resolved);
+        }
+      } else {
+        if (requestedCount !== undefined) {
+          if (eligibleTopLevelFiles.length !== requestedCount) {
+            isCountMismatch = true;
+          }
+          rawFilesToMove = eligibleTopLevelFiles;
+        } else {
+          rawFilesToMove = eligibleTopLevelFiles;
+        }
+      }
+
+      // (2) Dedupe sources by basename
+      const seenBasenames = new Set<string>();
+      const filesToMove: string[] = [];
+      for (const file of rawFilesToMove) {
+        const base = path.basename(file).toLowerCase();
+        if (!seenBasenames.has(base)) {
+          seenBasenames.add(base);
+          filesToMove.push(file);
+        }
+      }
+
+      if (filesToMove.length === 0) {
+        await finalizeExecution('GENERAL_COMPLETE', {
+          route: 'MOVE_FILES',
+          explanation: `### ℹ️ No Eligible Files Found\n\nNo eligible top-level files were found in \`src/sandbox\` to move.`
+        });
+        return state;
+      }
+
+      // 4. Validate all source paths strictly
+      for (const file of filesToMove) {
+        const srcValidation = validateSandboxPath(file);
+        if (!srcValidation.valid) {
+          await finalizeExecution('FAILED', {
+            route: 'MOVE_FILES',
+            explanation: `### 🛑 Security Rejection: Invalid Source Path\n\n${srcValidation.error}`
+          });
+          return state;
+        }
+      }
+
+      // 5. Build planned moves
+      const destStats = fs.existsSync(destValidation.resolved) ? fs.statSync(destValidation.resolved) : null;
+      const isRenameSingleFile = filesToMove.length === 1 && (!destStats || !destStats.isDirectory()) && path.extname(destValidation.resolved) !== '';
+      const destFolderAbs = path.resolve(destValidation.resolved);
+      const plannedMoves: Array<{ fromRel: string; toRel: string; fromAbs: string; toAbs: string }> = [];
+
+      for (const fileRel of filesToMove) {
+        const fromAbs = path.resolve(workspaceManager.resolvePath(fileRel));
+        const toAbs = isRenameSingleFile ? destFolderAbs : path.resolve(path.join(destFolderAbs, path.basename(fromAbs)));
+        const toRel = workspaceManager.toRelativePath(toAbs);
+
+        // (3) Drop any source whose resolved path is already inside the destination folder or equals its target
+        const isInsideDest = fromAbs.startsWith(destFolderAbs + path.sep);
+        const equalsTarget = fromAbs.toLowerCase() === toAbs.toLowerCase();
+        if (isInsideDest || equalsTarget) {
+          continue;
+        }
+
+        plannedMoves.push({ fromRel: fileRel, toRel, fromAbs, toAbs });
+      }
+
+      if (plannedMoves.length === 0) {
+        await finalizeExecution('GENERAL_COMPLETE', {
+          route: 'MOVE_FILES',
+          explanation: `### ℹ️ All Files Already in Destination\n\nThe targeted files are already inside destination \`${destValidation.relPath}\`. No file move needed.`
+        });
+        return state;
+      }
+
+      // (4) Run "destination already exists" check on every remaining move
+      const existingTargets = plannedMoves.filter(m => fs.existsSync(m.toAbs));
+      const hasConflicts = existingTargets.length > 0;
+
+      // 6. Warn if a moved file is referenced by an unmoved file (e.g. index.html)
+      const checkUnmovedReferences = (moved: string[]): string[] => {
+        const warnings: string[] = [];
+        const movedBaseNames = new Set(moved.map(f => path.basename(f)));
+        const movedAbsSet = new Set(moved.map(f => path.resolve(workspaceManager.resolvePath(f))));
+
+        const getFilesRecursively = (dir: string): string[] => {
+          let list: string[] = [];
+          if (!fs.existsSync(dir)) return list;
+          const items = fs.readdirSync(dir, { withFileTypes: true });
+          for (const item of items) {
+            const p = path.join(dir, item.name);
+            if (item.isDirectory()) {
+              list = list.concat(getFilesRecursively(p));
+            } else if (item.isFile()) {
+              list.push(p);
+            }
+          }
+          return list;
+        };
+
+        const allSandboxFiles = getFilesRecursively(sandboxDir);
+        for (const file of allSandboxFiles) {
+          if (movedAbsSet.has(path.resolve(file))) continue;
+          const ext = path.extname(file).toLowerCase();
+          if (!['.html', '.htm', '.ts', '.js', '.jsx', '.tsx', '.json', '.css', '.py'].includes(ext)) continue;
+          try {
+            const content = fs.readFileSync(file, 'utf-8');
+            const rel = workspaceManager.toRelativePath(file);
+            for (const base of movedBaseNames) {
+              const regex = new RegExp(`(^|[^a-zA-Z0-9_-])${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-zA-Z0-9_-]|$)`);
+              if (regex.test(content)) {
+                warnings.push(`Unmoved file \`${rel}\` references \`${base}\`.`);
+              }
+            }
+          } catch {}
+        }
+        return Array.from(new Set(warnings));
+      };
+
+      const referenceWarnings = checkUnmovedReferences(filesToMove);
+
+      // 7. Permission Gate & Count Mismatch / Overwrite Confirmation
+      const evalResult = permissionGate.evaluate('file_move', {
+        command: rawUserInput,
+        files: filesToMove,
+        destination: destValidation.relPath
+      });
+
+      let isApproved = true;
+      let hasBlockedAction = false;
+
+      // Intercept if count mismatch, destination conflicts exist, or gate requires approval
+      if (isCountMismatch || hasConflicts || (evalResult.requiresApproval && !evalResult.allowed)) {
+        hasBlockedAction = true;
+        let messageText = '';
+        let hitlTitle = 'Permission Gate: File Move Request';
+
+        if (hasConflicts) {
+          hitlTitle = 'Destination File Collision: Overwrite Confirmation';
+          messageText = `${existingTargets.length} destination file(s) already exist in "${destValidation.relPath}":\n` +
+            existingTargets.map(m => `- ${m.toRel}`).join('\n') +
+            `\n\nChoose Overwrite to replace existing file(s) or Cancel to abort.`;
+        } else if (isCountMismatch) {
+          hitlTitle = 'Permission Gate: File Count Mismatch';
+          messageText = `Count mismatch: You requested moving ${requestedCount} files, but found ${eligibleTopLevelFiles.length} eligible files in src/sandbox:\n${eligibleTopLevelFiles.join('\n')}\nDestination: ${destValidation.relPath}`;
+        } else {
+          messageText = `The agent is requesting permission to move ${plannedMoves.length} files to "${destValidation.relPath}":\n` +
+            plannedMoves.map(m => `${m.fromRel} ──► ${m.toRel}`).join('\n');
+        }
+
+        const userHitlResponse = await new Promise<{ action: 'approve' | 'reject' | 'feedback'; message?: string }>((resolve) => {
+          const reqId = registerHitl(sessionId, resolve);
+          emitSSE('hitl_request', {
+            type: 'FILE_MOVE_APPROVAL',
+            title: hitlTitle,
+            message: messageText,
+            files: plannedMoves.map(m => ({ from: m.fromRel, to: m.toRel, conflict: fs.existsSync(m.toAbs) })),
+            destination: destValidation.relPath,
+            warnings: referenceWarnings,
+            hasConflicts,
+            riskScore: hasConflicts ? 75 : evalResult.riskScore,
+            requestId: reqId
+          });
+        });
+        emitSSE('hitl_received', { response: userHitlResponse });
+        isApproved = userHitlResponse.action === 'approve';
+      }
+
+      let explanation = '';
+      if (isApproved) {
+        if (!isRenameSingleFile) {
+          fs.mkdirSync(destValidation.resolved, { recursive: true });
+        } else {
+          fs.mkdirSync(path.dirname(destValidation.resolved), { recursive: true });
+        }
+
+        const movedResults: string[] = [];
+        for (const move of plannedMoves) {
+          // Cross-platform safe overwrite on Windows: unlink target if it exists
+          if (fs.existsSync(move.toAbs)) {
+            fs.unlinkSync(move.toAbs);
+          }
+          fs.renameSync(move.fromAbs, move.toAbs);
+          movedResults.push(`\`${move.fromRel}\` ──► \`${move.toRel}\``);
+        }
+
+        let warningSection = '';
+        if (referenceWarnings.length > 0) {
+          warningSection = `\n\n> ⚠️ **Reference Warnings:**\n${referenceWarnings.map(w => `> - ${w}`).join('\n')}`;
+        }
+
+        explanation = `### 📁 Files Moved Successfully\n\nMoved ${movedResults.length} file(s):\n${movedResults.map(r => `- ${r}`).join('\n')}${warningSection}`;
+        state.targetFiles = plannedMoves.map(m => m.toRel);
+      } else {
+        explanation = `### 🛑 File Move Cancelled\n\nFile move operation was cancelled by the developer. No files were moved.`;
+      }
+
+      completedStages.push('response');
+      await finalizeExecution(hasBlockedAction ? 'HITL_REQUIRED' : 'GENERAL_COMPLETE', {
+        route: 'MOVE_FILES',
         explanation
       });
       return state;

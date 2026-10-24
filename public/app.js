@@ -1172,6 +1172,11 @@ document.addEventListener('DOMContentLoaded', () => {
             if (codeEditor) codeEditor.value = '';
             updateLineNumbers();
             renderTargetBadges([]);
+          } else if (data.route === 'MOVE_FILES' || data.route === 'ROUTED_MOVE_FILES') {
+            loadSandboxFiles();
+            if (data.targetFiles && data.targetFiles[0]) {
+              openFileInEditor(data.targetFiles[0]);
+            }
           } else if (data.targetFiles && data.targetFiles[0]) {
             openFileInEditor(data.targetFiles[0]);
           }
@@ -1618,6 +1623,81 @@ document.addEventListener('DOMContentLoaded', () => {
       rejectBtn.addEventListener('click', async () => {
         await sendHitlResponse('reject');
         card.innerHTML = `<div class="choice-card-header" style="color: var(--danger, #f56c6c)">✖ Terminal Action Denied by Developer</div>`;
+      });
+
+      widgetsContainer.appendChild(card);
+      card.scrollIntoView({ behavior: 'smooth' });
+      return;
+    }
+
+    if (data.type === 'FILE_MOVE_APPROVAL') {
+      const isConflict = !!data.hasConflicts;
+      const riskBadge = `<span style="background: rgba(255,165,0,0.2); color: #ffa500; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 11px;">Risk Score: ${data.riskScore || (isConflict ? 75 : 45)}/100</span>`;
+
+      let conflictHtml = '';
+      if (isConflict) {
+        conflictHtml = `
+          <div style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #f87171; padding: 8px 10px; border-radius: 6px; margin-top: 10px; font-size: 12px; line-height: 1.4;">
+            <strong>⚠️ Destination File Collision:</strong>
+            <p style="margin: 4px 0 0 0;">Destination file(s) already exist. Choose <strong>Overwrite</strong> to replace them or <strong>Cancel</strong> to abort.</p>
+          </div>
+        `;
+      }
+
+      let warningsHtml = '';
+      if (data.warnings && data.warnings.length > 0) {
+        warningsHtml = `
+          <div style="background: rgba(234, 179, 8, 0.15); border: 1px solid rgba(234, 179, 8, 0.4); color: #facc15; padding: 8px 10px; border-radius: 6px; margin-top: 10px; font-size: 12px; line-height: 1.4;">
+            <strong>⚠️ Warnings:</strong>
+            <ul style="margin: 4px 0 0 16px; padding: 0;">
+              ${data.warnings.map(w => `<li>${w}</li>`).join('')}
+            </ul>
+          </div>
+        `;
+      }
+
+      let filesHtml = '';
+      if (data.files && data.files.length > 0) {
+        filesHtml = `
+          <div style="margin-top: 8px; font-size: 12px;">
+            <strong>Files to move:</strong>
+            <ul style="margin: 4px 0 0 16px; padding: 0; color: var(--text-main);">
+              ${data.files.map(f => {
+                const isConflictFile = typeof f === 'object' && f.conflict;
+                const conflictBadge = isConflictFile ? ' <span style="color: #f87171; font-weight: bold;">(exists — will overwrite)</span>' : '';
+                return `<li><code>${typeof f === 'string' ? f : (f.from + ' ──► ' + f.to)}</code>${conflictBadge}</li>`;
+              }).join('')}
+            </ul>
+          </div>
+        `;
+      }
+
+      card.innerHTML = `
+        <div class="choice-card-header" style="color: #60a5fa;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><polyline points="12 11 12 17 14 15"/><line x1="12" y1="17" x2="16" y2="17"/></svg>
+          <span>${data.title}</span> ${riskBadge}
+        </div>
+        <p style="font-size: 12px; color: var(--text-main); margin-top: 8px;">${data.message}</p>
+        ${filesHtml}
+        ${conflictHtml}
+        ${warningsHtml}
+        <div class="choice-actions" style="margin-top: 12px;">
+          <button class="btn-reject" style="background: rgba(245,108,108,0.2); color: #f56c6c; border: 1px solid #f56c6c; padding: 6px 12px; border-radius: 4px; cursor: pointer;">${isConflict ? 'Cancel' : 'Deny Move'}</button>
+          <button class="btn-approve" style="background: ${isConflict ? '#dc2626' : '#3b82f6'}; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold;">${isConflict ? 'Overwrite' : 'Approve File Move'}</button>
+        </div>
+      `;
+
+      const approveBtn = card.querySelector('.btn-approve');
+      const rejectBtn = card.querySelector('.btn-reject');
+
+      approveBtn.addEventListener('click', async () => {
+        await sendHitlResponse('approve', isConflict ? 'overwrite' : '');
+        card.innerHTML = `<div class="choice-card-header" style="color: var(--success, #67c23a)">✔ File Move ${isConflict ? 'Overwrite ' : ''}Approved by Developer</div>`;
+      });
+
+      rejectBtn.addEventListener('click', async () => {
+        await sendHitlResponse('reject');
+        card.innerHTML = `<div class="choice-card-header" style="color: var(--danger, #f56c6c)">✖ File Move Cancelled by Developer</div>`;
       });
 
       widgetsContainer.appendChild(card);
